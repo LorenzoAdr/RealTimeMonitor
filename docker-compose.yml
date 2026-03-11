@@ -1,0 +1,12 @@
+services:
+  web-monitor:
+    build: ./web_monitor
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./varmon.conf:/app/varmon.conf:ro
+    environment:
+      - VARMON_CONFIG=/app/varmon.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

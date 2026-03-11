@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VarMonitor</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>VarMonitor</h1>
+            <span id="connectionStatus" class="status disconnected">Desconectado</span>
+            <span id="varCount" class="var-count"></span>
+        </div>
+        <div class="header-right">
+            <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
+            <label>Poll (ms):
+                <input type="number" id="intervalInput" value="200" min="50" max="5000" step="50">
+            </label>
+        </div>
+    </header>
+
+    <div id="helpOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal">
+            <div class="help-modal-header">
+                <h2>Guia de uso — VarMonitor</h2>
+                <button id="helpCloseBtn" class="help-close">&times;</button>
+            </div>
+            <div class="help-modal-body">
+                <h3>Que es VarMonitor?</h3>
+                <p>Herramienta de monitorizacion en tiempo real de variables de una aplicacion C++. Permite visualizar valores, plotear graficos, configurar alarmas, generar funciones y grabar datos.</p>
+
+                <h3>Columna 1 — Variables disponibles</h3>
+                <ul>
+                    <li><b>Arbol de variables</b>: lista jerarquica de todas las variables publicadas por la aplicacion. Se actualiza automaticamente cada 30s o con el boton <b>&#8635;</b>.</li>
+                    <li><b>Filtro</b>: escribe para buscar variables por nombre.</li>
+                    <li><b>&#9660; / &#9654;</b>: colapsar/expandir todos los grupos.</li>
+                    <li><b>Sel. todo / Ninguno</b>: seleccionar o deseleccionar todas las variables visibles.</li>
+                    <li><b>Monitorizar &rarr;</b>: pasar las variables seleccionadas a la columna de monitorizacion.</li>
+                </ul>
+
+                <h3>Columna 2 — Monitorizando</h3>
+                <ul>
+                    <li><b>Valor en directo</b>: cada variable muestra su valor actual actualizado en tiempo real.</li>
+                    <li><b>Doble click en el valor</b>: editar y enviar un nuevo valor a la aplicacion (Enter confirma, Escape cancela).</li>
+                    <li><b>Dropdown (—, G1, G2...)</b>: asignar la variable a un grafico. Selecciona <b>+ Nuevo</b> para crear un grafico nuevo.</li>
+                    <li><b>Click en el nombre</b>: desplegar panel de detalles con min/max, alarmas y generador de funciones.</li>
+                    <li><b>&#9679; REC</b>: grabar valores de las variables monitorizadas a un archivo TSV. Al parar se descarga automaticamente. Maximo 5 minutos por archivo.</li>
+                    <li><b>Quitar sel.</b>: eliminar variables asignadas a graficos de la lista de monitorizacion.</li>
+                    <li><b>&#9888; Clear</b>: eliminar todas las alarmas activas de golpe.</li>
+                    <li><b>&#128190; / &#128194;</b>: exportar/importar la configuracion completa (variables, graficos, alarmas) a un archivo JSON.</li>
+                    <li><b>Reset</b>: limpiar toda la configuracion.</li>
+                </ul>
+
+                <h3>Panel de detalles (al hacer click en nombre)</h3>
+                <ul>
+                    <li><b>Min / Max</b>: estadisticas del historial reciente.</li>
+                    <li><b>+ Alarma</b>: configurar umbrales Lo/Hi. Si el valor sale del rango, se activa una alarma visual y se genera un TSV automatico con los ultimos 10s de datos.</li>
+                    <li><b>Generador</b>: selecciona un tipo de funcion (seno, escalon, rampa, cuadrada, triangular, chirp, pulso, ruido), configura los parametros y pulsa <b>&#9654;</b> para inyectar valores calculados a la variable. <b>&#9632; Stop</b> para detener.</li>
+                </ul>
+
+                <h3>Columna 3 — Graficos</h3>
+                <ul>
+                    <li>Los graficos se crean al asignar variables desde el dropdown de la columna 2.</li>
+                    <li>Si un grafico se queda sin variables asignadas, se elimina automaticamente.</li>
+                    <li><b>&times;</b> en la cabecera del grafico: eliminar ese grafico.</li>
+                    <li><b>&#9654; Play / &#9646;&#9646; Pausa</b>: pausar o reanudar la actualizacion de todos los graficos.</li>
+                    <li><b>&#128247; PNG</b>: capturar todos los graficos visibles como una sola imagen PNG.</li>
+                    <li><b>Ventana</b>: seleccionar el rango temporal visible (10s a 10min o todo el historial).</li>
+                    <li><b>Crosshair</b>: al pasar el raton, se muestra el valor de todas las trazas en ese instante.</li>
+                    <li><b>Zoom</b>: arrastra un rectangulo sobre el grafico para hacer zoom. Usa la rueda del raton para zoom rapido.</li>
+                    <li><b>Pan</b>: pulsa el boton de pan en la barra de herramientas y arrastra para desplazar la vista.</li>
+                    <li><b>Autoscale / Reset</b>: pulsa el boton de reset en la barra para volver a la vista completa.</li>
+                    <li><b>&#9888; Icono de alarma</b>: las variables con alarmas configuradas muestran un &#9888; junto al nombre en la columna 2, visible incluso colapsado.</li>
+                </ul>
+
+                <h3>Notificaciones de alarmas</h3>
+                <ul>
+                    <li>Si el navegador no esta en primer plano cuando salta una alarma, se envia una <b>notificacion del sistema</b>.</li>
+                    <li>Haz click en la notificacion para volver al monitor. Se requiere aceptar el permiso de notificaciones la primera vez.</li>
+                </ul>
+
+                <h3>Variables computadas</h3>
+                <ul>
+                    <li><b>fx+</b> en la cabecera de Columna 2: crear una variable virtual calculada a partir de otras.</li>
+                    <li>Escribe un nombre y una expresion JS (ej: <code>sensors_temperature - control_pid_kp</code>). Los puntos de los nombres se reemplazan por <code>_</code>.</li>
+                    <li>Se evaluan en tiempo real y se pueden plotear como cualquier variable.</li>
+                </ul>
+
+                <h3>Cabecera</h3>
+                <ul>
+                    <li><b>Poll (ms)</b>: intervalo de actualizacion de datos. Valores bajos = mas fluidez, mas carga.</li>
+                    <li><b>Estado de conexion</b>: indicador verde (conectado) o rojo (desconectado) del WebSocket.</li>
+                </ul>
+
+                <h3>Atajos de teclado</h3>
+                <ul>
+                    <li><b>Espacio</b>: pausar / reanudar graficos</li>
+                    <li><b>R</b>: iniciar / detener grabacion TSV</li>
+                    <li><b>S</b>: capturar screenshot de graficos</li>
+                    <li><b>H</b> o <b>?</b>: abrir / cerrar esta ayuda</li>
+                    <li><b>Escape</b>: cerrar ayuda o descartar banner de alarma</li>
+                </ul>
+
+                <h3>Arquitectura y comunicacion</h3>
+                <p>El sistema tiene tres piezas:</p>
+                <ol>
+                    <li><b>Tu aplicacion C++</b> con <code>libvarmonitor</code> integrada: publica las variables y escucha conexiones TCP.</li>
+                    <li><b>Backend Python (FastAPI)</b>: se conecta por TCP a la app C++ y sirve esta pagina web.</li>
+                    <li><b>Este navegador</b>: se conecta al backend Python via WebSocket para recibir datos en tiempo real.</li>
+                </ol>
+                <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
+  App C++          Backend Python         Navegador
+ (tcp_port)  &lt;---TCP---&gt;  (web_port)  &lt;---WebSocket---&gt;  UI
+                </pre>
+
+                <h3>Configuracion: varmon.conf</h3>
+                <p>Toda la configuracion de puertos e IPs esta en un unico archivo de texto plano <code>varmon.conf</code>:</p>
+                <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
+# VarMonitor configuration
+tcp_port = 9100    # Puerto TCP (C++ escucha, Python conecta)
+web_port = 8080    # Puerto de esta web (solo Python)
+host = localhost    # IP de la app C++ (cambiar para acceso remoto)
+                </pre>
+                <ul>
+                    <li><b>tcp_port</b>: puerto TCP donde la app C++ escucha. El backend Python se conecta a este puerto.</li>
+                    <li><b>web_port</b>: puerto donde se sirve esta pagina web.</li>
+                    <li><b>host</b>: IP o nombre del equipo donde corre la app C++. Usa <code>localhost</code> si todo esta en la misma maquina, o la IP del equipo remoto (ej. <code>192.168.4.1</code>) para acceso por red.</li>
+                </ul>
+
+                <h3>Acceso remoto</h3>
+                <ul>
+                    <li>Para acceder desde otro PC en la misma red, abre <code>http://&lt;IP-del-servidor&gt;:8080</code> en el navegador.</li>
+                    <li>Si la app C++ esta en otra maquina, edita <code>host</code> en <code>varmon.conf</code> con la IP correspondiente.</li>
+                    <li>Solo se transmiten por red las variables que estan siendo monitorizadas (no todas).</li>
+                </ul>
+
+                <h3>Cambiar la ruta de varmon.conf</h3>
+                <ul>
+                    <li>Variable de entorno: <code>VARMON_CONFIG=/ruta/al/archivo.conf</code></li>
+                    <li>En C++: <code>varmon::set_config_path("/ruta/...")</code> antes de <code>start()</code></li>
+                    <li>Por defecto busca <code>./varmon.conf</code> en el directorio de trabajo.</li>
+                    <li>Si no existe el archivo, se usan los valores por defecto (9100, 8080, localhost).</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="alarmBanner" class="alarm-banner" style="display:none">
+        <div class="alarm-banner-content">
+            <span class="alarm-banner-icon">&#9888;</span>
+            <span id="alarmBannerText" class="alarm-banner-text"></span>
+            <button id="alarmBannerDismiss" class="alarm-banner-dismiss">&times; Cerrar</button>
+        </div>
+    </div>
+
+    <main>
+        <section class="col col-browser">
+            <div class="col-header">
+                <h2>Variables disponibles</h2>
+                <button id="refreshNames" class="btn-small" title="Refrescar lista de variables">&#8635;</button>
+            </div>
+            <div class="search-box">
+                <input type="text" id="varFilter" placeholder="Filtrar variables...">
+            </div>
+            <div class="select-actions">
+                <button id="collapseAll" class="btn-small" title="Colapsar todo">&#9660;</button>
+                <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
+                <button id="selectAll" class="btn-small">Sel. todo</button>
+                <button id="selectNone" class="btn-small">Ninguno</button>
+                <button id="addToMonitor" class="btn-primary">Monitorizar &rarr;</button>
+            </div>
+            <div id="varBrowserList" class="var-list"></div>
+        </section>
+
+        <section class="col col-monitor">
+            <div class="col-header">
+                <h2>Monitorizando</h2>
+                <div class="col-header-actions">
+                    <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
+                    <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
+                    <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
+                    <button id="removeSelected" class="btn-small btn-danger">Quitar sel.</button>
+                    <button id="clearAlarmsBtn" class="btn-small btn-danger" title="Quitar todas las alarmas">&#9888; Clear</button>
+                    <button id="exportConfigBtn" class="btn-small" title="Guardar configuración a archivo">&#128190;</button>
+                    <button id="importConfigBtn" class="btn-small" title="Cargar configuración desde archivo">&#128194;</button>
+                    <button id="resetConfigBtn" class="btn-small" title="Limpiar toda la configuración">Reset</button>
+                </div>
+            </div>
+            <div id="monitorList" class="monitor-list"></div>
+        </section>
+
+        <section class="col col-plot">
+            <div class="col-header">
+                <h2>Gráficos</h2>
+                <div class="plot-controls">
+                    <button id="pauseBtn" class="btn-small" title="Pausar/reanudar gráficos">&#9654; Play</button>
+                    <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
+                    <label>Ventana:
+                        <select id="timeWindow">
+                            <option value="10">10s</option>
+                            <option value="30" selected>30s</option>
+                            <option value="60">1 min</option>
+                            <option value="120">2 min</option>
+                            <option value="300">5 min</option>
+                            <option value="600">10 min</option>
+                            <option value="0">Todo</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <div id="plotArea" class="plot-area">
+                <div id="plotEmpty" class="plot-empty">Selecciona variables y asígnalas a un gráfico</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
