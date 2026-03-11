@@ -21,6 +21,10 @@
     let graphList = [];
     let plotInstances = {};
 
+    let arrayElemAssignment = {};
+    let arrayElemHistory = {};
+    const ARRAY_HIST_MAX = 2000;
+
     let historyTimer = null;
     const HISTORY_INTERVAL_MS = 600;
     let plotRafPending = false;
@@ -120,7 +124,14 @@
     function startGenerator(name, type, params) {
         stopGenerator(name);
         const startTime = Date.now();
-        const vd = varsByName[name];
+        const arrElem = isArrayElem(name);
+        let arrName, arrIdx;
+        if (arrElem) {
+            const br = name.lastIndexOf("[");
+            arrName = name.substring(0, br);
+            arrIdx = parseInt(name.substring(br + 1));
+        }
+        const vd = arrElem ? null : varsByName[name];
         const varType = vd ? (vd.type === "int32" ? "int32" : vd.type === "bool" ? "bool" : "double") : "double";
 
         const intervalId = setInterval(() => {
@@ -128,12 +139,21 @@
             const t = (Date.now() - startTime) / 1000;
             const val = computeGenValue(type, params, t);
 
-            ws.send(JSON.stringify({
-                action: "set_var",
-                name: name,
-                value: val,
-                var_type: varType,
-            }));
+            if (arrElem) {
+                ws.send(JSON.stringify({
+                    action: "set_array_element",
+                    name: arrName,
+                    index: arrIdx,
+                    value: val,
+                }));
+            } else {
+                ws.send(JSON.stringify({
+                    action: "set_var",
+                    name: name,
+                    value: val,
+                    var_type: varType,
+                }));
+            }
 
             const isDone = (type === "step" && t > params.delay + 0.5) ||
                            (type === "ramp" && t > params.dur + 0.2) ||
@@ -240,6 +260,7 @@
                 alarms: alarms,
                 computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
                 varFormat: varFormat,
+                arrayElemAssignment: arrayElemAssignment,
             }));
         } catch (e) { /* quota exceeded or private mode */ }
     }
@@ -267,6 +288,7 @@
                 }
             }
             if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = cfg.varFormat;
+            if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
         } catch (e) { /* corrupt data */ }
     }
 
@@ -281,6 +303,8 @@
         computedVars = [];
         computedHistories = {};
         varFormat = {};
+        arrayElemAssignment = {};
+        arrayElemHistory = {};
         sendMonitored();
         renderBrowserList();
         rebuildPlotArea();
@@ -364,6 +388,7 @@
                         }
                     }
                     if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = cfg.varFormat;
+                    if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
                     saveConfig();
                     sendMonitored();
                     sendInterval();
@@ -454,7 +479,16 @@
 
     refreshNamesBtn.addEventListener("click", sendRefreshNames);
 
+    function isArrayVar(name) {
+        const vd = varsByName[name];
+        return vd && vd.type === "array";
+    }
+
     function formatValue(v, type, name) {
+        if (type === "array") {
+            if (Array.isArray(v)) return "[" + v.length + "]";
+            return "[?]";
+        }
         if (type === "bool") return v ? "true" : "false";
         if (typeof v !== "number") return String(v);
         const f = name ? varFormat[name] : undefined;
@@ -467,6 +501,17 @@
 
     // --- History polling ---
 
+    function isArrayElem(name) { return name.includes("[") && name.endsWith("]"); }
+
+    function getArrayElemValue(eName) {
+        const br = eName.lastIndexOf("[");
+        const arrName = eName.substring(0, br);
+        const idx = parseInt(eName.substring(br + 1));
+        const vd = varsByName[arrName];
+        if (!vd || !Array.isArray(vd.value) || idx >= vd.value.length) return undefined;
+        return vd.value[idx];
+    }
+
     function startHistoryPolling() {
         stopHistoryPolling();
         historyTimer = setInterval(() => {
@@ -474,11 +519,11 @@
             const names = new Set();
             for (const gid of graphList) {
                 getVarsForGraph(gid).forEach(name => {
-                    if (!isComputed(name)) names.add(name);
+                    if (!isComputed(name) && !isArrayVar(name) && !isArrayElem(name)) names.add(name);
                 });
             }
             for (const name of expandedStats) {
-                if (!isComputed(name)) names.add(name);
+                if (!isComputed(name) && !isArrayVar(name)) names.add(name);
             }
             if (names.size > 0) {
                 ws.send(JSON.stringify({ action: "get_histories", names: Array.from(names) }));
@@ -652,6 +697,14 @@
             el.appendChild(cb);
             el.appendChild(label);
 
+            if (varsByName[name] && varsByName[name].type === "array") {
+                const arrBdg = document.createElement("span");
+                arrBdg.className = "array-badge-browser";
+                const vv = varsByName[name].value;
+                arrBdg.textContent = Array.isArray(vv) ? "[" + vv.length + "]" : "[ ]";
+                el.appendChild(arrBdg);
+            }
+
             if (!inMonitor) {
                 el.addEventListener("click", (e) => {
                     if (e.target === cb) {
@@ -759,7 +812,9 @@
         for (const name of monitoredNames) {
             if (existingMap[name]) {
                 const sel = existingMap[name].querySelector(".graph-select");
-                if (sel) {
+                if (sel && isArrayVar(name)) {
+                    sel.remove();
+                } else if (sel) {
                     sel.innerHTML = optionsHtml;
                     const assigned = varGraphAssignment[name] || "";
                     if (assigned && graphList.includes(assigned)) {
@@ -783,12 +838,15 @@
             el.className = "monitor-item";
             el.dataset.name = name;
 
-            const sel = document.createElement("select");
-            sel.className = "graph-select";
-            sel.innerHTML = optionsHtml;
-            sel.value = varGraphAssignment[name] || "";
-            updateSelectStyle(sel);
-            attachGraphSelectHandler(sel, name);
+            let sel = null;
+            if (!isArrayVar(name)) {
+                sel = document.createElement("select");
+                sel.className = "graph-select";
+                sel.innerHTML = optionsHtml;
+                sel.value = varGraphAssignment[name] || "";
+                updateSelectStyle(sel);
+                attachGraphSelectHandler(sel, name);
+            }
 
             const nameEl = document.createElement("span");
             nameEl.className = "mon-name";
@@ -799,13 +857,23 @@
                 updateStatsPanel(wrap, name);
             });
 
-            const valEl = document.createElement("span");
-            valEl.className = "mon-value";
-            valEl.textContent = "--";
-            valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
+            let valEl = null;
+            if (!isArrayVar(name)) {
+                valEl = document.createElement("span");
+                valEl.className = "mon-value";
+                valEl.textContent = "--";
+                valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
+            }
 
-            el.appendChild(sel);
-            if (isComputed(name)) {
+            if (sel) el.appendChild(sel);
+            if (isArrayVar(name)) {
+                const badge = document.createElement("span");
+                badge.className = "array-badge";
+                const vd = varsByName[name];
+                badge.textContent = vd && Array.isArray(vd.value) ? "[" + vd.value.length + "]" : "[ ]";
+                badge.title = "Variable tipo array";
+                el.appendChild(badge);
+            } else if (isComputed(name)) {
                 const badge = document.createElement("span");
                 badge.className = "comp-badge";
                 badge.textContent = "fx";
@@ -820,7 +888,7 @@
 
             el.appendChild(nameEl);
             el.appendChild(alarmIcon);
-            el.appendChild(valEl);
+            if (valEl) el.appendChild(valEl);
 
             const removeBtn = document.createElement("button");
             removeBtn.className = "btn-mon-remove";
@@ -834,6 +902,14 @@
                     delete varGraphAssignment[name];
                     delete historyCache[name];
                     expandedStats.delete(name);
+                    if (isArrayVar(name)) {
+                        for (const key of Object.keys(arrayElemAssignment)) {
+                            if (key.startsWith(name + "[")) {
+                                delete arrayElemAssignment[key];
+                                delete arrayElemHistory[key];
+                            }
+                        }
+                    }
                 }
                 saveConfig();
                 sendMonitored();
@@ -851,6 +927,379 @@
         updateMonitorItemStyles();
     }
 
+    function arrayElemName(arrName, idx) { return arrName + "[" + idx + "]"; }
+
+    function updateArrayStatsPanel(panel, name) {
+        const vd = varsByName[name];
+        const arr = vd && Array.isArray(vd.value) ? vd.value : [];
+
+        let statsRow = panel.querySelector(".stats-row");
+        if (!statsRow) {
+            statsRow = document.createElement("div");
+            statsRow.className = "stats-row";
+            panel.appendChild(statsRow);
+        }
+
+        if (arr.length === 0) {
+            statsRow.innerHTML = '<span class="stats-empty">Array vacio</span>';
+        } else {
+            let min = Infinity, max = -Infinity;
+            for (let i = 0; i < arr.length; i++) {
+                if (arr[i] < min) min = arr[i];
+                if (arr[i] > max) max = arr[i];
+            }
+            statsRow.innerHTML =
+                `<span class="stat-item">Len <b>${arr.length}</b></span>` +
+                `<span class="stat-item">Min <b>${min.toFixed(3)}</b></span>` +
+                `<span class="stat-item">Max <b>${max.toFixed(3)}</b></span>`;
+        }
+
+        let tableWrap = panel.querySelector(".array-table-wrap");
+        if (!tableWrap) {
+            tableWrap = document.createElement("div");
+            tableWrap.className = "array-table-wrap";
+            panel.appendChild(tableWrap);
+        }
+        updateArrayTable(tableWrap, name, arr);
+    }
+
+    function updateArrayTable(wrap, name, arr) {
+        const editing = wrap.querySelector(".arr-cell-edit");
+        const editingIdx = editing ? parseInt(editing.dataset.idx) : -1;
+
+        let table = wrap.querySelector(".array-table");
+        if (!table) {
+            table = document.createElement("div");
+            table.className = "array-table";
+            wrap.appendChild(table);
+        }
+
+        const optionsHtml = buildGraphSelectOptions();
+        let rows = table.querySelectorAll(".arr-row");
+        const needRebuild = rows.length !== arr.length;
+
+        if (needRebuild) {
+            table.innerHTML = "";
+            table._prevOptions = optionsHtml;
+            for (let i = 0; i < arr.length; i++) {
+                const eName = arrayElemName(name, i);
+                const row = document.createElement("div");
+                row.className = "arr-row";
+                row.dataset.idx = i;
+
+                const sel = document.createElement("select");
+                sel.className = "arr-graph-select";
+                sel.innerHTML = optionsHtml;
+                sel.value = arrayElemAssignment[eName] || "";
+                updateSelectStyle(sel);
+                sel.addEventListener("change", () => {
+                    if (sel.value === "__new__") {
+                        addGraph();
+                        const newGid = graphList[graphList.length - 1];
+                        arrayElemAssignment[eName] = newGid;
+                        rebuildMonitorList();
+                    } else {
+                        arrayElemAssignment[eName] = sel.value;
+                        if (!sel.value) {
+                            delete arrayElemAssignment[eName];
+                            delete arrayElemHistory[eName];
+                        }
+                        pruneEmptyGraphs();
+                    }
+                    updateSelectStyle(sel);
+                    saveConfig();
+                    schedulePlotRender();
+                });
+                sel.addEventListener("click", (e) => e.stopPropagation());
+
+                const idx = document.createElement("span");
+                idx.className = "arr-idx-label";
+                idx.textContent = "[" + i + "]";
+
+                const val = document.createElement("span");
+                val.className = "arr-val";
+                val.textContent = arr[i].toFixed(4);
+                val.title = "Doble-clic para editar";
+                val.addEventListener("dblclick", (e) => {
+                    e.stopPropagation();
+                    startArrayCellEdit(wrap, name, i, val);
+                });
+
+                const alarmBtn = document.createElement("span");
+                alarmBtn.className = "arr-alarm-btn" + (alarms[eName] ? " arr-alarm-active" : "");
+                alarmBtn.textContent = "\u26A0";
+                alarmBtn.title = alarms[eName]
+                    ? `Alarma: Lo:${alarms[eName].lo ?? "-"} Hi:${alarms[eName].hi ?? "-"} (clic para quitar)`
+                    : "Configurar alarma";
+                alarmBtn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    if (alarms[eName]) {
+                        delete alarms[eName];
+                        delete prevAlarmState[eName];
+                        alarmBtn.className = "arr-alarm-btn";
+                        alarmBtn.title = "Configurar alarma";
+                    } else {
+                        showArrayElemAlarmForm(row, eName, alarmBtn);
+                    }
+                    saveConfig();
+                    checkAlarms();
+                });
+
+                const genBtn = document.createElement("span");
+                genBtn.className = "arr-gen-btn" + (activeGenerators[eName] ? " arr-gen-active" : "");
+                genBtn.textContent = "fx";
+                genBtn.title = activeGenerators[eName] ? "Generador activo (clic para parar)" : "Generador de señal";
+                genBtn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    if (activeGenerators[eName]) {
+                        stopGenerator(eName);
+                        genBtn.className = "arr-gen-btn";
+                        genBtn.title = "Generador de señal";
+                    } else {
+                        showArrayElemGenForm(row, eName, genBtn);
+                    }
+                });
+
+                row.appendChild(sel);
+                row.appendChild(idx);
+                row.appendChild(val);
+                row.appendChild(alarmBtn);
+                row.appendChild(genBtn);
+                table.appendChild(row);
+            }
+        } else {
+            const optionsChanged = table._prevOptions !== optionsHtml;
+            if (optionsChanged) table._prevOptions = optionsHtml;
+
+            rows.forEach(row => {
+                const i = parseInt(row.dataset.idx);
+                if (i === editingIdx) return;
+                const valEl = row.querySelector(".arr-val");
+                if (valEl && i < arr.length) valEl.textContent = arr[i].toFixed(4);
+                if (optionsChanged) {
+                    const sel = row.querySelector(".arr-graph-select");
+                    if (sel) {
+                        const eName = arrayElemName(name, i);
+                        sel.innerHTML = optionsHtml;
+                        sel.value = arrayElemAssignment[eName] || "";
+                        updateSelectStyle(sel);
+                    }
+                }
+                const eName = arrayElemName(name, i);
+                const ab = row.querySelector(".arr-alarm-btn");
+                if (ab) {
+                    const hasAlarm = !!alarms[eName];
+                    ab.className = "arr-alarm-btn" + (hasAlarm ? " arr-alarm-active" : "");
+                    if (activeAlarms.has(eName)) ab.classList.add("arr-alarm-firing");
+                }
+                const gb = row.querySelector(".arr-gen-btn");
+                if (gb) {
+                    gb.className = "arr-gen-btn" + (activeGenerators[eName] ? " arr-gen-active" : "");
+                }
+            });
+        }
+    }
+
+    function startArrayCellEdit(wrap, name, index, cell) {
+        if (cell.querySelector(".arr-cell-edit")) return;
+        const oldText = cell.textContent;
+        cell.textContent = "";
+
+        const input = document.createElement("input");
+        input.className = "arr-cell-edit";
+        input.type = "text";
+        input.value = oldText;
+        input.dataset.idx = index;
+
+        function commit() {
+            const val = parseFloat(input.value);
+            if (!isNaN(val) && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    action: "set_array_element",
+                    name: name,
+                    index: index,
+                    value: val,
+                }));
+            }
+            cell.textContent = isNaN(val) ? oldText : val.toFixed(3);
+        }
+
+        function cancel() {
+            cell.textContent = oldText;
+        }
+
+        input.addEventListener("keydown", (e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") commit();
+            else if (e.key === "Escape") cancel();
+        });
+        input.addEventListener("blur", commit);
+        input.addEventListener("click", (e) => e.stopPropagation());
+
+        cell.appendChild(input);
+        input.focus();
+        input.select();
+    }
+
+    function showArrayElemAlarmForm(row, eName, alarmBtn) {
+        if (row.querySelector(".arr-alarm-form")) return;
+        const form = document.createElement("span");
+        form.className = "arr-alarm-form";
+
+        const loIn = document.createElement("input");
+        loIn.type = "text";
+        loIn.placeholder = "Lo";
+        loIn.className = "arr-alarm-input";
+        const hiIn = document.createElement("input");
+        hiIn.type = "text";
+        hiIn.placeholder = "Hi";
+        hiIn.className = "arr-alarm-input";
+
+        const ok = document.createElement("button");
+        ok.className = "arr-alarm-ok";
+        ok.textContent = "\u2713";
+        ok.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const lo = loIn.value.trim() ? parseFloat(loIn.value) : null;
+            const hi = hiIn.value.trim() ? parseFloat(hiIn.value) : null;
+            if (lo === null && hi === null) {
+                delete alarms[eName];
+            } else {
+                alarms[eName] = { lo, hi };
+            }
+            form.remove();
+            alarmBtn.className = "arr-alarm-btn" + (alarms[eName] ? " arr-alarm-active" : "");
+            alarmBtn.title = alarms[eName]
+                ? `Alarma: Lo:${alarms[eName].lo ?? "-"} Hi:${alarms[eName].hi ?? "-"} (clic para quitar)`
+                : "Configurar alarma";
+            saveConfig();
+            checkAlarms();
+        });
+
+        const cancel = document.createElement("button");
+        cancel.className = "arr-alarm-cancel";
+        cancel.textContent = "\u00D7";
+        cancel.addEventListener("click", (e) => { e.stopPropagation(); form.remove(); });
+
+        [loIn, hiIn, ok, cancel].forEach(el => el.addEventListener("click", (e) => e.stopPropagation()));
+        loIn.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") ok.click(); if (e.key === "Escape") cancel.click(); });
+        hiIn.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") ok.click(); if (e.key === "Escape") cancel.click(); });
+
+        form.appendChild(loIn);
+        form.appendChild(hiIn);
+        form.appendChild(ok);
+        form.appendChild(cancel);
+        row.appendChild(form);
+        loIn.focus();
+    }
+
+    function showArrayElemGenForm(row, eName, genBtn) {
+        const next = row.nextSibling;
+        if (next && next.classList && next.classList.contains("arr-gen-form")) return;
+        const form = document.createElement("div");
+        form.className = "arr-gen-form";
+
+        const sel = document.createElement("select");
+        sel.className = "arr-gen-type-select";
+        const optNone = document.createElement("option");
+        optNone.value = "";
+        optNone.textContent = "Tipo...";
+        sel.appendChild(optNone);
+        for (const [key, def] of Object.entries(GEN_TYPES)) {
+            const o = document.createElement("option");
+            o.value = key;
+            o.textContent = def.label;
+            sel.appendChild(o);
+        }
+
+        const paramsDiv = document.createElement("div");
+        paramsDiv.className = "arr-gen-params";
+
+        sel.addEventListener("change", () => {
+            paramsDiv.innerHTML = "";
+            const def = GEN_TYPES[sel.value];
+            if (!def) return;
+            for (const f of def.fields) {
+                const wrap = document.createElement("span");
+                wrap.className = "arr-gen-field";
+                const lbl = document.createElement("span");
+                lbl.className = "arr-gen-field-label";
+                lbl.textContent = f.l;
+                const inp = document.createElement("input");
+                inp.type = "text";
+                inp.className = "arr-gen-input";
+                inp.value = f.d;
+                inp.dataset.key = f.k;
+                inp.addEventListener("click", (e) => e.stopPropagation());
+                inp.addEventListener("keydown", (e) => e.stopPropagation());
+                wrap.appendChild(lbl);
+                wrap.appendChild(inp);
+                paramsDiv.appendChild(wrap);
+            }
+        });
+        sel.addEventListener("click", (e) => e.stopPropagation());
+
+        const okBtn = document.createElement("button");
+        okBtn.className = "arr-alarm-ok";
+        okBtn.textContent = "\u25B6";
+        okBtn.title = "Iniciar generador";
+        okBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const type = sel.value;
+            if (!type) return;
+            const params = {};
+            paramsDiv.querySelectorAll(".arr-gen-input").forEach(inp => {
+                params[inp.dataset.key] = parseFloat(inp.value) || 0;
+            });
+            startGenerator(eName, type, params);
+            genBtn.className = "arr-gen-btn arr-gen-active";
+            genBtn.title = "Generador activo (clic para parar)";
+            form.remove();
+        });
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.className = "arr-alarm-cancel";
+        cancelBtn.textContent = "\u00D7";
+        cancelBtn.addEventListener("click", (e) => { e.stopPropagation(); form.remove(); });
+
+        form.addEventListener("click", (e) => e.stopPropagation());
+
+        const topRow = document.createElement("div");
+        topRow.className = "arr-gen-top";
+        topRow.appendChild(sel);
+        topRow.appendChild(okBtn);
+        topRow.appendChild(cancelBtn);
+        form.appendChild(topRow);
+        form.appendChild(paramsDiv);
+        row.parentNode.insertBefore(form, row.nextSibling);
+    }
+
+    function trackArrayElementHistories() {
+        let tracked = false;
+        for (const name of monitoredNames) {
+            if (!isArrayVar(name)) continue;
+            const vd = varsByName[name];
+            if (!vd || !Array.isArray(vd.value)) continue;
+            const arr = vd.value;
+            const now = vd.timestamp || (Date.now() / 1000);
+            for (let i = 0; i < arr.length; i++) {
+                const eName = arrayElemName(name, i);
+                if (!arrayElemAssignment[eName]) continue;
+                tracked = true;
+                if (!arrayElemHistory[eName]) arrayElemHistory[eName] = { timestamps: [], values: [] };
+                const h = arrayElemHistory[eName];
+                h.timestamps.push(now);
+                h.values.push(arr[i]);
+                if (h.timestamps.length > ARRAY_HIST_MAX) {
+                    const trim = Math.floor(ARRAY_HIST_MAX * 0.75);
+                    h.timestamps = h.timestamps.slice(-trim);
+                    h.values = h.values.slice(-trim);
+                }
+            }
+        }
+        return tracked;
+    }
+
     function updateStatsPanel(wrap, name) {
         let panel = wrap.querySelector(".stats-panel");
         if (!expandedStats.has(name)) {
@@ -861,6 +1310,11 @@
             panel = document.createElement("div");
             panel.className = "stats-panel";
             wrap.appendChild(panel);
+        }
+
+        if (isArrayVar(name)) {
+            updateArrayStatsPanel(panel, name);
+            return;
         }
 
         let exprRow = panel.querySelector(".expr-row");
@@ -1207,38 +1661,49 @@
         }
     }
 
+    function checkAlarmEntry(name, value, newActive, triggered) {
+        const a = alarms[name];
+        if (!a || typeof value !== "number") return;
+        let alarming = false;
+        let reason = "";
+        if (a.hi !== null && value > a.hi) {
+            alarming = true;
+            reason = `${name} = ${value.toFixed(4)} > Hi:${a.hi}`;
+        }
+        if (a.lo !== null && value < a.lo) {
+            alarming = true;
+            reason = `${name} = ${value.toFixed(4)} < Lo:${a.lo}`;
+        }
+        if (alarming) {
+            newActive.add(name);
+            if (!(prevAlarmState[name] || false)) {
+                triggered.push({ name, reason, value });
+            }
+        }
+    }
+
     function checkAlarms() {
         const newActive = new Set();
         const triggered = [];
 
         for (const name of monitoredNames) {
-            const a = alarms[name];
-            if (!a) continue;
             const vd = varsByName[name];
             if (!vd || typeof vd.value !== "number") continue;
+            checkAlarmEntry(name, vd.value, newActive, triggered);
+        }
 
-            let alarming = false;
-            let reason = "";
-            if (a.hi !== null && vd.value > a.hi) {
-                alarming = true;
-                reason = `${name} = ${vd.value.toFixed(4)} > Hi:${a.hi}`;
-            }
-            if (a.lo !== null && vd.value < a.lo) {
-                alarming = true;
-                reason = `${name} = ${vd.value.toFixed(4)} < Lo:${a.lo}`;
-            }
-
-            if (alarming) {
-                newActive.add(name);
-                const wasPrev = prevAlarmState[name] || false;
-                if (!wasPrev) {
-                    triggered.push({ name, reason, value: vd.value });
-                }
-            }
+        for (const eName of Object.keys(alarms)) {
+            if (!isArrayElem(eName)) continue;
+            const val = getArrayElemValue(eName);
+            if (val === undefined) continue;
+            checkAlarmEntry(eName, val, newActive, triggered);
         }
 
         for (const name of monitoredNames) {
             prevAlarmState[name] = newActive.has(name);
+        }
+        for (const eName of Object.keys(alarms)) {
+            if (isArrayElem(eName)) prevAlarmState[eName] = newActive.has(eName);
         }
 
         activeAlarms = newActive;
@@ -1362,7 +1827,7 @@
         if (editingName === name) return;
         const vd = varsByName[name];
         if (!vd) return;
-        if (vd.type === "string") return;
+        if (vd.type === "string" || vd.type === "array") return;
 
         editingName = name;
         const valEl = itemEl.querySelector(".mon-value");
@@ -1438,7 +1903,12 @@
             if (el.dataset.name === editingName) continue;
             const vd = varsByName[el.dataset.name];
             if (vd) {
-                el.querySelector(".mon-value").textContent = formatValue(vd.value, vd.type, el.dataset.name);
+                const monVal = el.querySelector(".mon-value");
+                if (monVal) monVal.textContent = formatValue(vd.value, vd.type, el.dataset.name);
+                const arrBadge = el.querySelector(".array-badge");
+                if (arrBadge && Array.isArray(vd.value)) {
+                    arrBadge.textContent = "[" + vd.value.length + "]";
+                }
             }
         }
         checkAlarms();
@@ -1490,7 +1960,11 @@
         for (const name of monitoredNames) {
             varGraphAssignment[name] = "";
         }
-        monitorListEl.querySelectorAll(".graph-select").forEach(sel => {
+        for (const key of Object.keys(arrayElemAssignment)) {
+            delete arrayElemAssignment[key];
+            delete arrayElemHistory[key];
+        }
+        monitorListEl.querySelectorAll(".graph-select, .arr-graph-select").forEach(sel => {
             sel.selectedIndex = 0;
             updateSelectStyle(sel);
         });
@@ -1758,6 +2232,9 @@
         for (const name of monitoredNames) {
             if (varGraphAssignment[name] === gid) names.push(name);
         }
+        for (const [eName, g] of Object.entries(arrayElemAssignment)) {
+            if (g === gid) names.push(eName);
+        }
         return names;
     }
 
@@ -1906,7 +2383,8 @@
             const traces = [];
 
             varsInGraph.forEach((name, idx) => {
-                const hist = historyCache[name];
+                const isArrElem = name.includes("[") && name.endsWith("]");
+                const hist = isArrElem ? arrayElemHistory[name] : historyCache[name];
                 if (!hist || !hist.timestamps || hist.timestamps.length === 0) return;
 
                 let xs = hist.timestamps;
@@ -1967,7 +2445,10 @@
                 width: Math.max(cRect.width, 200),
                 height: Math.max(cRect.height, 80),
                 hovermode: "x unified",
-                xaxis: { gridcolor: "#2a2e3a", zerolinecolor: "#2a2e3a" },
+                xaxis: {
+                    gridcolor: "#2a2e3a",
+                    zerolinecolor: "#2a2e3a",
+                },
                 yaxis: { gridcolor: "#2a2e3a", zerolinecolor: "#2a2e3a" },
                 shapes: alarmShapes,
                 legend: {
@@ -2030,9 +2511,11 @@
         }
 
         if (computedVars.length > 0) evalComputedVars();
+        const hadArrayElems = trackArrayElementHistories();
 
         updateMonitorValues();
         recordSample();
+        if (hadArrayElems) schedulePlotRender();
     }
 
     // --- Resize ---

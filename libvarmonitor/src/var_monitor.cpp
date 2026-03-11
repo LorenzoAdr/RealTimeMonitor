@@ -50,8 +50,51 @@ void VarMonitor::register_var(const std::string& name, VarType type,
     entry.type = type;
     entry.getter = std::move(getter);
     entry.setter = std::move(setter);
-    entry.history.resize(history_capacity_);
+    if (type != VarType::Array) {
+        entry.history.resize(history_capacity_);
+    }
     vars_[name] = std::move(entry);
+}
+
+void VarMonitor::register_array(const std::string& name, double* ptr, size_t count) {
+    register_var(name, VarType::Array,
+        [ptr, count]() -> VarValue {
+            return std::vector<double>(ptr, ptr + count);
+        });
+    std::unique_lock lock(mutex_);
+    auto it = vars_.find(name);
+    if (it != vars_.end()) {
+        it->second.array_elem_setter = [ptr, count](size_t idx, double val) -> bool {
+            if (idx >= count) return false;
+            ptr[idx] = val;
+            return true;
+        };
+    }
+}
+
+void VarMonitor::register_array(const std::string& name,
+                                 std::vector<double>& vec, std::mutex& mtx) {
+    register_var(name, VarType::Array,
+        [&vec, &mtx]() -> VarValue {
+            std::lock_guard<std::mutex> lock(mtx);
+            return vec;
+        });
+    std::unique_lock lock(mutex_);
+    auto it = vars_.find(name);
+    if (it != vars_.end()) {
+        it->second.array_elem_setter = [&vec, &mtx](size_t idx, double val) -> bool {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (idx >= vec.size()) return false;
+            vec[idx] = val;
+            return true;
+        };
+    }
+}
+
+void VarMonitor::register_array(const std::string& name, ArrayGetter getter) {
+    auto g = std::move(getter);
+    register_var(name, VarType::Array,
+        [g = std::move(g)]() -> VarValue { return g(); });
 }
 
 bool VarMonitor::unregister_var(const std::string& name) {
@@ -130,10 +173,19 @@ bool VarMonitor::set_var(const std::string& name, const VarValue& value) {
     return true;
 }
 
+bool VarMonitor::set_array_element(const std::string& name, size_t index, double value) {
+    std::shared_lock lock(mutex_);
+    auto it = vars_.find(name);
+    if (it == vars_.end() || it->second.type != VarType::Array) return false;
+    if (!it->second.array_elem_setter) return false;
+    return it->second.array_elem_setter(index, value);
+}
+
 std::optional<VarMonitor::HistoryData> VarMonitor::get_history(const std::string& name) {
     std::shared_lock lock(mutex_);
     auto it = vars_.find(name);
     if (it == vars_.end()) return std::nullopt;
+    if (it->second.type == VarType::Array) return std::nullopt;
 
     auto& entry = it->second;
     HistoryData hd;
@@ -166,6 +218,7 @@ void VarMonitor::sample_loop() {
             std::unique_lock lock(mutex_);
             auto now = std::chrono::system_clock::now();
             for (auto& [name, entry] : vars_) {
+                if (entry.type == VarType::Array) continue;
                 double val = 0.0;
                 auto v = entry.getter();
                 switch (entry.type) {
@@ -173,6 +226,7 @@ void VarMonitor::sample_loop() {
                     case VarType::Int32:  val = static_cast<double>(std::get<int32_t>(v)); break;
                     case VarType::Bool:   val = std::get<bool>(v) ? 1.0 : 0.0; break;
                     case VarType::String: val = 0.0; break;
+                    case VarType::Array:  break;
                 }
                 entry.history[entry.history_write_idx] = {val, now};
                 entry.history_write_idx = (entry.history_write_idx + 1) % history_capacity_;

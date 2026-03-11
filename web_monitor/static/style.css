@@ -310,6 +310,212 @@ main {
     letter-spacing: 0.5px;
 }
 
+.array-badge, .array-badge-browser {
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: #f0a040;
+    background: rgba(240, 160, 64, 0.15);
+    padding: 1px 5px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    font-family: 'JetBrains Mono', monospace;
+    margin-left: 4px;
+}
+
+.array-table-wrap {
+    margin-top: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.array-table {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 0.7rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.arr-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 0;
+}
+
+.arr-graph-select {
+    width: 42px;
+    min-width: 42px;
+    font-size: 0.6rem;
+    padding: 1px 2px;
+    background: var(--surface);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.arr-idx-label {
+    color: var(--text-dim);
+    font-size: 0.65rem;
+    width: 36px;
+    min-width: 36px;
+    text-align: right;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.arr-val {
+    color: var(--text);
+    flex: 1;
+    text-align: right;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 2px;
+    transition: background 0.1s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.arr-val:hover {
+    background: var(--surface-hover);
+}
+
+.arr-alarm-btn {
+    font-size: 0.6rem;
+    cursor: pointer;
+    opacity: 0.3;
+    flex-shrink: 0;
+    padding: 0 2px;
+    user-select: none;
+    transition: opacity 0.15s;
+}
+
+.arr-alarm-btn:hover { opacity: 0.7; }
+.arr-alarm-btn.arr-alarm-active { opacity: 1; color: #fbbf24; }
+.arr-alarm-btn.arr-alarm-firing { opacity: 1; color: #f87171; animation: pulse-alarm 0.6s infinite alternate; }
+
+@keyframes pulse-alarm { from { opacity: 0.6; } to { opacity: 1; } }
+
+.arr-alarm-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+}
+
+.arr-alarm-input {
+    width: 40px;
+    font-size: 0.6rem;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: 2px;
+    padding: 1px 3px;
+    text-align: center;
+    outline: none;
+}
+
+.arr-alarm-ok, .arr-alarm-cancel {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 0 2px;
+    color: var(--text-dim);
+}
+
+.arr-alarm-ok:hover { color: #4ade80; }
+.arr-alarm-cancel:hover { color: #f87171; }
+
+.arr-gen-btn {
+    font-size: 0.55rem;
+    font-weight: 700;
+    cursor: pointer;
+    opacity: 0.3;
+    flex-shrink: 0;
+    padding: 0 2px;
+    user-select: none;
+    color: var(--accent);
+    transition: opacity 0.15s;
+}
+
+.arr-gen-btn:hover { opacity: 0.7; }
+.arr-gen-btn.arr-gen-active { opacity: 1; color: #4ade80; }
+
+.arr-gen-form {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px 0 4px 0;
+}
+
+.arr-gen-top {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.arr-gen-type-select {
+    font-size: 0.6rem;
+    padding: 1px 2px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.arr-gen-params {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.arr-gen-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+}
+
+.arr-gen-field-label {
+    font-size: 0.5rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.arr-gen-input {
+    width: 32px;
+    font-size: 0.6rem;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 1px 2px;
+    text-align: center;
+    outline: none;
+}
+
+.arr-gen-input:focus { border-color: var(--accent); }
+
+.arr-cell-edit {
+    width: 100%;
+    background: var(--bg);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 2px;
+    font-size: 0.7rem;
+    font-family: 'JetBrains Mono', monospace;
+    text-align: right;
+    padding: 1px 3px;
+    outline: none;
+    box-sizing: border-box;
+}
+
 .btn-mon-remove {
     background: none;
     border: 1px solid transparent;

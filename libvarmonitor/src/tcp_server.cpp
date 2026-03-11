@@ -161,6 +161,7 @@ static const char* type_str(VarType t) {
         case VarType::Int32:  return "int32";
         case VarType::Bool:   return "bool";
         case VarType::String: return "string";
+        case VarType::Array:  return "array";
     }
     return "unknown";
 }
@@ -182,6 +183,16 @@ static void write_var_json(std::ostringstream& ss, const VarMonitor::VarSnapshot
         case VarType::String:
             ss << ",\"value\":\"" << json_escape(std::get<std::string>(v.value)) << "\"";
             break;
+        case VarType::Array: {
+            auto& arr = std::get<std::vector<double>>(v.value);
+            ss << ",\"value\":[";
+            for (size_t i = 0; i < arr.size(); i++) {
+                if (i > 0) ss << ",";
+                ss << arr[i];
+            }
+            ss << "],\"size\":" << arr.size();
+            break;
+        }
     }
 
     double ts = std::chrono::duration<double>(v.time.time_since_epoch()).count();
@@ -252,6 +263,14 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             } else if (vtype == "bool") {
                 ok = mon->set_var(name, VarValue(json_get_number(request, "value") != 0.0));
             }
+            response = ok ? "{\"type\":\"set_result\",\"ok\":true}"
+                          : "{\"type\":\"set_result\",\"ok\":false}";
+        }
+        else if (cmd == "set_array_element") {
+            std::string name = json_get_string(request, "name");
+            size_t index = static_cast<size_t>(json_get_number(request, "index"));
+            double value = json_get_number(request, "value");
+            bool ok = mon->set_array_element(name, index, value);
             response = ok ? "{\"type\":\"set_result\",\"ok\":true}"
                           : "{\"type\":\"set_result\",\"ok\":false}";
         }

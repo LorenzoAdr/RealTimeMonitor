@@ -28,6 +28,12 @@ namespace varmon { namespace detail {
         [&]() -> varmon::VarValue { return (getter_fn)(); }, \
         [&](const varmon::VarValue& _v) { (setter_fn)(std::get<double>(_v)); })
 
+#define VARMON_WATCH_ARRAY(name, ptr, count) \
+    varmon::detail::ensure_instance().register_array(name, ptr, count)
+
+#define VARMON_WATCH_ARRAY_VEC(name, vec, mtx) \
+    varmon::detail::ensure_instance().register_array(name, vec, mtx)
+
 #define VARMON_SET_CONFIG(path) \
     varmon::set_config_path(path)
 
@@ -50,9 +56,11 @@ namespace varmon { namespace detail {
 
 #else
 
-#define VARMON_WATCH(name, var)                   ((void)0)
-#define VARMON_WATCH_FN(name, getter_fn, setter_fn) ((void)0)
-#define VARMON_SET_CONFIG(path)                     ((void)0)
+#define VARMON_WATCH(name, var)                      ((void)0)
+#define VARMON_WATCH_FN(name, getter_fn, setter_fn)  ((void)0)
+#define VARMON_WATCH_ARRAY(name, ptr, count)          ((void)0)
+#define VARMON_WATCH_ARRAY_VEC(name, vec, mtx)        ((void)0)
+#define VARMON_SET_CONFIG(path)                        ((void)0)
 #define VARMON_UNWATCH(name)                       ((void)0)
 #define VARMON_UNWATCH_ALL()                       ((void)0)
 #define VARMON_START(interval_ms)                  ((void)0)

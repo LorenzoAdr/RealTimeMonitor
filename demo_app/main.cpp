@@ -6,6 +6,7 @@
 #include <thread>
 #include <chrono>
 #include <random>
+#include <mutex>
 
 static std::atomic<bool> g_running{true};
 
@@ -32,6 +33,17 @@ int main() {
     double vel_x = 0.0;
     double vel_y = 0.0;
 
+    // Array estático: lectura Y escritura por indice desde el monitor
+    double spectrum[32] = {};
+
+    // Vector + mutex: lectura Y escritura por indice desde el monitor
+    std::vector<double> sensor_bank(8, 0.0);
+    std::mutex sensor_bank_mtx;
+
+    // Array con getter custom: SOLO lectura (no se puede escribir desde el monitor)
+    double internal_buf[16] = {};
+    std::mutex internal_mtx;
+
     varmon::VarMonitor monitor(2000);
 
     monitor.register_var("waves.sine", &sine_wave);
@@ -51,12 +63,24 @@ int main() {
     monitor.register_var("state.velocity.x", &vel_x);
     monitor.register_var("state.velocity.y", &vel_y);
 
+    // Lectura + escritura: puntero a array C
+    monitor.register_array("arrays.spectrum", spectrum, 32);
+
+    // Lectura + escritura: vector con mutex
+    monitor.register_array("arrays.sensor_bank", sensor_bank, sensor_bank_mtx);
+
+    // Solo lectura: getter custom (devuelve copia, el monitor NO puede escribir)
+    monitor.register_array("arrays.readonly_buf", [&]() -> std::vector<double> {
+        std::lock_guard<std::mutex> lk(internal_mtx);
+        return std::vector<double>(internal_buf, internal_buf + 16);
+    });
+
     if (!monitor.start(100)) {
         std::cerr << "Error al iniciar VarMonitor\n";
         return 1;
     }
 
-    std::cout << "=== Demo Server iniciado (16 variables jerarquicas) ===\n";
+    std::cout << "=== Demo Server iniciado (16 escalares + 3 arrays) ===\n";
     std::cout << "Presiona Ctrl+C para salir\n\n";
 
     std::mt19937 rng(42);
@@ -76,6 +100,21 @@ int main() {
         pos_y = 10.0 * std::cos(t * 0.2);
         vel_x = 2.0 * std::cos(t * 0.2);
         vel_y = -2.0 * std::sin(t * 0.2);
+
+        for (int i = 0; i < 4; i++)
+            spectrum[i] = std::sin(t * (i + 1) * 0.3) * (32 - i) / 32.0;
+
+        {
+            std::lock_guard<std::mutex> lock(sensor_bank_mtx);
+            for (size_t i = 0; i < sensor_bank.size(); i++)
+                sensor_bank[i] = 10.0 + 3.0 * std::sin(t * 0.5 + i * 0.8) + noise(rng) * 0.2;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(internal_mtx);
+            for (int i = 0; i < 16; i++)
+                internal_buf[i] = std::cos(t * 0.4 + i * 0.5) * 5.0;
+        }
 
         t += 0.1;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

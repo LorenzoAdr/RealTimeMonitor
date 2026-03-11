@@ -87,6 +87,15 @@ class TcpBridge:
         })
         return resp.get("ok", False)
 
+    def set_array_element(self, name: str, index: int, value: float) -> bool:
+        resp = self._request({
+            "cmd": "set_array_element",
+            "name": name,
+            "index": index,
+            "value": value,
+        })
+        return resp.get("ok", False)
+
     def get_history(self, name: str) -> dict | None:
         resp = self._request({"cmd": "get_history", "name": name})
         return resp.get("data")

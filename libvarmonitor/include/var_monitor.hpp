@@ -12,14 +12,17 @@
 #include <optional>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 namespace varmon {
 
-enum class VarType : int { Double = 0, Int32 = 1, Bool = 2, String = 3 };
+enum class VarType : int { Double = 0, Int32 = 1, Bool = 2, String = 3, Array = 4 };
 
-using VarValue = std::variant<double, int32_t, bool, std::string>;
+using VarValue = std::variant<double, int32_t, bool, std::string, std::vector<double>>;
 using Getter = std::function<VarValue()>;
 using Setter = std::function<void(const VarValue&)>;
+using ArrayGetter = std::function<std::vector<double>()>;
+using ArrayElementSetter = std::function<bool(size_t index, double value)>;
 
 struct TimestampedValue {
     double value;
@@ -31,6 +34,7 @@ struct VarEntry {
     VarType type;
     Getter getter;
     Setter setter;
+    ArrayElementSetter array_elem_setter;
     std::vector<TimestampedValue> history;
     size_t history_write_idx = 0;
     bool history_full = false;
@@ -51,6 +55,10 @@ public:
 
     void register_var(const std::string& name, VarType type, Getter getter, Setter setter = nullptr);
 
+    void register_array(const std::string& name, double* ptr, size_t count);
+    void register_array(const std::string& name, std::vector<double>& vec, std::mutex& mtx);
+    void register_array(const std::string& name, ArrayGetter getter);
+
     bool unregister_var(const std::string& name);
     void unregister_all();
 
@@ -69,6 +77,7 @@ public:
     std::vector<std::string> list_var_names();
     std::optional<VarSnapshot> get_var(const std::string& name);
     bool set_var(const std::string& name, const VarValue& value);
+    bool set_array_element(const std::string& name, size_t index, double value);
 
     struct HistoryData {
         std::string name;

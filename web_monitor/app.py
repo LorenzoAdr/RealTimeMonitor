@@ -184,6 +184,10 @@ async def websocket_endpoint(ws: WebSocket):
                     b = get_bridge()
                     ok = b.set_var(cmd["name"], cmd["value"], cmd.get("var_type", "double"))
                     await ws.send_json({"type": "set_result", "success": ok, "name": cmd["name"]})
+                elif action == "set_array_element":
+                    b = get_bridge()
+                    ok = b.set_array_element(cmd["name"], int(cmd["index"]), float(cmd["value"]))
+                    await ws.send_json({"type": "set_result", "success": ok, "name": cmd["name"]})
                 elif action == "refresh_names":
                     b = get_bridge()
                     names_list = b.list_names()
