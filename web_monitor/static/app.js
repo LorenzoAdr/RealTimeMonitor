@@ -26,8 +26,10 @@
     const ARRAY_HIST_MAX = 2000;
 
     let historyTimer = null;
-    const HISTORY_INTERVAL_MS = 600;
+    const HISTORY_INTERVAL_MS = 500;
     let plotRafPending = false;
+    let lastSeq = 0;
+    let localHistMaxSec = 30;
 
     const MAX_RECORD_SEC = 300;
     let isRecording = false;
@@ -48,6 +50,7 @@
     const removeSelectedBtn = document.getElementById("removeSelected");
     const monitorListEl = document.getElementById("monitorList");
     const timeWindowSelect = document.getElementById("timeWindow");
+    const historyBufferSelect = document.getElementById("historyBuffer");
     const plotEmpty = document.getElementById("plotEmpty");
     const plotArea = document.getElementById("plotArea");
     const recordBtn = document.getElementById("recordBtn");
@@ -256,6 +259,7 @@
                 graphs: varGraphAssignment,
                 graphList: graphList,
                 timeWindow: timeWindowSelect.value,
+                historyBuffer: historyBufferSelect.value,
                 interval: intervalInput.value,
                 alarms: alarms,
                 computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
@@ -280,6 +284,10 @@
                 graphList = cfg.graphList;
             }
             if (cfg.timeWindow) timeWindowSelect.value = cfg.timeWindow;
+            if (cfg.historyBuffer) {
+                historyBufferSelect.value = cfg.historyBuffer;
+                localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+            }
             if (cfg.interval) intervalInput.value = cfg.interval;
             if (cfg.alarms && typeof cfg.alarms === "object") alarms = cfg.alarms;
             if (Array.isArray(cfg.computedVars)) {
@@ -297,6 +305,7 @@
         monitoredNames.clear();
         varGraphAssignment = {};
         historyCache = {};
+        lastSeq = 0;
         graphList = [];
         alarms = {};
         activeAlarms.clear();
@@ -336,6 +345,7 @@
             graphs: varGraphAssignment,
             graphList: graphList,
             timeWindow: timeWindowSelect.value,
+            historyBuffer: historyBufferSelect.value,
             interval: intervalInput.value,
             alarms: alarms,
             computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
@@ -376,6 +386,10 @@
                         graphList = cfg.graphList;
                     }
                     if (cfg.timeWindow) timeWindowSelect.value = cfg.timeWindow;
+                    if (cfg.historyBuffer) {
+                        historyBufferSelect.value = cfg.historyBuffer;
+                        localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+                    }
                     if (cfg.interval) intervalInput.value = cfg.interval;
                     if (cfg.alarms && typeof cfg.alarms === "object") {
                         alarms = cfg.alarms;
@@ -437,6 +451,7 @@
             statusEl.textContent = "Desconectado";
             statusEl.className = "status disconnected";
             stopHistoryPolling();
+            lastSeq = 0;
             setTimeout(connect, 2000);
         };
         ws.onerror = () => ws.close();
@@ -445,7 +460,7 @@
             if (msg.type === "vars_names") onVarNames(msg.data);
             else if (msg.type === "vars_update") onVarsUpdate(msg.data);
             else if (msg.type === "history") onHistoryData(msg.data);
-            else if (msg.type === "histories") onHistoriesData(msg.data);
+            else if (msg.type === "histories") onHistoriesData(msg.data, msg.seq);
             else if (msg.type === "set_result") onSetResult(msg);
         };
     }
@@ -526,7 +541,11 @@
                 if (!isComputed(name) && !isArrayVar(name)) names.add(name);
             }
             if (names.size > 0) {
-                ws.send(JSON.stringify({ action: "get_histories", names: Array.from(names) }));
+                ws.send(JSON.stringify({
+                    action: "get_histories",
+                    names: Array.from(names),
+                    since_seq: lastSeq,
+                }));
             }
         }, HISTORY_INTERVAL_MS);
     }
@@ -2062,10 +2081,24 @@
         }
     });
 
+    function buildRecordColumns() {
+        const cols = [];
+        for (const name of monitoredNames) {
+            if (isArrayVar(name)) {
+                const vd = varsByName[name];
+                const len = vd && Array.isArray(vd.value) ? vd.value.length : 0;
+                for (let i = 0; i < len; i++) cols.push(arrayElemName(name, i));
+            } else {
+                cols.push(name);
+            }
+        }
+        return cols;
+    }
+
     function startRecording() {
         if (monitoredNames.size === 0) return;
         isRecording = true;
-        recordColumns = Array.from(monitoredNames);
+        recordColumns = buildRecordColumns();
         recordBuffer = [];
         recordStartTime = Date.now();
 
@@ -2105,9 +2138,14 @@
         if (!isRecording || recordColumns.length === 0) return;
         const elapsed = ((Date.now() - recordStartTime) / 1000).toFixed(4);
         const row = [elapsed];
-        for (const name of recordColumns) {
-            const vd = varsByName[name];
-            row.push(vd ? String(vd.value) : "");
+        for (const col of recordColumns) {
+            if (isArrayElem(col)) {
+                const val = getArrayElemValue(col);
+                row.push(val !== undefined ? String(val) : "");
+            } else {
+                const vd = varsByName[col];
+                row.push(vd ? String(vd.value) : "");
+            }
         }
         recordBuffer.push(row);
     }
@@ -2255,12 +2293,42 @@
         schedulePlotRender();
     }
 
-    function onHistoriesData(dataArr) {
+    function onHistoriesData(dataArr, seq) {
         if (!Array.isArray(dataArr)) return;
+        if (typeof seq === "number" && seq > 0) lastSeq = seq;
         for (const data of dataArr) {
-            if (data && data.name) historyCache[data.name] = data;
+            if (!data || !data.name) continue;
+            const name = data.name;
+            const existing = historyCache[name];
+            if (existing && existing.timestamps && existing.timestamps.length > 0 && lastSeq > 0) {
+                const ts = existing.timestamps;
+                const vs = existing.values;
+                for (let i = 0; i < data.timestamps.length; i++) {
+                    ts.push(data.timestamps[i]);
+                    vs.push(data.values[i]);
+                }
+            } else {
+                historyCache[name] = data;
+            }
         }
+        trimLocalHistory();
         schedulePlotRender();
+    }
+
+    function trimLocalHistory() {
+        const now = Date.now() / 1000;
+        const cutoff = now - localHistMaxSec;
+        for (const name in historyCache) {
+            const h = historyCache[name];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            if (isComputed(name)) continue;
+            let lo = 0;
+            while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
+            if (lo > 0) {
+                h.timestamps = h.timestamps.slice(lo);
+                h.values = h.values.slice(lo);
+            }
+        }
     }
 
     function nextGraphId() {
@@ -2485,6 +2553,11 @@
     }
 
     timeWindowSelect.addEventListener("change", () => { saveConfig(); renderPlots(); });
+    historyBufferSelect.addEventListener("change", () => {
+        localHistMaxSec = parseInt(historyBufferSelect.value) || 30;
+        trimLocalHistory();
+        saveConfig();
+    });
 
     // --- Data handlers ---
 

@@ -27,6 +27,7 @@ using ArrayElementSetter = std::function<bool(size_t index, double value)>;
 struct TimestampedValue {
     double value;
     std::chrono::system_clock::time_point time;
+    uint64_t seq = 0;
 };
 
 struct VarEntry {
@@ -42,7 +43,7 @@ struct VarEntry {
 
 class VarMonitor {
 public:
-    explicit VarMonitor(size_t history_capacity = 1000);
+    explicit VarMonitor(size_t history_capacity = 100);
     ~VarMonitor();
 
     VarMonitor(const VarMonitor&) = delete;
@@ -83,9 +84,12 @@ public:
         std::string name;
         std::vector<double> values;
         std::vector<std::chrono::system_clock::time_point> timestamps;
+        std::vector<uint64_t> seqs;
     };
 
     std::optional<HistoryData> get_history(const std::string& name);
+    std::optional<HistoryData> get_history_since(const std::string& name, uint64_t since_seq);
+    uint64_t get_seq() const { return seq_num_.load(); }
 
     void client_connected();
     void client_disconnected();
@@ -103,6 +107,7 @@ private:
     std::thread rpc_thread_;
     int sample_interval_ms_ = 100;
     size_t history_capacity_;
+    std::atomic<uint64_t> seq_num_{0};
 };
 
 VarMonitor* get_global_instance();
@@ -110,6 +115,7 @@ void set_global_instance(VarMonitor* instance);
 
 void set_tcp_port(uint16_t port);
 uint16_t get_tcp_port();
+size_t get_history_capacity();
 
 void set_config_path(const std::string& path);
 bool load_config();

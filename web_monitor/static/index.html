@@ -17,7 +17,7 @@
         <div class="header-right">
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <label>Poll (ms):
-                <input type="number" id="intervalInput" value="200" min="50" max="5000" step="50">
+                <input type="number" id="intervalInput" value="200" min="100" max="5000" step="50">
             </label>
         </div>
     </header>
@@ -69,6 +69,7 @@
                     <li><b>&#9654; Play / &#9646;&#9646; Pausa</b>: pausar o reanudar la actualizacion de todos los graficos.</li>
                     <li><b>&#128247; PNG</b>: capturar todos los graficos visibles como una sola imagen PNG.</li>
                     <li><b>Ventana</b>: seleccionar el rango temporal visible (10s a 10min o todo el historial).</li>
+                    <li><b>Buffer</b>: memoria interna del navegador. Controla cuantos segundos de datos se acumulan en RAM (30s a 30min). Si el monitor consume mucha RAM, reduce este valor.</li>
                     <li><b>Crosshair</b>: al pasar el raton, se muestra el valor de todas las trazas en ese instante.</li>
                     <li><b>Zoom</b>: arrastra un rectangulo sobre el grafico para hacer zoom. Usa la rueda del raton para zoom rapido.</li>
                     <li><b>Pan</b>: pulsa el boton de pan en la barra de herramientas y arrastra para desplazar la vista.</li>
@@ -120,14 +121,25 @@
                 <p>Toda la configuracion de puertos e IPs esta en un unico archivo de texto plano <code>varmon.conf</code>:</p>
                 <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
 # VarMonitor configuration
-tcp_port = 9100    # Puerto TCP (C++ escucha, Python conecta)
-web_port = 8080    # Puerto de esta web (solo Python)
-host = localhost    # IP de la app C++ (cambiar para acceso remoto)
+tcp_port = 9100          # Puerto TCP (C++ escucha, Python conecta)
+web_port = 8080          # Puerto de esta web (solo Python)
+host = localhost          # IP de la app C++ (cambiar para acceso remoto)
+history_capacity = 100    # Muestras por variable en buffer C++
                 </pre>
                 <ul>
                     <li><b>tcp_port</b>: puerto TCP donde la app C++ escucha. El backend Python se conecta a este puerto.</li>
                     <li><b>web_port</b>: puerto donde se sirve esta pagina web.</li>
                     <li><b>host</b>: IP o nombre del equipo donde corre la app C++. Usa <code>localhost</code> si todo esta en la misma maquina, o la IP del equipo remoto (ej. <code>192.168.4.1</code>) para acceso por red.</li>
+                    <li><b>history_capacity</b>: numero de muestras que el C++ mantiene por variable en su buffer circular. Con <code>sample_interval=100ms</code> y <code>capacity=100</code>, el buffer cubre 10s. Valores bajos ahorran memoria con muchas variables.</li>
+                </ul>
+
+                <h3>Historial incremental</h3>
+                <p>El monitor usa un sistema de entrega incremental de datos para optimizar el rendimiento:</p>
+                <ul>
+                    <li>El C++ muestrea las variables a su ritmo y las guarda en un buffer circular pequeno (<code>history_capacity</code> muestras).</li>
+                    <li>El frontend pide al C++ solo los <b>datos nuevos</b> desde la ultima peticion (usando un numero de secuencia interno).</li>
+                    <li>El frontend acumula su propia historia localmente para poder plotear ventanas de tiempo amplias (hasta 10 minutos).</li>
+                    <li>Esto reduce drasticamente el trafico de red: solo se transmiten los puntos nuevos, no el buffer completo cada vez.</li>
                 </ul>
 
                 <h3>Acceso remoto</h3>
@@ -207,6 +219,15 @@ host = localhost    # IP de la app C++ (cambiar para acceso remoto)
                             <option value="300">5 min</option>
                             <option value="600">10 min</option>
                             <option value="0">Todo</option>
+                        </select>
+                    </label>
+                    <label>Buffer:
+                        <select id="historyBuffer">
+                            <option value="10">10s</option>
+                            <option value="20">20s</option>
+                            <option value="30" selected>30s</option>
+                            <option value="45">45s</option>
+                            <option value="60">1 min</option>
                         </select>
                     </label>
                 </div>

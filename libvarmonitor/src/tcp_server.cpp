@@ -17,10 +17,12 @@
 namespace varmon {
 
 static uint16_t g_tcp_port = 9100;
+static size_t g_history_capacity = 100;
 static std::string g_config_path;
 
 void set_tcp_port(uint16_t port) { g_tcp_port = port; }
 uint16_t get_tcp_port() { return g_tcp_port; }
+size_t get_history_capacity() { return g_history_capacity; }
 
 void set_config_path(const std::string& path) { g_config_path = path; }
 
@@ -68,11 +70,15 @@ bool load_config() {
         if (key == "tcp_port") {
             int port = std::stoi(val);
             if (port > 0 && port <= 65535) g_tcp_port = static_cast<uint16_t>(port);
+        } else if (key == "history_capacity") {
+            int cap = std::stoi(val);
+            if (cap > 0) g_history_capacity = static_cast<size_t>(cap);
         }
     }
 
     std::cout << "[VarMonitor] Config cargada desde " << path
-              << " (tcp_port=" << g_tcp_port << ")\n";
+              << " (tcp_port=" << g_tcp_port
+              << ", history_capacity=" << g_history_capacity << ")\n";
     return true;
 }
 
@@ -323,6 +329,51 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             for (const auto& name : names) {
                 auto hist = mon->get_history(name);
                 if (!hist) continue;
+                if (!first) ss << ",";
+                first = false;
+                ss << "{\"name\":\"" << json_escape(hist->name) << "\",\"values\":[";
+                for (size_t i = 0; i < hist->values.size(); i++) {
+                    if (i > 0) ss << ",";
+                    ss << hist->values[i];
+                }
+                ss << "],\"timestamps\":[";
+                for (size_t i = 0; i < hist->timestamps.size(); i++) {
+                    if (i > 0) ss << ",";
+                    ss << std::chrono::duration<double>(hist->timestamps[i].time_since_epoch()).count();
+                }
+                ss << "]}";
+            }
+            ss << "]}";
+            response = ss.str();
+        }
+        else if (cmd == "get_histories_since") {
+            uint64_t since_seq = static_cast<uint64_t>(json_get_number(request, "since_seq"));
+            auto names_pos = request.find("\"names\"");
+            std::vector<std::string> names;
+            if (names_pos != std::string::npos) {
+                auto arr_start = request.find('[', names_pos);
+                auto arr_end = request.find(']', arr_start);
+                if (arr_start != std::string::npos && arr_end != std::string::npos) {
+                    std::string arr = request.substr(arr_start + 1, arr_end - arr_start - 1);
+                    size_t p = 0;
+                    while (p < arr.size()) {
+                        auto q1 = arr.find('"', p);
+                        if (q1 == std::string::npos) break;
+                        auto q2 = arr.find('"', q1 + 1);
+                        if (q2 == std::string::npos) break;
+                        names.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+                        p = q2 + 1;
+                    }
+                }
+            }
+            uint64_t current_seq = mon->get_seq();
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(6);
+            ss << "{\"type\":\"histories\",\"seq\":" << current_seq << ",\"data\":[";
+            bool first = true;
+            for (const auto& name : names) {
+                auto hist = mon->get_history_since(name, since_seq);
+                if (!hist || hist->values.empty()) continue;
                 if (!first) ss << ",";
                 first = false;
                 ss << "{\"name\":\"" << json_escape(hist->name) << "\",\"values\":[";

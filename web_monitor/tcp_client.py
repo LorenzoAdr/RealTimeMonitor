@@ -117,3 +117,12 @@ class TcpBridge:
             except Exception:
                 pass
         return result
+
+    def get_histories_since(self, names: list[str], since_seq: int) -> dict:
+        """Returns {"seq": <current_seq>, "data": [...]} with only new points."""
+        resp = self._request({
+            "cmd": "get_histories_since",
+            "names": names,
+            "since_seq": since_seq,
+        })
+        return {"seq": resp.get("seq", 0), "data": resp.get("data", [])}

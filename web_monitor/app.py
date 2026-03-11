@@ -169,7 +169,7 @@ async def websocket_endpoint(ws: WebSocket):
                 action = cmd.get("action")
 
                 if action == "set_interval":
-                    interval = max(0.05, float(cmd["value"]))
+                    interval = max(0.1, float(cmd["value"]))
                 elif action == "set_monitored":
                     monitored_names = set(cmd.get("names", []))
                 elif action == "get_history":
@@ -178,8 +178,13 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "history", "data": hist})
                 elif action == "get_histories":
                     b = get_bridge()
-                    hists = b.get_histories(cmd.get("names", []))
-                    await ws.send_json({"type": "histories", "data": hists})
+                    since_seq = cmd.get("since_seq")
+                    if since_seq is not None:
+                        result = b.get_histories_since(cmd.get("names", []), int(since_seq))
+                        await ws.send_json({"type": "histories", "seq": result["seq"], "data": result["data"]})
+                    else:
+                        hists = b.get_histories(cmd.get("names", []))
+                        await ws.send_json({"type": "histories", "data": hists})
                 elif action == "set_var":
                     b = get_bridge()
                     ok = b.set_var(cmd["name"], cmd["value"], cmd.get("var_type", "double"))
