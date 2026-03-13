@@ -51,7 +51,6 @@
     const selectAllBtn = document.getElementById("selectAll");
     const selectNoneBtn = document.getElementById("selectNone");
     const refreshNamesBtn = document.getElementById("refreshNames");
-    const removeSelectedBtn = document.getElementById("removeSelected");
     const monitorListEl = document.getElementById("monitorList");
     const timeWindowSelect = document.getElementById("timeWindow");
     const historyBufferSelect = document.getElementById("historyBuffer");
@@ -60,9 +59,14 @@
     const recordBtn = document.getElementById("recordBtn");
     const recordTimerEl = document.getElementById("recordTimer");
     const screenshotBtn = document.getElementById("screenshotBtn");
+    const resetPlotsBtn = document.getElementById("resetPlotsBtn");
     const pauseBtn = document.getElementById("pauseBtn");
     const resetConfigBtn = document.getElementById("resetConfigBtn");
     const hideLevelsInput = document.getElementById("hideLevelsInput");
+    const settingsBtn = document.getElementById("settingsBtn");
+    const settingsPanel = document.getElementById("settingsPanel");
+    const langSelect = document.getElementById("langSelect");
+    const themeSelect = document.getElementById("themeSelect");
 
     let browserSelection = new Set();
     let browserListDirty = true;
@@ -82,6 +86,8 @@
     let computedHistories = {};
     const COMPUTED_MAX_HISTORY = 1000;
     let varFormat = {};  // { name: { ori: "dec", sal: "dec" } }
+    let currentLang = "es";
+    let currentTheme = "dark";
 
     const GEN_TYPES = {
         sine:     { label: "Seno",       fields: [{k:"amp",l:"A",d:1},{k:"freq",l:"Hz",d:1},{k:"offset",l:"Off",d:0},{k:"phase",l:"Fase\u00B0",d:0}] },
@@ -254,6 +260,183 @@
         }
     }
 
+    // --- I18N y tema ---
+
+    const I18N = {
+        es: {
+            colBrowserTitle: "Variables disponibles",
+            colMonitorTitle: "Monitorizando",
+            colPlotTitle: "Gráficos",
+            helpTitle: "Ayuda",
+            hostLabel: "Host:",
+            portLabel: "Puerto:",
+            pollLabel: "Poll (ms):",
+            settingsTitle: "Ajustes",
+            langLabel: "Idioma:",
+            themeLabel: "Tema:",
+            reconnectBtn: "Conectar",
+            reconnectTitle: "Reconectar con el host/puerto seleccionados",
+            recordBtn: "● REC",
+            resetConfigTitle: "Eliminar toda la configuración",
+            clearAlarmsTitle: "Quitar todas las alarmas",
+            resetPlotsTitle: "Resetear curvas (histórico y zoom)",
+            pausePlay: "▶ Play",
+            pausePause: "⏸ Pause",
+            screenshotTitle: "Capturar gráficos como PNG",
+            windowLabel: "Ventana:",
+            bufferLabel: "Buffer:",
+            filterPlaceholder: "Filtrar variables...",
+            selectAll: "Sel. todo",
+            selectNone: "Ninguno",
+            addToMonitor: "Monitorizar →",
+            hideLevelsLabel: "Niveles:",
+            statusConnected: "Conectado",
+            statusDisconnected: "Desconectado",
+            graphTitle: "Gráfico",
+            newGraphDropText: "Nuevo gráfico: suelta aquí para crear uno",
+            removeGraphTitle: "Eliminar gráfico",
+            monitorMenuTitle: "Más opciones"
+        },
+        en: {
+            colBrowserTitle: "Available variables",
+            colMonitorTitle: "Monitoring",
+            colPlotTitle: "Plots",
+            helpTitle: "Help",
+            hostLabel: "Host:",
+            portLabel: "Port:",
+            pollLabel: "Poll (ms):",
+            settingsTitle: "Settings",
+            langLabel: "Language:",
+            themeLabel: "Theme:",
+            reconnectBtn: "Connect",
+            reconnectTitle: "Reconnect with selected host/port",
+            recordBtn: "● REC",
+            resetConfigTitle: "Delete all configuration",
+            clearAlarmsTitle: "Clear all alarms",
+            resetPlotsTitle: "Reset curves (history and zoom)",
+            pausePlay: "▶ Play",
+            pausePause: "⏸ Pause",
+            screenshotTitle: "Capture plots as PNG",
+            windowLabel: "Window:",
+            bufferLabel: "Buffer:",
+            filterPlaceholder: "Filter variables...",
+            selectAll: "Select all",
+            selectNone: "None",
+            addToMonitor: "Monitor →",
+            hideLevelsLabel: "Levels:",
+            statusConnected: "Connected",
+            statusDisconnected: "Disconnected",
+            graphTitle: "Plot",
+            newGraphDropText: "New plot: drop here to create one",
+            removeGraphTitle: "Remove plot",
+            monitorMenuTitle: "More options"
+        }
+    };
+
+    function getPlotLayoutColors() {
+        const isLight = currentTheme === "light";
+        return isLight
+            ? {
+                paper_bgcolor: "#ffffff",
+                plot_bgcolor: "#f4f5fb",
+                fontColor: "#4b5563",
+                gridcolor: "#e5e7eb",
+                legendBg: "rgba(0,0,0,0)"
+            }
+            : {
+                paper_bgcolor: "#1a1d27",
+                plot_bgcolor: "#0f1117",
+                fontColor: "#8b8fa3",
+                gridcolor: "#2a2e3a",
+                legendBg: "rgba(0,0,0,0)"
+            };
+    }
+
+    function applyTheme(theme) {
+        currentTheme = (theme === "light") ? "light" : "dark";
+        document.body.classList.toggle("theme-light", currentTheme === "light");
+        document.body.classList.toggle("theme-dark", currentTheme === "dark");
+        if (themeSelect) themeSelect.value = currentTheme;
+        schedulePlotRender();
+    }
+
+    function applyLanguage(lang) {
+        currentLang = I18N[lang] ? lang : "es";
+        const tr = I18N[currentLang];
+        document.documentElement.lang = currentLang;
+
+        const colBrowserTitle = document.getElementById("colBrowserTitle");
+        const colMonitorTitle = document.getElementById("colMonitorTitle");
+        const colPlotTitle = document.getElementById("colPlotTitle");
+        const hostLabel = document.getElementById("hostLabel");
+        const portLabel = document.getElementById("portLabel");
+        const pollLabel = document.getElementById("pollLabel");
+        const langLabel = document.getElementById("langLabel");
+        const themeLabel = document.getElementById("themeLabel");
+
+        if (colBrowserTitle) colBrowserTitle.textContent = tr.colBrowserTitle;
+        if (colMonitorTitle) colMonitorTitle.textContent = tr.colMonitorTitle;
+        if (colPlotTitle) colPlotTitle.textContent = tr.colPlotTitle;
+        if (hostLabel) hostLabel.firstChild.nodeValue = tr.hostLabel + " ";
+        if (portLabel) portLabel.firstChild.nodeValue = tr.portLabel + " ";
+        if (pollLabel) pollLabel.firstChild.nodeValue = tr.pollLabel + " ";
+        if (langLabel) langLabel.textContent = tr.langLabel;
+        if (themeLabel) themeLabel.textContent = tr.themeLabel;
+
+        const helpBtn = document.getElementById("helpBtn");
+        if (helpBtn) helpBtn.title = tr.helpTitle;
+
+        if (reconnectBtn) {
+            reconnectBtn.textContent = tr.reconnectBtn;
+            reconnectBtn.title = tr.reconnectTitle;
+        }
+        if (recordBtn) recordBtn.textContent = tr.recordBtn;
+
+        if (resetConfigBtn) resetConfigBtn.title = tr.resetConfigTitle;
+        const clearAlarmsBtn = document.getElementById("clearAlarmsBtn");
+        if (clearAlarmsBtn) clearAlarmsBtn.title = tr.clearAlarmsTitle;
+
+        if (resetPlotsBtn) resetPlotsBtn.title = tr.resetPlotsTitle;
+        if (screenshotBtn) screenshotBtn.title = tr.screenshotTitle;
+
+        const timeWindowLabel = timeWindowSelect?.parentElement;
+        if (timeWindowLabel && timeWindowLabel.tagName === "LABEL") {
+            timeWindowLabel.childNodes[0].nodeValue = tr.windowLabel + " ";
+        }
+        const historyBufferLabel = historyBufferSelect?.parentElement;
+        if (historyBufferLabel && historyBufferLabel.tagName === "LABEL") {
+            historyBufferLabel.childNodes[0].nodeValue = tr.bufferLabel + " ";
+        }
+
+        if (varFilter) varFilter.placeholder = tr.filterPlaceholder;
+        if (selectAllBtn) selectAllBtn.textContent = tr.selectAll;
+        if (selectNoneBtn) selectNoneBtn.textContent = tr.selectNone;
+        if (addToMonitorBtn) addToMonitorBtn.textContent = tr.addToMonitor;
+
+        const hideLevelsLabelEl = document.getElementById("hideLevelsLabel");
+        if (hideLevelsLabelEl && hideLevelsLabelEl.firstChild && hideLevelsLabelEl.firstChild.nodeType === Node.TEXT_NODE) {
+            hideLevelsLabelEl.firstChild.nodeValue = tr.hideLevelsLabel + " ";
+        }
+
+        if (statusEl) {
+            statusEl.textContent = statusEl.classList.contains("connected") ? tr.statusConnected : tr.statusDisconnected;
+        }
+        if (settingsBtn) settingsBtn.title = tr.settingsTitle;
+        const monitorMenuBtnEl = document.getElementById("monitorMenuBtn");
+        if (monitorMenuBtnEl) monitorMenuBtnEl.title = tr.monitorMenuTitle;
+
+        document.querySelectorAll(".plot-slot-header .plot-slot-title").forEach((el, i) => {
+            el.textContent = " " + tr.graphTitle + " " + (i + 1);
+        });
+        const addSlot = document.getElementById("plotAddSlot");
+        if (addSlot) addSlot.textContent = tr.newGraphDropText;
+
+        // Actualizar texto del boton de pausa segun estado
+        if (pauseBtn) {
+            pauseBtn.textContent = plotsPaused ? tr.pausePlay : tr.pausePause;
+        }
+    }
+
     // --- Config persistence (localStorage) ---
 
     const STORAGE_KEY = "varmon_config";
@@ -274,6 +457,8 @@
                 computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
                 varFormat: varFormat,
                 arrayElemAssignment: arrayElemAssignment,
+                lang: currentLang,
+                theme: currentTheme,
             }));
         } catch (e) { /* quota exceeded or private mode */ }
     }
@@ -301,7 +486,10 @@
                 hideLevels = cfg.hideLevels;
                 if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
             }
-            if (cfg.host) hostInput.value = cfg.host;
+            if (cfg.host && typeof cfg.host === "string") {
+                const h = cfg.host.trim();
+                if (h && !/^\d+$/.test(h)) hostInput.value = h;
+            }
             if (cfg.port) {
                 portInput.value = cfg.port;
                 portSelect.value = cfg.port;
@@ -315,6 +503,12 @@
             }
             if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = cfg.varFormat;
             if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
+            if (cfg.lang) {
+                currentLang = cfg.lang;
+            }
+            if (cfg.theme) {
+                currentTheme = cfg.theme;
+            }
         } catch (e) { /* corrupt data */ }
     }
 
@@ -340,6 +534,8 @@
     }
 
     loadConfig();
+    applyTheme(currentTheme);
+    applyLanguage(currentLang);
 
     resetConfigBtn.addEventListener("click", resetConfig);
 
@@ -355,6 +551,62 @@
         if (e.target === helpOverlay) helpOverlay.style.display = "none";
     });
 
+    // --- Panel de ajustes (host/puerto/idioma/tema) ---
+
+    if (settingsBtn && settingsPanel) {
+        function toggleSettingsPanel() {
+            const isVisible = settingsPanel.style.display === "flex";
+            settingsPanel.style.display = isVisible ? "none" : "flex";
+        }
+        settingsBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            toggleSettingsPanel();
+        });
+        document.addEventListener("click", (e) => {
+            if (!settingsPanel.contains(e.target) && e.target !== settingsBtn) {
+                settingsPanel.style.display = "none";
+            }
+        });
+    }
+
+    const monitorMenuBtn = document.getElementById("monitorMenuBtn");
+    const monitorMenuPanel = document.getElementById("monitorMenuPanel");
+    if (monitorMenuBtn && monitorMenuPanel) {
+        monitorMenuBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const isVisible = monitorMenuPanel.style.display === "flex";
+            monitorMenuPanel.style.display = isVisible ? "none" : "flex";
+            if (!isVisible) refreshAlarmListPanel();
+        });
+        document.addEventListener("click", (e) => {
+            if (!monitorMenuPanel.contains(e.target) && e.target !== monitorMenuBtn) {
+                monitorMenuPanel.style.display = "none";
+            }
+        });
+        const alarmClearAllBtn = document.getElementById("alarmClearAllBtn");
+        if (alarmClearAllBtn) {
+            alarmClearAllBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                clearAllAlarms();
+                refreshAlarmListPanel();
+            });
+        }
+    }
+
+    if (langSelect) {
+        langSelect.addEventListener("change", () => {
+            applyLanguage(langSelect.value);
+            saveConfig();
+        });
+    }
+
+    if (themeSelect) {
+        themeSelect.addEventListener("change", () => {
+            applyTheme(themeSelect.value);
+            saveConfig();
+        });
+    }
+
     // --- Export / Import config to file ---
 
     function exportConfigToFile() {
@@ -365,12 +617,15 @@
             timeWindow: timeWindowSelect.value,
             historyBuffer: historyBufferSelect.value,
             host: hostInput.value,
-                port: portInput.value || portSelect.value,
+            port: portInput.value || portSelect.value,
             hideLevels: hideLevels,
             interval: intervalInput.value,
             alarms: alarms,
             computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
             varFormat: varFormat,
+            arrayElemAssignment: arrayElemAssignment,
+            lang: currentLang,
+            theme: currentTheme,
         };
         const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
         const d = new Date();
@@ -415,7 +670,10 @@
                         hideLevels = cfg.hideLevels;
                         if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
                     }
-                    if (cfg.host) hostInput.value = cfg.host;
+                    if (cfg.host && typeof cfg.host === "string") {
+                        const h = cfg.host.trim();
+                        if (h && !/^\d+$/.test(h)) hostInput.value = h;
+                    }
                     if (cfg.port) {
                         portInput.value = cfg.port;
                         portSelect.value = cfg.port;
@@ -433,6 +691,8 @@
                     }
                     if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = cfg.varFormat;
                     if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
+                    if (cfg.lang) currentLang = cfg.lang;
+                    if (cfg.theme) currentTheme = cfg.theme;
                     saveConfig();
                     sendMonitored();
                     sendInterval();
@@ -440,6 +700,8 @@
                     rebuildMonitorList();
                     renderBrowserList();
                     renderPlots();
+                    applyTheme(currentTheme);
+                    applyLanguage(currentLang);
                 } catch (e) {
                     console.error("Error al importar config:", e);
                 }
@@ -455,7 +717,8 @@
     // --- Pause/Play ---
 
     function updatePauseBtn() {
-        pauseBtn.textContent = plotsPaused ? "\u25B6 Play" : "\u23F8 Pause";
+        const tr = I18N[currentLang] || I18N.es;
+        pauseBtn.textContent = plotsPaused ? tr.pausePlay : tr.pausePause;
         pauseBtn.classList.toggle("paused", plotsPaused);
     }
     pauseBtn.addEventListener("click", () => {
@@ -464,6 +727,29 @@
         if (!plotsPaused) schedulePlotRender();
     });
     updatePauseBtn();
+
+    // --- Reset graficos (equivalente al antiguo "Quitar sel.") ---
+
+    function resetPlots() {
+        // Quitar asignaciones de grafico pero mantener variables monitorizadas
+        for (const name of monitoredNames) {
+            varGraphAssignment[name] = "";
+        }
+        for (const key of Object.keys(arrayElemAssignment)) {
+            delete arrayElemAssignment[key];
+            delete arrayElemHistory[key];
+        }
+        monitorListEl.querySelectorAll(".graph-select, .arr-graph-select").forEach(sel => {
+            sel.selectedIndex = 0;
+            updateSelectStyle(sel);
+        });
+        saveConfig();
+        pruneEmptyGraphs();
+        updateMonitorItemStyles();
+        renderPlots();
+    }
+
+    resetPlotsBtn.addEventListener("click", resetPlots);
 
     // --- WebSocket ---
 
@@ -478,7 +764,7 @@
         const url = qp ? `${proto}//${location.host}/ws?${qp}` : `${proto}//${location.host}/ws`;
         ws = new WebSocket(url);
         ws.onopen = () => {
-            statusEl.textContent = "Conectado";
+            statusEl.textContent = (I18N[currentLang] || I18N.es).statusConnected;
             statusEl.className = "status connected";
             clearReconnectPending();
             sendInterval();
@@ -486,7 +772,7 @@
             startHistoryPolling();
         };
         ws.onclose = () => {
-            statusEl.textContent = "Desconectado";
+            statusEl.textContent = (I18N[currentLang] || I18N.es).statusDisconnected;
             statusEl.className = "status disconnected";
             stopHistoryPolling();
             lastSeq = 0;
@@ -741,6 +1027,13 @@
                 (inMonitor ? " in-monitor" : "");
             el.style.paddingLeft = (depth * 16 + 8) + "px";
 
+            // Drag & drop: permitir arrastrar variables desde Columna 1 a Columna 2
+            el.draggable = true;
+            el.addEventListener("dragstart", (e) => {
+                e.dataTransfer.setData("text/plain", name);
+                e.dataTransfer.effectAllowed = "copy";
+            });
+
             const cb = document.createElement("input");
             cb.type = "checkbox";
             cb.checked = selected;
@@ -900,6 +1193,18 @@
             el.className = "monitor-item";
             el.dataset.name = name;
 
+            // Drag & drop: permitir arrastrar variables monitorizadas hacia graficos
+            el.draggable = true;
+            el.addEventListener("dragstart", (e) => {
+                e.dataTransfer.setData("text/plain", name);
+                e.dataTransfer.effectAllowed = "copyMove";
+                ensureNewGraphDropTarget();
+            });
+            el.addEventListener("dragend", () => {
+                const addSlot = document.getElementById("plotAddSlot");
+                if (addSlot) addSlot.classList.remove("plot-add-over");
+            });
+
             let sel = null;
             if (!isArrayVar(name)) {
                 sel = document.createElement("select");
@@ -913,6 +1218,7 @@
             const nameEl = document.createElement("span");
             nameEl.className = "mon-name";
             nameEl.textContent = formatNameWithHiddenLevels(name, hideLevels);
+            nameEl.title = name;
             nameEl.addEventListener("click", () => {
                 if (expandedStats.has(name)) expandedStats.delete(name);
                 else expandedStats.add(name);
@@ -1696,6 +2002,7 @@
             checkAlarms();
             updateMonitorItemStyles();
             updateStatsPanel(wrap, name);
+            refreshAlarmListPanel();
         });
 
         const cancelBtn = document.createElement("button");
@@ -2018,25 +2325,10 @@
         });
     }
 
-    removeSelectedBtn.addEventListener("click", () => {
-        for (const name of monitoredNames) {
-            varGraphAssignment[name] = "";
-        }
-        for (const key of Object.keys(arrayElemAssignment)) {
-            delete arrayElemAssignment[key];
-            delete arrayElemHistory[key];
-        }
-        monitorListEl.querySelectorAll(".graph-select, .arr-graph-select").forEach(sel => {
-            sel.selectedIndex = 0;
-            updateSelectStyle(sel);
-        });
-        saveConfig();
-        pruneEmptyGraphs();
-        updateMonitorItemStyles();
-        renderPlots();
-    });
+    // Nota: el antiguo botón "Quitar sel." se ha eliminado; su funcionalidad
+    // ahora la asume el botón de Reset de gráficos.
 
-    document.getElementById("clearAlarmsBtn").addEventListener("click", () => {
+    function clearAllAlarms() {
         alarms = {};
         prevAlarmState = {};
         activeAlarms.clear();
@@ -2048,7 +2340,44 @@
         updateMonitorItemStyles();
         refreshAllStats();
         dismissAlarmBanner();
-    });
+    }
+
+    function refreshAlarmListPanel() {
+        const listEl = document.getElementById("alarmList");
+        if (!listEl) return;
+        listEl.innerHTML = "";
+        const names = Object.keys(alarms);
+        if (names.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "alarm-list-empty";
+            empty.textContent = currentLang === "en" ? "No alarms" : "Sin alarmas";
+            listEl.appendChild(empty);
+            return;
+        }
+        names.sort().forEach(name => {
+            const row = document.createElement("div");
+            row.className = "alarm-list-item";
+            const label = document.createElement("span");
+            label.className = "alarm-list-name";
+            label.textContent = name;
+            const btn = document.createElement("button");
+            btn.className = "alarm-list-remove";
+            btn.textContent = "×";
+            btn.title = currentLang === "en" ? "Remove alarm" : "Quitar alarma";
+            btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                delete alarms[name];
+                saveConfig();
+                checkAlarms();
+                updateMonitorItemStyles();
+                refreshAllStats();
+                refreshAlarmListPanel();
+            });
+            row.appendChild(label);
+            row.appendChild(btn);
+            listEl.appendChild(row);
+        });
+    }
 
     // ===== COMPUTED VARS UI =====
 
@@ -2278,7 +2607,7 @@
                 ctx.fillStyle = "#8b8fa3";
                 ctx.font = "bold 20px sans-serif";
                 ctx.textBaseline = "middle";
-                ctx.fillText("Grafico " + (gIdx + 1), 30, y + LABEL_H / 2);
+                ctx.fillText((I18N[currentLang] || I18N.es).graphTitle + " " + (gIdx + 1), 30, y + LABEL_H / 2);
 
                 y += LABEL_H;
                 ctx.drawImage(img, 0, y, w, h);
@@ -2391,6 +2720,54 @@
         renderPlots();
     }
 
+    function ensureNewGraphDropTarget() {
+        let addSlot = document.getElementById("plotAddSlot");
+        if (!addSlot) {
+            addSlot = document.createElement("div");
+            addSlot.id = "plotAddSlot";
+            addSlot.className = "plot-add-slot";
+            addSlot.textContent = (I18N[currentLang] || I18N.es).newGraphDropText;
+            plotArea.appendChild(addSlot);
+        }
+        addSlot.style.display = "flex";
+
+        addSlot.ondragover = (e) => {
+            if (!e.dataTransfer) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            addSlot.classList.add("plot-add-over");
+        };
+        addSlot.ondragleave = (e) => {
+            // Cualquier salida del área limpia el estado visual
+            addSlot.classList.remove("plot-add-over");
+        };
+        addSlot.ondrop = (e) => {
+            if (!e.dataTransfer) return;
+            e.preventDefault();
+            addSlot.classList.remove("plot-add-over");
+            const name = e.dataTransfer.getData("text/plain");
+            if (!name) return;
+            if (!monitoredNames.has(name) && !isArrayElem(name)) {
+                monitoredNames.add(name);
+                if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
+                sendMonitored();
+            }
+            if (graphList.length >= MAX_GRAPHS) return;
+            addGraph();
+            const newGid = graphList[graphList.length - 1];
+            if (isArrayElem(name)) {
+                arrayElemAssignment[name] = newGid;
+            } else {
+                varGraphAssignment[name] = newGid;
+            }
+            browserSelection.delete(name);
+            pruneEmptyGraphs();
+            rebuildMonitorList();
+            saveConfig();
+            schedulePlotRender();
+        };
+    }
+
     function removeGraph(gid) {
         graphList = graphList.filter(g => g !== gid);
         for (const name of monitoredNames) {
@@ -2431,12 +2808,14 @@
             dot.style.backgroundColor = GRAPH_ACCENT[idx % GRAPH_ACCENT.length];
 
             const label = document.createElement("span");
-            label.textContent = " Grafico " + (idx + 1);
+            label.className = "plot-slot-title";
+            const tr = I18N[currentLang] || I18N.es;
+            label.textContent = " " + tr.graphTitle + " " + (idx + 1);
 
             const removeBtn = document.createElement("button");
             removeBtn.className = "btn-plot-remove";
             removeBtn.textContent = "\u00D7";
-            removeBtn.title = "Eliminar grafico";
+            removeBtn.title = (I18N[currentLang] || I18N.es).removeGraphTitle;
             removeBtn.addEventListener("click", () => removeGraph(gid));
 
             header.appendChild(dot);
@@ -2450,6 +2829,43 @@
             slot.appendChild(header);
             slot.appendChild(container);
             frag.appendChild(slot);
+
+            // Drag & drop: soltar variables en un grafico concreto
+            slot.addEventListener("dragover", (e) => {
+                if (!e.dataTransfer) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                slot.classList.add("plot-drop-over");
+            });
+            slot.addEventListener("dragleave", () => {
+                // Cualquier salida limpia el estado visual
+                slot.classList.remove("plot-drop-over");
+            });
+            slot.addEventListener("drop", (e) => {
+                if (!e.dataTransfer) return;
+                e.preventDefault();
+                slot.classList.remove("plot-drop-over");
+                const name = e.dataTransfer.getData("text/plain");
+                if (!name) return;
+                // Si la variable aun no esta monitorizada, añadirla
+                if (!monitoredNames.has(name) && !isArrayElem(name)) {
+                    monitoredNames.add(name);
+                    if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
+                    sendMonitored();
+                }
+                // Asignar variable (o elemento de array) al grafico gid
+                if (isArrayElem(name)) {
+                    arrayElemAssignment[name] = gid;
+                } else {
+                    varGraphAssignment[name] = gid;
+                }
+                // Sincronizar estado visual del navegador de variables
+                browserSelection.delete(name);
+                pruneEmptyGraphs();
+                rebuildMonitorList();
+                saveConfig();
+                schedulePlotRender();
+            });
         });
 
         plotArea.insertBefore(frag, plotEmpty);
@@ -2547,23 +2963,24 @@
             });
 
             const cRect = containerEl.getBoundingClientRect();
+            const colors = getPlotLayoutColors();
             const layout = {
-                paper_bgcolor: "#1a1d27",
-                plot_bgcolor: "#0f1117",
-                font: { color: "#8b8fa3", family: "Segoe UI, system-ui, sans-serif", size: 10 },
+                paper_bgcolor: colors.paper_bgcolor,
+                plot_bgcolor: colors.plot_bgcolor,
+                font: { color: colors.fontColor, family: "Segoe UI, system-ui, sans-serif", size: 10 },
                 margin: { t: 8, r: 10, b: 28, l: 60 },
                 dragmode: "zoom",
                 width: Math.max(cRect.width, 200),
                 height: Math.max(cRect.height, 80),
                 hovermode: "x unified",
                 xaxis: {
-                    gridcolor: "#2a2e3a",
-                    zerolinecolor: "#2a2e3a",
+                    gridcolor: colors.gridcolor,
+                    zerolinecolor: colors.gridcolor,
                 },
-                yaxis: { gridcolor: "#2a2e3a", zerolinecolor: "#2a2e3a" },
+                yaxis: { gridcolor: colors.gridcolor, zerolinecolor: colors.gridcolor },
                 shapes: alarmShapes,
                 legend: {
-                    bgcolor: "rgba(0,0,0,0)",
+                    bgcolor: colors.legendBg,
                     font: { size: 9 },
                     orientation: "h",
                     y: 1.05,
@@ -2703,6 +3120,39 @@
             plotArea.appendChild(plotEmpty);
         }
     }
+
+    // --- Drag & drop: Columna 2 como zona de drop desde Columna 1 ---
+
+    monitorListEl.addEventListener("dragover", (e) => {
+        if (!e.dataTransfer) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        monitorListEl.classList.add("mon-drop-over");
+    });
+
+    monitorListEl.addEventListener("dragleave", () => {
+        // Cualquier salida limpia el estado visual para evitar resaltes atascados
+        monitorListEl.classList.remove("mon-drop-over");
+    });
+
+    monitorListEl.addEventListener("drop", (e) => {
+        if (!e.dataTransfer) return;
+        e.preventDefault();
+        monitorListEl.classList.remove("mon-drop-over");
+        const name = e.dataTransfer.getData("text/plain");
+        if (!name) return;
+        if (!knownVarNames.includes(name)) return;
+        if (!monitoredNames.has(name)) {
+            monitoredNames.add(name);
+            if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
+            sendMonitored();
+        }
+        // Asegurar que la selección de la Columna 1 se actualiza
+        browserSelection.delete(name);
+        saveConfig();
+        rebuildMonitorList();
+        renderBrowserList();
+    });
 
     async function initialScanAndConnect() {
         // Host por defecto: el hostname de la URL actual
