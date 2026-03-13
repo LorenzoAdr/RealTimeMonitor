@@ -16,6 +16,7 @@
     --red: #f87171;
     --radius: 6px;
     --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    --monitor-columns: 1;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -237,10 +238,16 @@ main {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
 }
 
-.col-browser { width: 260px; min-width: 200px; flex-shrink: 0; }
-.col-monitor { width: 300px; min-width: 240px; flex-shrink: 0; }
+.col-monitor {
+    width: calc(280px * var(--monitor-columns));
+    min-width: calc(240px * var(--monitor-columns));
+    flex-shrink: 0;
+    max-width: 60%;
+    overflow-y: auto;
+}
 .col-plot { flex: 1; min-width: 300px; }
 
 .col-header {
@@ -260,6 +267,35 @@ main {
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+}
+
+/* --- Variable browser drawer --- */
+
+.var-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100vh;
+    width: 280px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 18px rgba(0, 0, 0, 0.4);
+    z-index: 120;
+    display: none;
+    flex-direction: column;
+}
+
+.var-drawer-inner {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.drawer-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
 }
 
 .col-monitor-header {
@@ -770,6 +806,7 @@ main {
     border-radius: 3px;
     line-height: 1;
     flex-shrink: 0;
+    margin-left: 2px;
     opacity: 0.3;
     transition: all 0.15s;
 }
@@ -778,10 +815,14 @@ main {
 
 /* --- Monitor list --- */
 .monitor-list {
-    flex: 1;
-    overflow-y: auto;
+    flex: 0 0 auto;
+    /* deja que la altura total crezca dentro de col-monitor,
+       que ahora tiene su propio scroll vertical */
+    overflow-y: visible;
     overflow-x: hidden;
     padding: 4px;
+    column-count: var(--monitor-columns);
+    column-gap: 8px;
 }
 
 .monitor-list.mon-drop-over {
@@ -790,6 +831,7 @@ main {
 
 .monitor-item-wrap {
     margin-bottom: 2px;
+    break-inside: avoid;
 }
 
 .monitor-item {

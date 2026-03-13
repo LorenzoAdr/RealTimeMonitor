@@ -88,6 +88,7 @@
     let varFormat = {};  // { name: { ori: "dec", sal: "dec" } }
     let currentLang = "es";
     let currentTheme = "dark";
+    let monitorColumnsCount = 1;
 
     const GEN_TYPES = {
         sine:     { label: "Seno",       fields: [{k:"amp",l:"A",d:1},{k:"freq",l:"Hz",d:1},{k:"offset",l:"Off",d:0},{k:"phase",l:"Fase\u00B0",d:0}] },
@@ -437,6 +438,10 @@
         }
     }
 
+    function applyMonitorColumns() {
+        document.documentElement.style.setProperty("--monitor-columns", String(monitorColumnsCount));
+    }
+
     // --- Config persistence (localStorage) ---
 
     const STORAGE_KEY = "varmon_config";
@@ -459,6 +464,7 @@
                 arrayElemAssignment: arrayElemAssignment,
                 lang: currentLang,
                 theme: currentTheme,
+                monitorColumns: monitorColumnsCount,
             }));
         } catch (e) { /* quota exceeded or private mode */ }
     }
@@ -509,6 +515,9 @@
             if (cfg.theme) {
                 currentTheme = cfg.theme;
             }
+            if (typeof cfg.monitorColumns === "number" && cfg.monitorColumns >= 1 && cfg.monitorColumns <= 3) {
+                monitorColumnsCount = cfg.monitorColumns;
+            }
         } catch (e) { /* corrupt data */ }
     }
 
@@ -536,6 +545,7 @@
     loadConfig();
     applyTheme(currentTheme);
     applyLanguage(currentLang);
+    applyMonitorColumns();
 
     resetConfigBtn.addEventListener("click", resetConfig);
 
@@ -550,6 +560,34 @@
     helpOverlay.addEventListener("click", (e) => {
         if (e.target === helpOverlay) helpOverlay.style.display = "none";
     });
+
+    // --- Variable browser drawer (columna 1 como panel lateral derecho) ---
+
+    const browserToggleBtn = document.getElementById("browserToggleBtn");
+    const varDrawer = document.getElementById("varDrawer");
+    const browserCloseBtn = document.getElementById("browserCloseBtn");
+
+    function openVarDrawer() {
+        if (varDrawer) varDrawer.style.display = "flex";
+    }
+
+    function closeVarDrawer() {
+        if (varDrawer) varDrawer.style.display = "none";
+    }
+
+    if (browserToggleBtn && varDrawer) {
+        browserToggleBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const visible = varDrawer.style.display === "flex";
+            if (visible) closeVarDrawer(); else openVarDrawer();
+        });
+    }
+    if (browserCloseBtn) {
+        browserCloseBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closeVarDrawer();
+        });
+    }
 
     // --- Panel de ajustes (host/puerto/idioma/tema) ---
 
@@ -571,6 +609,8 @@
 
     const monitorMenuBtn = document.getElementById("monitorMenuBtn");
     const monitorMenuPanel = document.getElementById("monitorMenuPanel");
+    const monitorColsAddBtn = document.getElementById("monitorColsAddBtn");
+    const monitorColsRemoveBtn = document.getElementById("monitorColsRemoveBtn");
     if (monitorMenuBtn && monitorMenuPanel) {
         monitorMenuBtn.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -591,6 +631,21 @@
                 refreshAlarmListPanel();
             });
         }
+    }
+
+    if (monitorColsAddBtn) {
+        monitorColsAddBtn.addEventListener("click", () => {
+            monitorColumnsCount = Math.min(3, monitorColumnsCount + 1);
+            applyMonitorColumns();
+            saveConfig();
+        });
+    }
+    if (monitorColsRemoveBtn) {
+        monitorColsRemoveBtn.addEventListener("click", () => {
+            monitorColumnsCount = Math.max(1, monitorColumnsCount - 1);
+            applyMonitorColumns();
+            saveConfig();
+        });
     }
 
     if (langSelect) {
@@ -626,6 +681,7 @@
             arrayElemAssignment: arrayElemAssignment,
             lang: currentLang,
             theme: currentTheme,
+            monitorColumns: monitorColumnsCount,
         };
         const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
         const d = new Date();
@@ -693,6 +749,9 @@
                     if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
                     if (cfg.lang) currentLang = cfg.lang;
                     if (cfg.theme) currentTheme = cfg.theme;
+                    if (typeof cfg.monitorColumns === "number" && cfg.monitorColumns >= 1 && cfg.monitorColumns <= 3) {
+                        monitorColumnsCount = cfg.monitorColumns;
+                    }
                     saveConfig();
                     sendMonitored();
                     sendInterval();
@@ -702,6 +761,7 @@
                     renderPlots();
                     applyTheme(currentTheme);
                     applyLanguage(currentLang);
+                    applyMonitorColumns();
                 } catch (e) {
                     console.error("Error al importar config:", e);
                 }

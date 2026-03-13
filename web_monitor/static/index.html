@@ -16,6 +16,9 @@
         </div>
         <div class="header-right">
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
+            <span class="monitor-cols-label">Cols:</span>
+            <button id="monitorColsAddBtn" class="btn-small" title="Añadir columna">+</button>
+            <button id="monitorColsRemoveBtn" class="btn-small" title="Quitar columna">-</button>
             <button id="settingsBtn" class="btn-settings" title="Ajustes">&#9881;</button>
             <div id="settingsPanel" class="settings-panel" style="display:none">
                 <div class="settings-group">
@@ -72,6 +75,29 @@
             </div>
         </div>
     </header>
+
+    <div id="varDrawer" class="var-drawer" style="display:none">
+        <div class="var-drawer-inner">
+            <div class="col-header">
+                <h2 id="colBrowserTitle">Variables disponibles</h2>
+                <div class="drawer-actions">
+                    <button id="refreshNames" class="btn-small" title="Refrescar lista de variables">&#8635;</button>
+                    <button id="browserCloseBtn" class="btn-small" title="Cerrar">&times;</button>
+                </div>
+            </div>
+            <div class="search-box">
+                <input type="text" id="varFilter" placeholder="Filtrar variables...">
+            </div>
+            <div class="select-actions">
+                <button id="collapseAll" class="btn-small" title="Colapsar todo">&#9660;</button>
+                <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
+                <button id="selectAll" class="btn-small">Sel. todo</button>
+                <button id="selectNone" class="btn-small">Ninguno</button>
+                <button id="addToMonitor" class="btn-primary">Monitorizar &rarr;</button>
+            </div>
+            <div id="varBrowserList" class="var-list"></div>
+        </div>
+    </div>
 
     <div id="helpOverlay" class="help-overlay" style="display:none">
         <div class="help-modal">
@@ -221,30 +247,13 @@ history_capacity = 100    # Muestras por variable en buffer C++
     </div>
 
     <main>
-        <section class="col col-browser">
-            <div class="col-header">
-                <h2 id="colBrowserTitle">Variables disponibles</h2>
-                <button id="refreshNames" class="btn-small" title="Refrescar lista de variables">&#8635;</button>
-            </div>
-            <div class="search-box">
-                <input type="text" id="varFilter" placeholder="Filtrar variables...">
-            </div>
-            <div class="select-actions">
-                <button id="collapseAll" class="btn-small" title="Colapsar todo">&#9660;</button>
-                <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
-                <button id="selectAll" class="btn-small">Sel. todo</button>
-                <button id="selectNone" class="btn-small">Ninguno</button>
-                <button id="addToMonitor" class="btn-primary">Monitorizar &rarr;</button>
-            </div>
-            <div id="varBrowserList" class="var-list"></div>
-        </section>
-
         <section class="col col-monitor">
             <div class="col-header col-monitor-header">
                 <h2 id="colMonitorTitle">Monitorizando</h2>
                 <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
+                <button id="browserToggleBtn" class="btn-small" title="Variables disponibles">&#128269;</button>
                 <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
-                <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">+</button>
+                <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
                 <div id="monitorMenuPanel" class="monitor-menu-panel" style="display:none">
                     <div class="monitor-menu-row">
                         <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
