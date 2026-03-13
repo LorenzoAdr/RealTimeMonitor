@@ -41,6 +41,10 @@
     const statusEl = document.getElementById("connectionStatus");
     const varCountEl = document.getElementById("varCount");
     const intervalInput = document.getElementById("intervalInput");
+    const hostInput = document.getElementById("hostInput");
+    const portInput = document.getElementById("portInput");
+    const portSelect = document.getElementById("portSelect");
+    const reconnectBtn = document.getElementById("reconnectBtn");
     const varFilter = document.getElementById("varFilter");
     const varBrowserList = document.getElementById("varBrowserList");
     const addToMonitorBtn = document.getElementById("addToMonitor");
@@ -58,6 +62,7 @@
     const screenshotBtn = document.getElementById("screenshotBtn");
     const pauseBtn = document.getElementById("pauseBtn");
     const resetConfigBtn = document.getElementById("resetConfigBtn");
+    const hideLevelsInput = document.getElementById("hideLevelsInput");
 
     let browserSelection = new Set();
     let browserListDirty = true;
@@ -65,6 +70,7 @@
     let alarms = {};
     let activeAlarms = new Set();
     let prevAlarmState = {};
+    let hideLevels = 0;
     let lastAutoTsvTime = 0;
     const AUTO_TSV_COOLDOWN_MS = 10000;
     const AUTO_TSV_HISTORY_SEC = 10;
@@ -260,6 +266,9 @@
                 graphList: graphList,
                 timeWindow: timeWindowSelect.value,
                 historyBuffer: historyBufferSelect.value,
+                host: hostInput.value,
+                port: portInput.value || portSelect.value,
+                hideLevels: hideLevels,
                 interval: intervalInput.value,
                 alarms: alarms,
                 computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
@@ -287,6 +296,15 @@
             if (cfg.historyBuffer) {
                 historyBufferSelect.value = cfg.historyBuffer;
                 localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+            }
+            if (typeof cfg.hideLevels === "number") {
+                hideLevels = cfg.hideLevels;
+                if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
+            }
+            if (cfg.host) hostInput.value = cfg.host;
+            if (cfg.port) {
+                portInput.value = cfg.port;
+                portSelect.value = cfg.port;
             }
             if (cfg.interval) intervalInput.value = cfg.interval;
             if (cfg.alarms && typeof cfg.alarms === "object") alarms = cfg.alarms;
@@ -346,6 +364,9 @@
             graphList: graphList,
             timeWindow: timeWindowSelect.value,
             historyBuffer: historyBufferSelect.value,
+            host: hostInput.value,
+                port: portInput.value || portSelect.value,
+            hideLevels: hideLevels,
             interval: intervalInput.value,
             alarms: alarms,
             computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
@@ -389,6 +410,15 @@
                     if (cfg.historyBuffer) {
                         historyBufferSelect.value = cfg.historyBuffer;
                         localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+                    }
+                    if (typeof cfg.hideLevels === "number") {
+                        hideLevels = cfg.hideLevels;
+                        if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
+                    }
+                    if (cfg.host) hostInput.value = cfg.host;
+                    if (cfg.port) {
+                        portInput.value = cfg.port;
+                        portSelect.value = cfg.port;
                     }
                     if (cfg.interval) intervalInput.value = cfg.interval;
                     if (cfg.alarms && typeof cfg.alarms === "object") {
@@ -439,10 +469,18 @@
 
     function connect() {
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        const host = hostInput.value || location.hostname;
+        const port = (portInput.value || portSelect.value || "").trim();
+        const qs = new URLSearchParams();
+        if (host) qs.set("host", host);
+        if (port) qs.set("port", port);
+        const qp = qs.toString();
+        const url = qp ? `${proto}//${location.host}/ws?${qp}` : `${proto}//${location.host}/ws`;
+        ws = new WebSocket(url);
         ws.onopen = () => {
             statusEl.textContent = "Conectado";
             statusEl.className = "status connected";
+            clearReconnectPending();
             sendInterval();
             sendMonitored();
             startHistoryPolling();
@@ -452,7 +490,7 @@
             statusEl.className = "status disconnected";
             stopHistoryPolling();
             lastSeq = 0;
-            setTimeout(connect, 2000);
+            ws = null;
         };
         ws.onerror = () => ws.close();
         ws.onmessage = (e) => {
@@ -845,6 +883,11 @@
                     updateSelectStyle(sel);
                     attachGraphSelectHandler(sel, name);
                 }
+                // Actualizar el nombre mostrado segun hideLevels
+                const nameSpan = existingMap[name].querySelector(".mon-name");
+                if (nameSpan) {
+                    nameSpan.textContent = formatNameWithHiddenLevels(name, hideLevels);
+                }
                 delete existingMap[name];
                 continue;
             }
@@ -869,7 +912,7 @@
 
             const nameEl = document.createElement("span");
             nameEl.className = "mon-name";
-            nameEl.textContent = name;
+            nameEl.textContent = formatNameWithHiddenLevels(name, hideLevels);
             nameEl.addEventListener("click", () => {
                 if (expandedStats.has(name)) expandedStats.delete(name);
                 else expandedStats.add(name);
@@ -2559,6 +2602,153 @@
         saveConfig();
     });
 
+    function markReconnectPending() {
+        if (!reconnectBtn.classList.contains("btn-pending")) {
+            reconnectBtn.classList.add("btn-pending");
+        }
+    }
+
+    function clearReconnectPending() {
+        reconnectBtn.classList.remove("btn-pending");
+    }
+
+    hostInput.addEventListener("input", markReconnectPending);
+    portInput.addEventListener("input", markReconnectPending);
+    portSelect.addEventListener("change", () => {
+        if (portSelect.value) {
+            portInput.value = portSelect.value;
+        }
+        markReconnectPending();
+    });
+
+    reconnectBtn.addEventListener("click", () => {
+        if (ws) {
+            try { ws.close(); } catch (e) { /* ignore */ }
+        }
+        // Reset de estado al cambiar de instancia
+        resetStateForNewTarget();
+        lastSeq = 0;
+        connect();
+    });
+
+    if (hideLevelsInput) {
+        hideLevelsInput.addEventListener("change", () => {
+            const v = parseInt(hideLevelsInput.value || "0", 10);
+            hideLevels = isNaN(v) ? 0 : Math.max(0, Math.min(8, v));
+            hideLevelsInput.value = String(hideLevels);
+            rebuildMonitorList();
+            saveConfig();
+        });
+    }
+
+    function formatNameWithHiddenLevels(name, levels) {
+        const lvl = Math.max(0, Math.min(8, levels | 0));
+        if (lvl <= 0) return name;
+        const parts = name.split(".");
+        if (parts.length <= 1) return name;
+        const lastIdx = parts.length - 1;
+        const toHide = Math.min(lvl, lastIdx);
+        for (let i = 0; i < toHide; i++) {
+            const p = parts[i];
+            if (p.length > 0) parts[i] = p[0];
+        }
+        return parts.join(".");
+    }
+
+    function resetStateForNewTarget() {
+        // Limpiar variables internas
+        varsByName = {};
+        knownVarNames = [];
+        monitoredNames.clear();
+        varGraphAssignment = {};
+        historyCache = {};
+        graphList = [];
+        plotInstances = {};
+        arrayElemAssignment = {};
+        arrayElemHistory = {};
+        expandedStats.clear();
+        alarms = {};
+        activeAlarms.clear();
+        prevAlarmState = {};
+        computedVars = [];
+        computedHistories = {};
+
+        // Parar generadores activos
+        for (const name in activeGenerators) {
+            stopGenerator(name);
+        }
+
+        // Parar grabacion si estaba activa
+        isRecording = false;
+        recordBuffer = [];
+        recordColumns = [];
+        recordStartTime = null;
+        if (recordTimerInterval) {
+            clearInterval(recordTimerInterval);
+            recordTimerInterval = null;
+        }
+        recordTimerEl.style.display = "none";
+        recordBtn.classList.remove("btn-record-active");
+
+        // Reset UI de listas y graficos
+        browserSelection.clear();
+        browserListDirty = true;
+        varCountEl.textContent = "";
+        monitorListEl.innerHTML = "";
+        plotArea.innerHTML = "";
+        plotInstances = {};
+        // Volver a mostrar placeholder vacio de graficos
+        if (plotEmpty) {
+            plotEmpty.style.display = "flex";
+            plotArea.appendChild(plotEmpty);
+        }
+    }
+
+    async function initialScanAndConnect() {
+        // Host por defecto: el hostname de la URL actual
+        if (!hostInput.value) {
+            hostInput.value = location.hostname || "localhost";
+        }
+        try {
+            const resp = await fetch(`/api/scan_ports?host=${encodeURIComponent(hostInput.value)}`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            portSelect.innerHTML = "";
+            const hasPorts = Array.isArray(data.ports) && data.ports.length > 0;
+            if (hasPorts) {
+                // Rellenar solo con los puertos encontrados
+                for (const p of data.ports) {
+                    const opt = document.createElement("option");
+                    opt.value = String(p);
+                    opt.textContent = String(p);
+                    portSelect.appendChild(opt);
+                }
+            } else if (Array.isArray(data.range) && data.range.length === 2) {
+                // Sin instancias activas: usar el rango sugerido por el backend
+                const [start, end] = data.range;
+                for (let p = start; p <= end; p++) {
+                    const opt = document.createElement("option");
+                    opt.value = String(p);
+                    opt.textContent = String(p);
+                    portSelect.appendChild(opt);
+                }
+            }
+            // Si no hay configuracion previa de puerto, usar el primero del selector
+            if (!portSelect.value && portSelect.options.length > 0) {
+                portSelect.value = portSelect.options[0].value;
+            }
+            if (!portInput.value && portSelect.value) {
+                portInput.value = portSelect.value;
+            }
+            // Auto-conectar si se ha encontrado al menos una instancia
+            if (hasPorts) {
+                connect();
+            }
+        } catch (e) {
+            // En caso de error, no tocamos el contenido actual de portSelect ni auto-conectamos.
+        }
+    }
+
     // --- Data handlers ---
 
     function onVarNames(names) {
@@ -2652,5 +2842,5 @@
         }
     });
 
-    connect();
+    initialScanAndConnect();
 })();

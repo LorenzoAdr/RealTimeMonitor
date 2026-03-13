@@ -6,16 +6,17 @@ import struct
 import threading
 
 class TcpBridge:
-    def __init__(self, host: str = "localhost", port: int = 9100):
+    def __init__(self, host: str = "localhost", port: int = 9100, timeout: float = 5.0):
         self._host = host
         self._port = port
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
+        self._timeout = timeout
         self._connect()
 
     def _connect(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(5.0)
+        self._sock.settimeout(self._timeout)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock.connect((self._host, self._port))
 

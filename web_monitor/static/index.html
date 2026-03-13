@@ -14,8 +14,39 @@
             <span id="connectionStatus" class="status disconnected">Desconectado</span>
             <span id="varCount" class="var-count"></span>
         </div>
+        <div class="header-center">
+            <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
+            <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
+            <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
+            <button id="removeSelected" class="btn-small btn-danger">Quitar sel.</button>
+            <button id="clearAlarmsBtn" class="btn-small btn-danger" title="Quitar todas las alarmas">&#9888; Clear</button>
+            <button id="exportConfigBtn" class="btn-small" title="Guardar configuración a archivo">&#128190;</button>
+            <button id="importConfigBtn" class="btn-small" title="Cargar configuración desde archivo">&#128194;</button>
+            <button id="resetConfigBtn" class="btn-small" title="Limpiar toda la configuración">Reset</button>
+            <label>Ocultar niveles:
+                <select id="hideLevelsInput">
+                    <option value="0">0</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                </select>
+            </label>
+        </div>
         <div class="header-right">
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
+            <label>Host:
+                <input type="text" id="hostInput" value="" size="14">
+            </label>
+            <div class="port-control">
+                <label>Puerto:
+                    <input type="text" id="portInput" size="5">
+                </label>
+                <div class="port-select-wrap">
+                    <select id="portSelect" class="port-select"></select>
+                </div>
+            </div>
+            <button id="reconnectBtn" class="btn-small" title="Reconectar con el host/puerto seleccionados">Conectar</button>
             <label>Poll (ms):
                 <input type="number" id="intervalInput" value="200" min="100" max="5000" step="50">
             </label>
@@ -92,6 +123,7 @@
 
                 <h3>Cabecera</h3>
                 <ul>
+                    <li><b>Host / Puerto</b>: indican a que instancia de VarMonitor C++ se conecta el backend. Por defecto apunta al propio equipo donde corre el monitor web, pero puedes cambiar el host (otra IP accesible desde ese equipo) y el puerto (en el rango configurado, por defecto 1900–1910).</li>
                     <li><b>Poll (ms)</b>: intervalo de actualizacion de datos. Valores bajos = mas fluidez, mas carga.</li>
                     <li><b>Estado de conexion</b>: indicador verde (conectado) o rojo (desconectado) del WebSocket.</li>
                 </ul>
@@ -190,16 +222,6 @@ history_capacity = 100    # Muestras por variable en buffer C++
         <section class="col col-monitor">
             <div class="col-header">
                 <h2>Monitorizando</h2>
-                <div class="col-header-actions">
-                    <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
-                    <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
-                    <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
-                    <button id="removeSelected" class="btn-small btn-danger">Quitar sel.</button>
-                    <button id="clearAlarmsBtn" class="btn-small btn-danger" title="Quitar todas las alarmas">&#9888; Clear</button>
-                    <button id="exportConfigBtn" class="btn-small" title="Guardar configuración a archivo">&#128190;</button>
-                    <button id="importConfigBtn" class="btn-small" title="Cargar configuración desde archivo">&#128194;</button>
-                    <button id="resetConfigBtn" class="btn-small" title="Limpiar toda la configuración">Reset</button>
-                </div>
             </div>
             <div id="monitorList" class="monitor-list"></div>
         </section>

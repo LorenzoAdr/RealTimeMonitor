@@ -24,10 +24,58 @@ void VarMonitor::register_var(const std::string& name, double* ptr) {
         [ptr](const VarValue& v) { *ptr = std::get<double>(v); });
 }
 
+void VarMonitor::register_var(const std::string& name, float* ptr) {
+    register_var(name, VarType::Double,
+        [ptr]() -> VarValue { return static_cast<double>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<float>(std::get<double>(v)); });
+}
+
 void VarMonitor::register_var(const std::string& name, int32_t* ptr) {
     register_var(name, VarType::Int32,
         [ptr]() -> VarValue { return *ptr; },
         [ptr](const VarValue& v) { *ptr = std::get<int32_t>(v); });
+}
+
+void VarMonitor::register_var(const std::string& name, int64_t* ptr) {
+    register_var(name, VarType::Double,
+        [ptr]() -> VarValue { return static_cast<double>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<int64_t>(std::get<double>(v)); });
+}
+
+void VarMonitor::register_var(const std::string& name, uint32_t* ptr) {
+    register_var(name, VarType::Double,
+        [ptr]() -> VarValue { return static_cast<double>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<uint32_t>(std::get<double>(v)); });
+}
+
+void VarMonitor::register_var(const std::string& name, uint64_t* ptr) {
+    register_var(name, VarType::Double,
+        [ptr]() -> VarValue { return static_cast<double>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<uint64_t>(std::get<double>(v)); });
+}
+
+void VarMonitor::register_var(const std::string& name, int16_t* ptr) {
+    register_var(name, VarType::Int32,
+        [ptr]() -> VarValue { return static_cast<int32_t>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<int16_t>(std::get<int32_t>(v)); });
+}
+
+void VarMonitor::register_var(const std::string& name, uint16_t* ptr) {
+    register_var(name, VarType::Int32,
+        [ptr]() -> VarValue { return static_cast<int32_t>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<uint16_t>(std::get<int32_t>(v)); });
+}
+
+void VarMonitor::register_var(const std::string& name, int8_t* ptr) {
+    register_var(name, VarType::Int32,
+        [ptr]() -> VarValue { return static_cast<int32_t>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<int8_t>(std::get<int32_t>(v)); });
+}
+
+void VarMonitor::register_var(const std::string& name, uint8_t* ptr) {
+    register_var(name, VarType::Int32,
+        [ptr]() -> VarValue { return static_cast<int32_t>(*ptr); },
+        [ptr](const VarValue& v) { *ptr = static_cast<uint8_t>(std::get<int32_t>(v)); });
 }
 
 void VarMonitor::register_var(const std::string& name, bool* ptr) {
@@ -42,9 +90,30 @@ void VarMonitor::register_var(const std::string& name, std::string* ptr) {
         [ptr](const VarValue& v) { *ptr = std::get<std::string>(v); });
 }
 
+void VarMonitor::register_char_array(const std::string& name, char* buf, size_t len) {
+    register_var(name, VarType::String,
+        [buf, len]() -> VarValue {
+            size_t actual = strnlen(buf, len);
+            return std::string(buf, actual);
+        },
+        [buf, len](const VarValue& v) {
+            const std::string& s = std::get<std::string>(v);
+            size_t n = std::min(len - 1, s.size());
+            std::memcpy(buf, s.data(), n);
+            buf[n] = '\0';
+        });
+}
+
 void VarMonitor::register_var(const std::string& name, VarType type,
                                Getter getter, Setter setter) {
     std::unique_lock lock(mutex_);
+    // Si la variable ya existe, ignoramos registros duplicados para
+    // evitar reinicializar el historial continuamente.
+    auto it_existing = vars_.find(name);
+    if (it_existing != vars_.end()) {
+        return;
+    }
+
     VarEntry entry;
     entry.name = name;
     entry.type = type;

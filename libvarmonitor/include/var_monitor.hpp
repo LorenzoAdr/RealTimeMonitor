@@ -50,9 +50,21 @@ public:
     VarMonitor& operator=(const VarMonitor&) = delete;
 
     void register_var(const std::string& name, double* ptr);
+    void register_var(const std::string& name, float* ptr);
     void register_var(const std::string& name, int32_t* ptr);
+    void register_var(const std::string& name, int64_t* ptr);
+    void register_var(const std::string& name, uint32_t* ptr);
+    void register_var(const std::string& name, uint64_t* ptr);
+    void register_var(const std::string& name, int16_t* ptr);
+    void register_var(const std::string& name, uint16_t* ptr);
+    void register_var(const std::string& name, int8_t* ptr);
+    void register_var(const std::string& name, uint8_t* ptr);
     void register_var(const std::string& name, bool* ptr);
     void register_var(const std::string& name, std::string* ptr);
+
+    // Registro de buffers de caracteres como una sola cadena.
+    // El buffer debe mantenerse vivo mientras la variable este registrada.
+    void register_char_array(const std::string& name, char* buf, size_t len);
 
     void register_var(const std::string& name, VarType type, Getter getter, Setter setter = nullptr);
 

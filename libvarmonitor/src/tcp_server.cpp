@@ -77,7 +77,7 @@ bool load_config() {
     }
 
     std::cout << "[VarMonitor] Config cargada desde " << path
-              << " (tcp_port=" << g_tcp_port
+              << " (tcp_port_base=" << g_tcp_port
               << ", history_capacity=" << g_history_capacity << ")\n";
     return true;
 }
@@ -418,13 +418,28 @@ void VarMonitor::tcp_server_loop() {
     int opt = 1;
     ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(g_tcp_port);
+    // Intentar bind en un rango de puertos consecutivos empezando en g_tcp_port.
+    uint16_t base_port = g_tcp_port;
+    const uint16_t max_offset = 10;
+    bool bound = false;
 
-    if (::bind(server_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        std::cerr << "[VarMonitor] Error en bind (puerto " << g_tcp_port << ")\n";
+    for (uint16_t offset = 0; offset <= max_offset; ++offset) {
+        uint16_t port = static_cast<uint16_t>(base_port + offset);
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
+
+        if (::bind(server_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
+            g_tcp_port = port;
+            bound = true;
+            break;
+        }
+    }
+
+    if (!bound) {
+        std::cerr << "[VarMonitor] Error en bind: no hay puertos libres en rango ["
+                  << base_port << "," << (base_port + max_offset) << "]\n";
         ::close(server_fd);
         return;
     }
