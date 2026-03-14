@@ -6,7 +6,8 @@ endif()
 
 add_library(varmonitor STATIC
     src/var_monitor.cpp
-    src/tcp_server.cpp
+    src/uds_server.cpp
+    src/shm_publisher.cpp
 )
 add_library(varmonitor::varmonitor ALIAS varmonitor)
 
@@ -19,6 +20,9 @@ target_include_directories(varmonitor
 target_compile_features(varmonitor PUBLIC cxx_std_20)
 target_compile_options(varmonitor PRIVATE -Wall -Wextra)
 target_link_libraries(varmonitor PUBLIC pthread)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(varmonitor PUBLIC rt)
+endif()
 
 set_target_properties(varmonitor PROPERTIES
     POSITION_INDEPENDENT_CODE ON

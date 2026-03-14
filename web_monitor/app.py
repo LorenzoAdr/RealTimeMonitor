@@ -2,6 +2,7 @@
 
 import asyncio
 import getpass
+import logging
 import json
 import os
 import resource
@@ -15,19 +16,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from tcp_client import TcpBridge
+from queue import Empty, Queue
+
+from uds_client import UdsBridge
+from shm_reader import ShmReader
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 DEFAULTS = {
-    "tcp_port": 9100,
     "web_port": 8080,
-    "host": "localhost",
     "lan_ip": "",
-    "bind_host": "",  # Si se define (ej. IP de Red1), solo se escucha en esa interfaz; vacío = 0.0.0.0
-    "auth_password": "",  # Si se define, el WebSocket exige ?password=... correcto
-    "poll_interval_min_ms": 5,   # Mínimo permitido para Poll (ms) en el monitor
-    "poll_interval_ms": 200,     # Valor por defecto de Poll (ms) si el usuario no tiene preferencia guardada
+    "bind_host": "",
+    "auth_password": "",
+    "cycle_interval_ms": 100,
+    "update_ratio_max": 100,
 }
 
 
@@ -54,9 +56,9 @@ def load_config() -> dict:
                     continue
                 key, val = line.split("=", 1)
                 key, val = key.strip(), val.strip()
-                if key in ("tcp_port", "web_port", "poll_interval_min_ms", "poll_interval_ms"):
+                if key in ("web_port", "cycle_interval_ms", "update_ratio_max"):
                     cfg[key] = int(val)
-                elif key in ("host", "lan_ip", "bind_host", "auth_password"):
+                elif key in ("lan_ip", "bind_host", "auth_password"):
                     cfg[key] = val
         print(f"[VarMonitor Web] Config cargada desde {os.path.abspath(path)}")
         if (cfg.get("auth_password") or "").strip():
@@ -66,7 +68,7 @@ def load_config() -> dict:
     except FileNotFoundError:
         print(f"[VarMonitor Web] AVISO: No se encontro el archivo de configuracion.")
         print(f"  Buscado en: {os.path.abspath(path)}")
-        print(f"  Usando valores por defecto (tcp_port={cfg['tcp_port']}, web_port={cfg['web_port']}, host={cfg['host']})")
+        print(f"  Usando valores por defecto (web_port={cfg['web_port']})")
         print(f"  Para cambiar la ruta:")
         print(f"    - Variable de entorno: VARMON_CONFIG=/ruta/a/varmon.conf")
         print(f"    - Colocar varmon.conf en el directorio de trabajo actual")
@@ -74,14 +76,6 @@ def load_config() -> dict:
 
 
 _config = load_config()
-
-TCP_HOST_DEFAULT = _config["host"]
-TCP_PORT_DEFAULT = _config["tcp_port"]
-
-
-def get_default_tcp_port():
-    """Puerto C++ por defecto: el preferido (último en rango al arrancar) si está definido, sino base de config."""
-    return getattr(app.state, "preferred_tcp_port", None) or _config["tcp_port"]
 
 # Numero de conexiones WebSocket activas
 ACTIVE_WS = 0
@@ -95,71 +89,34 @@ FAILED_AUTH_ATTEMPTS = 0
 WATCHDOG_IDLE_SEC = 300  # 5 minutos
 
 async def _watchdog_no_cpp():
-    """Cierra el proceso si durante WATCHDOG_IDLE_SEC no hay C++ accesible ni clientes activos."""
+    """Cierra el proceso si durante WATCHDOG_IDLE_SEC no hay C++ (UDS) accesible ni clientes activos."""
     global ACTIVE_WS
     last_ok = time.monotonic()
     while True:
         await asyncio.sleep(5.0)
-        # Si hay clientes conectados, no hacemos nada radical:
-        # el usuario puede estar esperando a que arranque el C++.
         if ACTIVE_WS > 0:
-            # Si hay al menos un cliente, intentamos actualizar last_ok si hay C++
             try:
-                b = TcpBridge(TCP_HOST_DEFAULT, get_default_tcp_port(), timeout=0.5)
-                _ = b.list_names()
-                b.disconnect()
-                last_ok = time.monotonic()
+                inst = await asyncio.to_thread(_list_uds_instances, None)
+                if inst:
+                    b = await asyncio.to_thread(UdsBridge, inst[0]["uds_path"], 0.5)
+                    _ = await asyncio.to_thread(b.list_names)
+                    b.disconnect()
+                    last_ok = time.monotonic()
             except Exception:
                 pass
             continue
-
-        # Sin clientes: comprobamos si hay C++ accesible
         try:
-            b = TcpBridge(TCP_HOST_DEFAULT, get_default_tcp_port(), timeout=0.5)
-            _ = b.list_names()
-            b.disconnect()
-            last_ok = time.monotonic()
+            inst = await asyncio.to_thread(_list_uds_instances, None)
+            if inst:
+                b = await asyncio.to_thread(UdsBridge, inst[0]["uds_path"], 0.5)
+                _ = await asyncio.to_thread(b.list_names)
+                b.disconnect()
+                last_ok = time.monotonic()
         except Exception:
             pass
-
         if time.monotonic() - last_ok > WATCHDOG_IDLE_SEC and ACTIVE_WS == 0:
-            print(f"[VarMonitor Web] No se detecto ningun servidor C++ durante {WATCHDOG_IDLE_SEC}s y no hay clientes activos. Cerrando proceso.")
+            print(f"[VarMonitor Web] No se detecto ningun servidor C++ (UDS) durante {WATCHDOG_IDLE_SEC}s y no hay clientes activos. Cerrando proceso.")
             os._exit(0)
-
-
-def _scan_tcp_ports_max(host: str, start_port: int, max_offset: int = 10, timeout: float = 0.3) -> int | None:
-    """Escanea [start_port, start_port+max_offset] y devuelve el mayor puerto activo (C++ VarMonitor), o None."""
-    active: list[int] = []
-    for offset in range(max_offset + 1):
-        p = start_port + offset
-        try:
-            b = TcpBridge(host, p, timeout=timeout)
-            _ = b.list_names()
-            b.disconnect()
-            active.append(p)
-        except Exception:
-            continue
-    return max(active) if active else None
-
-
-def _scan_tcp_ports_preferred_by_uptime(
-    host: str, start_port: int, max_offset: int = 10, timeout: float = 0.4
-) -> int | None:
-    """Devuelve el puerto C++ con menor uptime (más reciente). Si ninguno expone uptime, fallback a mayor puerto."""
-    candidates: list[tuple[int, float]] = []
-    for offset in range(max_offset + 1):
-        p = start_port + offset
-        try:
-            b = TcpBridge(host, p, timeout=timeout)
-            uptime = b.get_uptime_seconds()
-            b.disconnect()
-            candidates.append((p, uptime if uptime is not None else float("inf")))
-        except Exception:
-            continue
-    if not candidates:
-        return None
-    # Menor uptime = más reciente; desempate por puerto mayor
-    return min(candidates, key=lambda x: (x[1], -x[0]))[0]
 
 
 def _scan_web_ports_max(base_port: int, max_offset: int = 10, timeout: float = 0.2) -> int | None:
@@ -202,19 +159,6 @@ def _fetch_instance_info_from_web_port(web_port: int, timeout: float = 0.4) -> d
             return json.loads(resp.read().decode())
     except Exception:
         return None
-
-
-def _enrich_ports_with_users(ports: list[int], base_web: int, base_tcp: int) -> dict[int, str]:
-    """Para cada puerto C++ en ports, pregunta al backend web correspondiente y devuelve mapa puerto -> usuario."""
-    port_users: dict[int, str] = {}
-    for p in ports:
-        web_port = base_web + (p - base_tcp)
-        if web_port < 1 or web_port > 65535:
-            continue
-        info = _fetch_instance_info_from_web_port(web_port)
-        if info and info.get("user"):
-            port_users[p] = info["user"]
-    return port_users
 
 
 # Cache para suggested_web_port (puerto con menor uptime): (valor, timestamp)
@@ -261,16 +205,6 @@ def _get_suggested_web_port(
 async def lifespan(app: FastAPI):
     if not hasattr(app.state, "startup_time"):
         app.state.startup_time = time.monotonic()
-    # Puerto C++ por defecto = mismo índice que nuestro puerto web (8080→9100, 8081→9101, ...)
-    if not hasattr(app.state, "preferred_tcp_port"):
-        actual = getattr(app.state, "actual_web_port", None)
-        base_web = _config["web_port"]
-        base_tcp = _config["tcp_port"]
-        if actual is not None:
-            app.state.preferred_tcp_port = base_tcp + (actual - base_web)
-    default_tcp = getattr(app.state, "preferred_tcp_port", None) or TCP_PORT_DEFAULT
-    print(f"[VarMonitor Web] Config TCP por defecto: host={TCP_HOST_DEFAULT}, port={default_tcp}")
-    # Lanzar watchdog en segundo plano
     asyncio.create_task(_watchdog_no_cpp())
     yield
 
@@ -287,8 +221,10 @@ async def index():
 @app.get("/api/vars")
 async def api_list_vars():
     try:
-        b = TcpBridge(TCP_HOST_DEFAULT, get_default_tcp_port())
-        data = b.list_vars()
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        data = await asyncio.to_thread(b.list_vars)
         b.disconnect()
         return JSONResponse(data)
     except Exception as e:
@@ -298,8 +234,10 @@ async def api_list_vars():
 @app.get("/api/var/{name:path}")
 async def api_get_var(name: str):
     try:
-        b = TcpBridge(TCP_HOST_DEFAULT, get_default_tcp_port())
-        result = b.get_var(name)
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        result = await asyncio.to_thread(b.get_var, name)
         b.disconnect()
         if result is None:
             return JSONResponse({"error": "Variable no encontrada"}, status_code=404)
@@ -311,8 +249,10 @@ async def api_get_var(name: str):
 @app.post("/api/var/{name:path}")
 async def api_set_var(name: str, value: float = Query(...), var_type: str = Query("double")):
     try:
-        b = TcpBridge(TCP_HOST_DEFAULT, get_default_tcp_port())
-        ok = b.set_var(name, value, var_type)
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        ok = await asyncio.to_thread(b.set_var, name, value, var_type)
         b.disconnect()
         return JSONResponse({"success": ok})
     except Exception as e:
@@ -322,8 +262,10 @@ async def api_set_var(name: str, value: float = Query(...), var_type: str = Quer
 @app.get("/api/history/{name:path}")
 async def api_get_history(name: str):
     try:
-        b = TcpBridge(TCP_HOST_DEFAULT, get_default_tcp_port())
-        result = b.get_history(name)
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        result = await asyncio.to_thread(b.get_history, name)
         b.disconnect()
         if result is None:
             return JSONResponse({"error": "Variable no encontrada"}, status_code=404)
@@ -332,48 +274,148 @@ async def api_get_history(name: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-def _do_scan_ports(host: str, start: int, end: int) -> dict:
-    """Escaneo síncrono de puertos C++; se ejecuta en thread."""
-    active: list[int] = []
-    for p in range(start, end + 1):
-        try:
-            b = TcpBridge(host, p, timeout=0.3)
-            _ = b.list_names()
-            b.disconnect()
-            active.append(p)
-        except Exception:
-            continue
-    return {"host": host, "ports": active, "range": [start, end]}
-
-
-@app.get("/api/scan_ports")
-async def api_scan_ports(
-    host: str = Query(TCP_HOST_DEFAULT),
-    start: int | None = Query(None),
-    end: int | None = Query(None),
-    port: int | None = Query(None, description="Puerto actual; se ignora el valor y se escanea siempre el rango base para listar todas las instancias"),
-):
-    """Escanea un rango de puertos para encontrar instancias activas de VarMonitor."""
-    if start is not None and end is not None:
-        pass
-    else:
-        # Siempre escanear el rango base (ej. 1900–1910) para que aparezcan todos los procesos, estés en 8080 o 8081
-        start = _config["tcp_port"]
-        end = min(65535, start + 10)
-    result = await asyncio.to_thread(_do_scan_ports, host, start, end)
-    # Puerto autodescubierto (este backend) y usuario que ejecuta este Python
-    result["suggested_port"] = getattr(app.state, "preferred_tcp_port", None)
+def _list_uds_instances(user_filter: str | None) -> list[dict]:
+    """Lista instancias VarMonitor por UDS en /tmp (varmon-*.sock). Orden: más reciente primero (por mtime del socket)."""
+    import glob
+    candidates: list[tuple[float, dict]] = []
     try:
-        result["user"] = getpass.getuser()
+        pattern = f"/tmp/varmon-{user_filter}-*.sock" if user_filter else "/tmp/varmon-*.sock"
+        paths = glob.glob(pattern)
+        for path in paths:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0.0
+            try:
+                b = UdsBridge(path, timeout=0.6)
+                info = b.get_server_info()
+                b.disconnect()
+            except Exception:
+                continue
+            if not info:
+                continue
+            name = path.rsplit("/", 1)[-1].replace(".sock", "")
+            parts = name.split("-", 2)  # varmon, user, pid
+            pid = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else None
+            candidates.append((mtime, {
+                "uds_path": path,
+                "pid": pid,
+                "uptime_seconds": info.get("uptime_seconds"),
+                "user": parts[1] if len(parts) >= 2 else None,
+            }))
+        # Más reciente primero (mtime descendente)
+        candidates.sort(key=lambda x: -x[0])
+        return [d for _, d in candidates]
     except Exception:
-        result["user"] = None
-    # Usuario por puerto: preguntar a cada backend web del rango (8080→1900, 8081→1901, …)
-    base_web = _config["web_port"]
-    base_tcp = _config["tcp_port"]
-    result["port_users"] = await asyncio.to_thread(
-        _enrich_ports_with_users, result["ports"], base_web, base_tcp
-    )
-    return result
+        pass
+    return []
+
+
+def _first_uds_bridge():
+    """Primera instancia UDS disponible. None si no hay ninguna."""
+    inst = _list_uds_instances(None)
+    if not inst:
+        return None
+    try:
+        return UdsBridge(inst[0]["uds_path"], timeout=3.0)
+    except Exception:
+        return None
+
+
+# Directorio para grabaciones (backend)
+RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+ALARM_BUFFER_SEC = 11.0  # 10 s + 1 s para registro en alarma
+
+
+def _ensure_recordings_dir():
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]], var_names: list[str] | None = None) -> None:
+    """Escribe snapshots a TSV (tabuladores). Arrays expandidos en columnas: name_0, name_1, ..."""
+    if not snapshots:
+        return
+    if var_names is None:
+        names_set = set()
+        for _, data in snapshots:
+            for e in data:
+                names_set.add(e["name"])
+        var_names = sorted(names_set)
+    # Para cada variable: si en algún snapshot es lista, columnas name_0, name_1, ... (max len)
+    col_spec: list[tuple[str, int]] = []  # (name, size): size 1 = escalar, >1 = array con size columnas
+    for name in var_names:
+        max_len = 1
+        for _, data in snapshots:
+            for e in data:
+                if e["name"] != name:
+                    continue
+                v = e.get("value")
+                if isinstance(v, (list, tuple)):
+                    max_len = max(max_len, len(v))
+                break
+        col_spec.append((name, max_len))
+    # Cabecera: time_s \t col1 \t col2 \t ... (arrays: name_0, name_1, ...)
+    header_parts = ["time_s"]
+    for name, size in col_spec:
+        if size <= 1:
+            header_parts.append(name)
+        else:
+            header_parts.extend(f"{name}_{i}" for i in range(size))
+    with open(filepath, "w") as f:
+        f.write("\t".join(header_parts) + "\n")
+        for t, data in snapshots:
+            name_to_val = {e["name"]: e.get("value", "") for e in data}
+            row_parts = [f"{t:.6f}"]
+            for name, size in col_spec:
+                v = name_to_val.get(name, "")
+                if size <= 1:
+                    row_parts.append(str(v))
+                else:
+                    if isinstance(v, (list, tuple)):
+                        for i in range(size):
+                            row_parts.append(str(v[i]) if i < len(v) else "")
+                    else:
+                        row_parts.extend([str(v)] + [""] * (size - 1))
+            f.write("\t".join(row_parts) + "\n")
+
+
+def _evaluate_alarms(snapshot: list[dict], alarms_config: dict, prev_state: dict) -> tuple[dict, list[dict], list[str]]:
+    """Evalúa umbrales en snapshot. Devuelve (nuevo_estado, triggered [{name, reason, value}], cleared [name])."""
+    new_state = dict(prev_state)
+    triggered = []
+    cleared = []
+    var_by_name = {e["name"]: e for e in snapshot}
+    for name, cfg in alarms_config.items():
+        if name not in var_by_name:
+            continue
+        e = var_by_name[name]
+        val = e.get("value")
+        if not isinstance(val, (int, float)):
+            continue
+        lo = cfg.get("lo")
+        hi = cfg.get("hi")
+        alarming = False
+        reason = ""
+        if hi is not None and val > hi:
+            alarming = True
+            reason = f"{name} = {val:.4f} > Hi:{hi}"
+        if lo is not None and val < lo:
+            alarming = True
+            reason = f"{name} = {val:.4f} < Lo:{lo}"
+        was = prev_state.get(name, False)
+        new_state[name] = alarming
+        if alarming and not was:
+            triggered.append({"name": name, "reason": reason, "value": val})
+        elif was and not alarming:
+            cleared.append(name)
+    return new_state, triggered, cleared
+
+
+@app.get("/api/uds_instances")
+async def api_uds_instances(user: str | None = Query(None, description="Filtrar por usuario (solo varmon-<user>-*.sock)")):
+    """Lista instancias VarMonitor accesibles por UDS en /tmp. Sin TCP."""
+    instances = await asyncio.to_thread(_list_uds_instances, user)
+    return {"instances": instances}
 
 
 @app.get("/api/auth_required")
@@ -425,12 +467,14 @@ def _get_python_cpu_percent(state) -> float | None:
     return None
 
 
-def _fetch_cpp_stats_sync(host: str, port: int, timeout: float = 1.0) -> tuple[float | None, float | None]:
-    """Conecta al C++, pide server_info; devuelve (ram_mb, cpu_percent). (None, None) si falla."""
+def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | None]:
+    """Conecta al C++ por UDS, pide server_info; devuelve (ram_mb, cpu_percent). (None, None) si falla."""
     try:
-        bridge = TcpBridge(host, port, timeout=timeout)
-        info = bridge.get_server_info()
-        bridge.disconnect()
+        b = _first_uds_bridge()
+        if b is None:
+            return (None, None)
+        info = b.get_server_info()
+        b.disconnect()
         if info is None:
             return (None, None)
         ram_mb = None
@@ -449,21 +493,12 @@ def _fetch_cpp_stats_sync(host: str, port: int, timeout: float = 1.0) -> tuple[f
 
 
 @app.get("/api/advanced_stats")
-async def api_advanced_stats(
-    request: Request,
-    host: str | None = Query(None),
-    port: int | None = Query(None),
-):
-    """RAM y CPU % del proceso Python; RAM del C++ (si se puede conectar). Para el panel Adv info."""
+async def api_advanced_stats(request: Request):
+    """RAM y CPU % del proceso Python; RAM del C++ (si se puede conectar por UDS)."""
     state = request.app.state
-    h = host or TCP_HOST_DEFAULT
-    try:
-        p = int(port) if port is not None else get_default_tcp_port()
-    except (TypeError, ValueError):
-        p = get_default_tcp_port()
     python_ram_mb = _get_process_ram_mb()
     python_cpu_percent = _get_python_cpu_percent(state)
-    cpp_ram_mb, cpp_cpu_percent = await asyncio.to_thread(_fetch_cpp_stats_sync, h, p)
+    cpp_ram_mb, cpp_cpu_percent = await asyncio.to_thread(_fetch_cpp_stats_sync)
     return {
         "python_ram_mb": python_ram_mb,
         "python_cpu_percent": python_cpu_percent,
@@ -487,42 +522,26 @@ async def api_uptime(request: Request):
 
 @app.get("/api/connection_info")
 async def api_connection_info(request: Request):
-    """Devuelve puertos base y real del backend para detectar multi-instancia y comprobar coherencia web/C++."""
+    """Devuelve puertos web y usuario para el frontend."""
     state = request.app.state
-    actual = getattr(state, "actual_web_port", None)
-    if actual is None:
-        actual = _config["web_port"]
+    actual = getattr(state, "actual_web_port", None) or _config["web_port"]
     base_web = _config["web_port"]
-    base_tcp = _config["tcp_port"]
-
-    # Mayor puerto web en uso (cacheado); en thread para no bloquear el event loop
     max_web = getattr(state, "max_web_port_in_range", None)
     if max_web is None:
         max_web = await asyncio.to_thread(_scan_web_ports_max, base_web)
         if max_web is not None:
             state.max_web_port_in_range = max_web
-
-    uptime = None
-    if hasattr(state, "startup_time"):
-        uptime = time.monotonic() - state.startup_time
-
-    # Puerto sugerido = mayor en rango (evitamos HTTP a otros backends para no bloquear/cerrar conexiones)
+    uptime = time.monotonic() - state.startup_time if hasattr(state, "startup_time") else None
     suggested_web_port = max_web if max_web is not None else actual
-
     out = {
         "base_web_port": base_web,
         "actual_web_port": actual,
-        "base_tcp_port": base_tcp,
         "max_web_port_in_range": max_web,
         "suggested_web_port": suggested_web_port,
         "uptime_seconds": uptime,
-        "poll_interval_min_ms": _config.get("poll_interval_min_ms", 5),
-        "poll_interval_ms": _config.get("poll_interval_ms", 200),
+        "cycle_interval_ms": _config.get("cycle_interval_ms", 100),
+        "update_ratio_max": _config.get("update_ratio_max", 100),
     }
-    preferred = getattr(state, "preferred_tcp_port", None)
-    if preferred is not None:
-        out["preferred_tcp_port"] = preferred
-    out["current_cpp_port"] = preferred
     try:
         out["current_user"] = getpass.getuser()
     except Exception:
@@ -532,15 +551,14 @@ async def api_connection_info(request: Request):
 
 @app.get("/api/instance_info")
 async def api_instance_info(request: Request):
-    """Info ligera de esta instancia (puerto web, C++, usuario) para que otros frontends/backends la muestren."""
+    """Info ligera de esta instancia (puerto web, usuario)."""
     state = request.app.state
     actual = getattr(state, "actual_web_port", None) or _config["web_port"]
-    preferred = getattr(state, "preferred_tcp_port", None)
     try:
         user = getpass.getuser()
     except Exception:
         user = None
-    return {"actual_web_port": actual, "cpp_port": preferred, "user": user}
+    return {"actual_web_port": actual, "user": user}
 
 
 @app.websocket("/ws")
@@ -573,30 +591,59 @@ async def websocket_endpoint(ws: WebSocket):
             return
         FAILED_AUTH_ATTEMPTS = 0  # Contraseña correcta: reiniciar contador
 
-    interval = 0.2
+    cycle_interval_sec = _config.get("cycle_interval_ms", 100) / 1000.0
+    update_ratio = 5  # enviar vars_update cada N ciclos de tiempo (5 por defecto; 1 = tasa máxima)
+    last_vars_update_at = 0.0  # tiempo (monotonic) del último vars_update
     names_refresh_interval = 30.0
     monitored_names: set[str] = set()
     last_names_send = 0.0
     names_sent_once = False
+    # Alarmas y grabación (plan dos tasas)
+    alarms_config: dict = {}  # { name: { lo, hi } }
+    prev_alarm_state: dict = {}
+    recording = False
+    record_buffer: list[tuple[float, list[dict]]] = []
+    alarm_buffer: list[tuple[float, list[dict]]] = []  # ventana rodante ALARM_BUFFER_SEC
+    latest_snapshot: list[dict] | None = None
+    send_file_on_finish = False  # por defecto no enviar fichero al navegador
+    recording_var_names: list[str] | None = None  # columnas para CSV (monitored al start)
 
-    # Host y puerto seleccionados para esta conexion (por defecto: C++ preferido = último en rango)
-    query_host = ws.query_params.get("host") or TCP_HOST_DEFAULT
-    query_port = ws.query_params.get("port")
-    try:
-        tcp_port = int(query_port) if query_port is not None else get_default_tcp_port()
-    except ValueError:
-        tcp_port = get_default_tcp_port()
-
-    try:
-        bridge = TcpBridge(query_host, tcp_port)
-    except Exception as e:
-        print(f"[VarMonitor Web] No se pudo conectar al C++ {query_host}:{tcp_port}: {e}", flush=True)
-        await ws.send_json({"type": "error", "message": f"No se pudo conectar a {query_host}:{tcp_port}: {e}"})
+    # Conexión solo por UDS
+    query_uds = ws.query_params.get("uds_path")
+    if not query_uds:
+        inst = await asyncio.to_thread(_list_uds_instances, None)
+        if inst:
+            query_uds = inst[0]["uds_path"]
+    if not query_uds:
+        await ws.send_json({"type": "error", "message": "No hay instancias VarMonitor (UDS). Arranca la aplicación C++."})
         await ws.close()
         ACTIVE_WS -= 1
         return
+    try:
+        bridge = await asyncio.to_thread(UdsBridge, query_uds, 5.0)
+        info = await asyncio.to_thread(bridge.get_server_info)
+    except Exception as e:
+        print(f"[VarMonitor Web] No se pudo conectar por UDS {query_uds}: {e}", flush=True)
+        await ws.send_json({"type": "error", "message": f"No se pudo conectar a {query_uds}: {e}"})
+        await ws.close()
+        ACTIVE_WS -= 1
+        return
+    connection_label = query_uds
 
-    print(f"[VarMonitor Web] WebSocket conectado a C++ {query_host}:{tcp_port}", flush=True)
+    shm_reader: ShmReader | None = None
+    shm_queue: Queue | None = None
+    if info and info.get("shm_name") and info.get("sem_name"):
+        shm_queue = Queue()
+        shm_reader = ShmReader(
+            info["shm_name"], info["sem_name"], shm_queue, poll_interval=0.5
+        )
+        if shm_reader.start():
+            print(f"[VarMonitor Web] SHM activo: {info['shm_name']} (vars_update por SHM)", flush=True)
+        else:
+            shm_reader = None
+            shm_queue = None
+
+    print(f"[VarMonitor Web] WebSocket conectado a C++ {connection_label}", flush=True)
     await ws.send_json({"type": "vars_names", "data": []})
 
     try:
@@ -612,16 +659,89 @@ async def websocket_endpoint(ws: WebSocket):
                     last_names_send = now
                     names_sent_once = True
 
-                if monitored_names:
-                    mon_data = []
-                    for name in monitored_names:
-                        vinfo = await asyncio.to_thread(bridge.get_var, name)
-                        if vinfo:
-                            mon_data.append(vinfo)
-                    await ws.send_json({"type": "vars_update", "data": mon_data})
+                # Procesar cada snapshot de la cola (alarmas + buffers); envío visual a tasa baja
+                if shm_reader and shm_queue is not None:
+                    while True:
+                        try:
+                            snapshot = shm_queue.get_nowait()
+                        except Empty:
+                            break
+                        if not snapshot:
+                            continue
+                        t_snap = time.time()
+                        latest_snapshot = snapshot
+                        # Buffer de alarma (ventana rodante 10s+1)
+                        if alarms_config:
+                            alarm_buffer.append((t_snap, snapshot))
+                            cutoff = t_snap - ALARM_BUFFER_SEC
+                            while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                                alarm_buffer.pop(0)
+                        # Evaluar alarmas
+                        if alarms_config:
+                            prev_alarm_state, triggered, cleared = _evaluate_alarms(snapshot, alarms_config, prev_alarm_state)
+                            if cleared:
+                                try:
+                                    await ws.send_json({"type": "alarm_cleared", "names": cleared})
+                                except Exception:
+                                    pass
+                            if triggered:
+                                await ws.send_json({
+                                    "type": "alarm_triggered",
+                                    "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
+                                })
+                                # Programar escritura y notificación del fichero de alarma 1 s después (10s antes + 1s después)
+                                async def send_alarm_file_later():
+                                    await asyncio.sleep(1.0)
+                                    buf_now = list(alarm_buffer)
+                                    if not buf_now:
+                                        return
+                                    _ensure_recordings_dir()
+                                    from datetime import datetime
+                                    fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+                                    path = os.path.join(RECORDINGS_DIR, fn)
+                                    var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
+                                    if not var_names:
+                                        var_names = ["time_s"]
+                                    _write_snapshots_tsv(path, buf_now, var_names)
+                                    msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
+                                    if send_file_on_finish:
+                                        try:
+                                            with open(path, "rb") as f:
+                                                import base64
+                                                msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+                                        except Exception:
+                                            pass
+                                    try:
+                                        await ws.send_json(msg)
+                                    except Exception:
+                                        pass
+                                asyncio.create_task(send_alarm_file_later())
+                        # Buffer de grabación manual
+                        if recording:
+                            record_buffer.append((t_snap, snapshot))
+                    # Envío visual a tasa baja (throttle)
+                    interval_between_updates = update_ratio * cycle_interval_sec
+                    if monitored_names and latest_snapshot is not None and (now - last_vars_update_at >= interval_between_updates):
+                        last_vars_update_at = now
+                        name_set = set(monitored_names)
+                        mon_data = [v for v in latest_snapshot if v["name"] in name_set]
+                        await ws.send_json({"type": "vars_update", "data": mon_data})
+                else:
+                    # Sin SHM: pedir vars por UDS a tasa visual; si hay grabación, rellenar buffer también
+                    interval_between_updates = update_ratio * cycle_interval_sec
+                    if monitored_names and (now - last_vars_update_at >= interval_between_updates):
+                        last_vars_update_at = now
+                        mon_data = []
+                        for name in monitored_names:
+                            vinfo = await asyncio.to_thread(bridge.get_var, name)
+                            if vinfo:
+                                mon_data.append(vinfo)
+                        await ws.send_json({"type": "vars_update", "data": mon_data})
+                        if recording and mon_data:
+                            record_buffer.append((time.time(), mon_data))
 
             except Exception as e:
-                print(f"[VarMonitor Web] WebSocket error (C++ {query_host}:{tcp_port}): {e}", flush=True)
+                print(f"[VarMonitor Web] WebSocket error (C++ {connection_label}): {e}", flush=True)
                 import traceback
                 traceback.print_exc()
                 try:
@@ -631,15 +751,21 @@ async def websocket_endpoint(ws: WebSocket):
                     # No hacer break: mantener conexión viva por si el cliente sigue ahí
 
             try:
-                msg = await asyncio.wait_for(ws.receive_text(), timeout=interval)
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=cycle_interval_sec)
                 cmd = json.loads(msg)
                 action = cmd.get("action")
 
-                if action == "set_interval":
-                    min_sec = _config.get("poll_interval_min_ms", 5) / 1000.0
-                    interval = max(min_sec, float(cmd["value"]))
+                if action == "set_update_ratio":
+                    max_r = _config.get("update_ratio_max", 100)
+                    v = int(cmd.get("value", 1))
+                    update_ratio = max(1, min(max_r, v))
                 elif action == "set_monitored":
                     monitored_names = set(cmd.get("names", []))
+                    # Fase 2: suscripción SHM para que C++ solo escriba estas vars
+                    try:
+                        await asyncio.to_thread(bridge.set_shm_subscription, list(monitored_names))
+                    except Exception:
+                        pass
                 elif action == "get_history":
                     hist = await asyncio.to_thread(bridge.get_history, cmd["name"])
                     await ws.send_json({"type": "history", "data": hist})
@@ -669,14 +795,56 @@ async def websocket_endpoint(ws: WebSocket):
                         names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
                     await ws.send_json({"type": "vars_names", "data": names_list})
                     last_names_send = time.monotonic()
+                elif action == "set_alarms":
+                    ac = cmd.get("alarms")
+                    if isinstance(ac, dict):
+                        alarms_config.clear()
+                        for k, v in ac.items():
+                            if isinstance(v, dict) and (v.get("lo") is not None or v.get("hi") is not None):
+                                alarms_config[k] = {"lo": v.get("lo"), "hi": v.get("hi")}
+                elif action == "set_send_file_on_finish":
+                    send_file_on_finish = bool(cmd.get("value", False))
+                elif action == "start_recording":
+                    recording = True
+                    record_buffer.clear()
+                    recording_var_names = list(monitored_names) if monitored_names else None
+                elif action == "stop_recording":
+                    recording = False
+                    path_saved = None
+                    fn_saved = None
+                    if record_buffer:
+                        _ensure_recordings_dir()
+                        from datetime import datetime
+                        fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+                        path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
+                        var_names = recording_var_names or sorted(set(e["name"] for _, data in record_buffer for e in data))
+                        _write_snapshots_tsv(path_saved, record_buffer, var_names)
+                    msg = {"type": "record_finished", "path": path_saved or "", "filename": fn_saved or ""}
+                    if path_saved and send_file_on_finish:
+                        try:
+                            with open(path_saved, "rb") as f:
+                                import base64
+                                msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+                        except Exception:
+                            pass
+                    if not path_saved:
+                        msg["message"] = "No se registraron datos (¿C++ con SHM activo?)."
+                    try:
+                        await ws.send_json(msg)
+                    except Exception:
+                        pass
+                    record_buffer.clear()
+                    recording_var_names = None
             except asyncio.TimeoutError:
                 pass
     except WebSocketDisconnect:
-        print(f"[VarMonitor Web] WebSocket desconectado por el cliente (C++ {query_host}:{tcp_port})", flush=True)
+        print(f"[VarMonitor Web] WebSocket desconectado por el cliente (C++ {connection_label})", flush=True)
     finally:
+        if shm_reader:
+            shm_reader.stop()
         ACTIVE_WS -= 1
         bridge.disconnect()
-        print(f"[VarMonitor Web] WebSocket cerrado (C++ {query_host}:{tcp_port})", flush=True)
+        print(f"[VarMonitor Web] WebSocket cerrado (C++ {connection_label})", flush=True)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -697,6 +865,18 @@ def _find_available_port(host: str, start_port: int, max_offset: int = 10) -> in
     )
 
 
+class _SuppressAdvancedStatsAccessLog(logging.Filter):
+    """No registrar en access log las peticiones OK a /api/advanced_stats (solo errores)."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "/api/advanced_stats" in msg and " 200 " in msg:
+            return False
+        return True
+
+
+# Aplicar filtro al cargar el módulo para que funcione con "python app.py" y "uvicorn app:app"
+logging.getLogger("uvicorn.access").addFilter(_SuppressAdvancedStatsAccessLog())
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -708,11 +888,8 @@ if __name__ == "__main__":
     port = _find_available_port(listen_host, base_port)
     app.state.actual_web_port = port
     app.state.startup_time = time.monotonic()
-    # C++ preferente = mismo índice que nuestro puerto web (8080→base_tcp, 8081→base_tcp+1, ...)
-    base_tcp = _config["tcp_port"]
-    app.state.preferred_tcp_port = base_tcp + (port - base_port)
 
-    print(f"[VarMonitor Web] Servidor escuchando en puerto {port} (tcp_port base={base_tcp} -> C++ preferido {app.state.preferred_tcp_port})")
+    print(f"[VarMonitor Web] Servidor escuchando en puerto {port}")
     print(f"  http://localhost:{port}         (local)")
     if bind_host:
         print(f"  Escuchando solo en {bind_host} (bind_host)")

@@ -117,6 +117,7 @@ int main() {
         }
 
         t += 0.1;
+        monitor.write_shm_snapshot(); /* Publicar snapshot en SHM para lectores (ej. Python) */
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 

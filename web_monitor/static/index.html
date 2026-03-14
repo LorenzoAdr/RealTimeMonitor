@@ -50,21 +50,15 @@
             <button id="settingsBtn" class="btn-settings" title="Ajustes">&#9881;</button>
             <div id="settingsPanel" class="settings-panel" style="display:none">
                 <div class="settings-group">
-                    <label id="hostLabel">Host:
-                        <input type="text" id="hostInput" value="" size="14">
-                    </label>
                     <div class="port-control">
-                        <label id="portLabel">Puerto:
-                            <input type="text" id="portInput" size="5">
-                        </label>
-                        <div class="port-select-wrap">
+                        <label id="instanceLabel">Instancia:
                             <select id="portSelect" class="port-select"></select>
-                        </div>
+                        </label>
                     </div>
-                    <label id="pollLabel">Poll (ms):
-                        <input type="number" id="intervalInput" value="200" min="5" max="5000" step="5">
+                    <label id="pollLabel">Rel act:
+                        <input type="number" id="intervalInput" value="5" min="1" max="100" step="1" title="Actualizar interfaz cada N ciclos (1 = cada ciclo, 5 = por defecto)">
                     </label>
-                    <button id="reconnectBtn" class="btn-small" title="Reconectar con el host/puerto seleccionados">Conectar</button>
+                    <button id="reconnectBtn" class="btn-small" title="Reconectar con la instancia seleccionada">Conectar</button>
                     <label><span id="langLabel">Idioma:</span>
                         <select id="langSelect">
                             <option value="es">Español</option>
@@ -100,6 +94,10 @@
                     <button id="exportConfigBtn" class="btn-small" title="Guardar configuración a archivo">&#128190; Guardar</button>
                     <button id="importConfigBtn" class="btn-small" title="Cargar configuración desde archivo">&#128194; Cargar</button>
                     <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="sendFileOnFinishCheckbox" title="Al terminar grabación o alarma, enviar fichero al navegador para descarga">
+                        <span id="sendFileOnFinishLabel">Enviar fichero al terminar</span>
+                    </label>
+                    <label class="settings-adv-checkbox">
                         <input type="checkbox" id="advInfoCheckbox" title="Mostrar RAM y carga de red en el header">
                         <span id="advInfoLabel">Adv info</span>
                     </label>
@@ -107,6 +105,11 @@
             </div>
         </div>
     </header>
+
+    <div id="recordPathToast" class="record-path-toast" style="display:none" role="status">
+        <span id="recordPathLabel">Guardado en:</span>
+        <code id="recordPathText"></code>
+    </div>
 
     <div id="multiInstanceWarning" class="warning-banner" style="display:none" role="alert">
         <span id="multiInstanceWarningText"></span>
@@ -208,7 +211,7 @@
                 <h3>Cabecera</h3>
                 <ul>
                     <li><b>Host / Puerto</b>: indican a que instancia de VarMonitor C++ se conecta el backend. Por defecto apunta al propio equipo donde corre el monitor web, pero puedes cambiar el host (otra IP accesible desde ese equipo) y el puerto (en el rango configurado, por defecto 1900–1910).</li>
-                    <li><b>Poll (ms)</b>: intervalo de actualizacion de datos. Valores bajos = mas fluidez, mas carga.</li>
+                    <li><b>Rel act</b>: relacion de actualizacion (cada cuantos ciclos se actualiza la interfaz). 1 = cada ciclo, 2 = cada dos ciclos, etc.</li>
                     <li><b>Estado de conexion</b>: indicador verde (conectado) o rojo (desconectado) del WebSocket.</li>
                 </ul>
 
@@ -229,24 +232,19 @@
                     <li><b>Este navegador</b>: se conecta al backend Python via WebSocket para recibir datos en tiempo real.</li>
                 </ol>
                 <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
-  App C++          Backend Python         Navegador
- (tcp_port)  &lt;---TCP---&gt;  (web_port)  &lt;---WebSocket---&gt;  UI
+  App C++ (UDS)       Backend Python         Navegador
+ /tmp/varmon-*.sock  &lt;---UDS---&gt;  (web_port)  &lt;---WebSocket---&gt;  UI
                 </pre>
 
                 <h3>Configuracion: varmon.conf</h3>
-                <p>Toda la configuracion de puertos e IPs esta en un unico archivo de texto plano <code>varmon.conf</code>:</p>
+                <p>Configuracion en <code>varmon.conf</code>:</p>
                 <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
 # VarMonitor configuration
-tcp_port = 9100          # Puerto TCP (C++ escucha, Python conecta)
 web_port = 8080          # Puerto de esta web (solo Python)
-host = localhost          # IP de la app C++ (cambiar para acceso remoto)
-history_capacity = 100    # Muestras por variable en buffer C++
                 </pre>
                 <ul>
-                    <li><b>tcp_port</b>: puerto TCP donde la app C++ escucha. El backend Python se conecta a este puerto.</li>
                     <li><b>web_port</b>: puerto donde se sirve esta pagina web.</li>
-                    <li><b>host</b>: IP o nombre del equipo donde corre la app C++. Usa <code>localhost</code> si todo esta en la misma maquina, o la IP del equipo remoto (ej. <code>192.168.4.1</code>) para acceso por red.</li>
-                    <li><b>history_capacity</b>: numero de muestras que el C++ mantiene por variable en su buffer circular. Con <code>sample_interval=100ms</code> y <code>capacity=100</code>, el buffer cubre 10s. Valores bajos ahorran memoria con muchas variables.</li>
+                    <li>El C++ expone un socket Unix (UDS) en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code>. El backend Python descubre instancias y se conecta por UDS.</li>
                 </ul>
 
                 <h3>Historial incremental</h3>

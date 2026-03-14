@@ -39,11 +39,10 @@
     let recordStartTime = null;
     let recordTimerInterval = null;
 
+    let savedInstance = ""; // instancia UDS preferida (guardada/cargada en config)
     const statusEl = document.getElementById("connectionStatus");
     const varCountEl = document.getElementById("varCount");
     const intervalInput = document.getElementById("intervalInput");
-    const hostInput = document.getElementById("hostInput");
-    const portInput = document.getElementById("portInput");
     const portSelect = document.getElementById("portSelect");
     const reconnectBtn = document.getElementById("reconnectBtn");
     const varFilter = document.getElementById("varFilter");
@@ -90,6 +89,7 @@
     const advInfoLabel = document.getElementById("advInfoLabel");
 
     const ADV_INFO_STORAGE_KEY = "varmon_adv_info";
+    const SEND_FILE_ON_FINISH_KEY = "varmon_send_file_on_finish";
     const WS_BUFFER_MAX_AGE_MS = 10000;
     let advStatsPollInterval = null;
     const wsMessageBuffer = [];
@@ -299,14 +299,13 @@
             colMonitorTitle: "Monitorizando",
             colPlotTitle: "Gráficos",
             helpTitle: "Ayuda",
-            hostLabel: "Host:",
-            portLabel: "Puerto:",
-            pollLabel: "Poll (ms):",
+            instanceLabel: "Instancia:",
+            pollLabel: "Rel act:",
             settingsTitle: "Ajustes",
             langLabel: "Idioma:",
             themeLabel: "Tema:",
             reconnectBtn: "Conectar",
-            reconnectTitle: "Reconectar con el host/puerto seleccionados",
+            reconnectTitle: "Reconectar con la instancia seleccionada",
             recordBtn: "● REC",
             resetConfigTitle: "Eliminar toda la configuración",
             clearAlarmsTitle: "Quitar todas las alarmas",
@@ -324,6 +323,7 @@
             hideLevelsLabel: "Niveles:",
             statusConnected: "Conectado",
             statusDisconnected: "Desconectado",
+            statusNoInstances: "No hay instancias VarMonitor (UDS)",
             graphTitle: "Gráfico",
             newGraphDropText: "Nuevo gráfico: suelta aquí para crear uno",
             removeGraphTitle: "Eliminar gráfico",
@@ -352,8 +352,10 @@
             suggestedPortPrefix: "El más reciente es el puerto",
             connectingToPortUser: "Te estás conectando al puerto %d del usuario %s.",
             suggestedPortLine: "En el %d está el puerto %d del usuario %s.",
-            suggestedPortSuffix: " está el puerto %d del usuario %s.",
+            suggestedPortSuffixUser: " usuario %s.",
             suggestedPortPrefixBefore: "En el ",
+            sendFileOnFinishLabel: "Enviar fichero al terminar",
+            recordPathLabel: "Guardado en:",
             advInfoLabel: "Adv info",
         },
         en: {
@@ -361,14 +363,13 @@
             colMonitorTitle: "Monitoring",
             colPlotTitle: "Plots",
             helpTitle: "Help",
-            hostLabel: "Host:",
-            portLabel: "Port:",
-            pollLabel: "Poll (ms):",
+            instanceLabel: "Instance:",
+            pollLabel: "Rel act:",
             settingsTitle: "Settings",
             langLabel: "Language:",
             themeLabel: "Theme:",
             reconnectBtn: "Connect",
-            reconnectTitle: "Reconnect with selected host/port",
+            reconnectTitle: "Reconnect with selected instance",
             recordBtn: "● REC",
             resetConfigTitle: "Delete all configuration",
             clearAlarmsTitle: "Clear all alarms",
@@ -386,6 +387,7 @@
             hideLevelsLabel: "Levels:",
             statusConnected: "Connected",
             statusDisconnected: "Disconnected",
+            statusNoInstances: "No VarMonitor instances (UDS)",
             graphTitle: "Plot",
             newGraphDropText: "New plot: drop here to create one",
             removeGraphTitle: "Remove plot",
@@ -414,8 +416,10 @@
             suggestedPortPrefix: "The newest is port",
             connectingToPortUser: "You are connecting to port %d of user %s.",
             suggestedPortLine: "On %d is port %d of user %s.",
-            suggestedPortSuffix: " is port %d of user %s.",
+            suggestedPortSuffixUser: " user %s.",
             suggestedPortPrefixBefore: "On ",
+            sendFileOnFinishLabel: "Send file when finished",
+            recordPathLabel: "Saved at:",
             advInfoLabel: "Adv info",
         }
     };
@@ -455,8 +459,7 @@
         const colBrowserTitle = document.getElementById("colBrowserTitle");
         const colMonitorTitle = document.getElementById("colMonitorTitle");
         const colPlotTitle = document.getElementById("colPlotTitle");
-        const hostLabel = document.getElementById("hostLabel");
-        const portLabel = document.getElementById("portLabel");
+        const instanceLabelEl = document.getElementById("instanceLabel");
         const pollLabel = document.getElementById("pollLabel");
         const langLabel = document.getElementById("langLabel");
         const themeLabel = document.getElementById("themeLabel");
@@ -464,8 +467,7 @@
         if (colBrowserTitle) colBrowserTitle.textContent = tr.colBrowserTitle;
         if (colMonitorTitle) colMonitorTitle.textContent = tr.colMonitorTitle;
         if (colPlotTitle) colPlotTitle.textContent = tr.colPlotTitle;
-        if (hostLabel) hostLabel.firstChild.nodeValue = tr.hostLabel + " ";
-        if (portLabel) portLabel.firstChild.nodeValue = tr.portLabel + " ";
+        if (instanceLabelEl) instanceLabelEl.firstChild.nodeValue = (tr.instanceLabel || "Instancia:") + " ";
         if (pollLabel) pollLabel.firstChild.nodeValue = tr.pollLabel + " ";
         if (langLabel) langLabel.textContent = tr.langLabel;
         if (themeLabel) themeLabel.textContent = tr.themeLabel;
@@ -528,6 +530,10 @@
             statusEl.textContent = statusEl.classList.contains("connected") ? tr.statusConnected : tr.statusDisconnected;
         }
         if (settingsBtn) settingsBtn.title = tr.settingsTitle;
+        const sendFileOnFinishLabelEl = document.getElementById("sendFileOnFinishLabel");
+        if (sendFileOnFinishLabelEl) sendFileOnFinishLabelEl.textContent = tr.sendFileOnFinishLabel || "Enviar fichero al terminar";
+        const recordPathLabelEl = document.getElementById("recordPathLabel");
+        if (recordPathLabelEl) recordPathLabelEl.textContent = tr.recordPathLabel || "Guardado en:";
         if (advInfoLabel) advInfoLabel.textContent = tr.advInfoLabel || "Adv info";
         const monitorMenuBtnEl = document.getElementById("monitorMenuBtn");
         if (monitorMenuBtnEl) monitorMenuBtnEl.title = tr.monitorMenuTitle;
@@ -561,10 +567,9 @@
                 timeWindow: timeWindowSelect.value,
                 historyBuffer: historyBufferSelect.value,
                 smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
-                host: hostInput.value,
-                port: portInput.value || portSelect.value,
+                instance: portSelect ? portSelect.value : "",
                 hideLevels: hideLevels,
-                interval: intervalInput.value,
+                update_ratio: intervalInput.value,
                 alarms: alarms,
                 computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
                 varFormat: varFormat,
@@ -605,15 +610,19 @@
                 hideLevels = cfg.hideLevels;
                 if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
             }
-            if (cfg.host && typeof cfg.host === "string") {
-                const h = cfg.host.trim();
-                if (h && !/^\d+$/.test(h)) hostInput.value = h;
+            if (cfg.instance && typeof cfg.instance === "string") {
+                savedInstance = cfg.instance.trim();
+                if (portSelect && Array.from(portSelect.options).some(o => o.value === savedInstance)) {
+                    portSelect.value = savedInstance;
+                }
             }
-            if (cfg.port) {
-                portInput.value = cfg.port;
-                portSelect.value = cfg.port;
+            if (cfg.update_ratio != null) {
+                const r = parseInt(cfg.update_ratio, 10);
+                if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
+            } else if (cfg.interval != null) {
+                const r = parseInt(cfg.interval, 10);
+                if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
             }
-            if (cfg.interval) intervalInput.value = cfg.interval;
             if (cfg.alarms && typeof cfg.alarms === "object") alarms = cfg.alarms;
             if (Array.isArray(cfg.computedVars)) {
                 for (const cv of cfg.computedVars) {
@@ -669,6 +678,18 @@
     if (advInfoCheckbox) {
         advInfoCheckbox.addEventListener("change", () => {
             setAdvInfoEnabled(advInfoCheckbox.checked);
+        });
+    }
+
+    const sendFileOnFinishCheckbox = document.getElementById("sendFileOnFinishCheckbox");
+    try {
+        const sendFileSaved = localStorage.getItem(SEND_FILE_ON_FINISH_KEY) === "1";
+        if (sendFileOnFinishCheckbox) sendFileOnFinishCheckbox.checked = sendFileSaved;
+    } catch (e) {}
+    if (sendFileOnFinishCheckbox) {
+        sendFileOnFinishCheckbox.addEventListener("change", () => {
+            try { localStorage.setItem(SEND_FILE_ON_FINISH_KEY, sendFileOnFinishCheckbox.checked ? "1" : "0"); } catch (e) {}
+            sendSendFileOnFinish();
         });
     }
 
@@ -797,10 +818,9 @@
             timeWindow: timeWindowSelect.value,
             historyBuffer: historyBufferSelect.value,
             smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
-            host: hostInput.value,
-            port: portInput.value || portSelect.value,
+            instance: portSelect ? portSelect.value : "",
             hideLevels: hideLevels,
-            interval: intervalInput.value,
+            update_ratio: intervalInput.value,
             alarms: alarms,
             computedVars: computedVars.map(c => ({ name: c.name, expr: c.expr })),
             varFormat: varFormat,
@@ -859,15 +879,19 @@
                         hideLevels = cfg.hideLevels;
                         if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
                     }
-                    if (cfg.host && typeof cfg.host === "string") {
-                        const h = cfg.host.trim();
-                        if (h && !/^\d+$/.test(h)) hostInput.value = h;
+                    if (cfg.instance && typeof cfg.instance === "string") {
+                        savedInstance = cfg.instance.trim();
+                        if (portSelect && Array.from(portSelect.options).some(o => o.value === savedInstance)) {
+                            portSelect.value = savedInstance;
+                        }
                     }
-                    if (cfg.port) {
-                        portInput.value = cfg.port;
-                        portSelect.value = cfg.port;
+                    if (cfg.update_ratio != null) {
+                        const r = parseInt(cfg.update_ratio, 10);
+                        if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
+                    } else if (cfg.interval != null) {
+                        const r = parseInt(cfg.interval, 10);
+                        if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
                     }
-                    if (cfg.interval) intervalInput.value = cfg.interval;
                     if (cfg.alarms && typeof cfg.alarms === "object") {
                         alarms = cfg.alarms;
                     }
@@ -887,7 +911,7 @@
                     }
                     saveConfig();
                     sendMonitored();
-                    sendInterval();
+                    sendUpdateRatio();
                     rebuildPlotArea();
                     rebuildMonitorList();
                     renderBrowserList();
@@ -959,34 +983,46 @@
 
     let connectionId = 0;
     let connectionInfo = null;
-    let lastScanPorts = [];
+    let udsInstances = [];
     let warningDismissed = false;
 
     function fetchConnectionInfo() {
         return fetch("/api/connection_info")
             .then((r) => r.ok ? r.json() : null)
-            .then((data) => {
+            .then(async (data) => {
                 connectionInfo = data;
-                // Siempre aplicar el puerto preferido del backend (8080→1900, 8081→1901…) para que
-                // no gane el valor guardado en localStorage de otra sesión (p. ej. 9100 de 8081).
-                if (data) {
-                    const minMs = data.poll_interval_min_ms;
-                    if (typeof minMs === "number" && intervalInput) {
-                        intervalInput.min = Math.max(1, minMs);
-                    }
-                    if (data.preferred_tcp_port != null) {
-                        const preferred = String(data.preferred_tcp_port);
-                        portInput.value = preferred;
-                        if (portSelect.options.length) {
-                            const hasOpt = Array.from(portSelect.options).some(o => o.value === preferred);
-                            if (hasOpt) portSelect.value = preferred;
-                        }
-                    }
+                const user = (data && data.current_user) ? encodeURIComponent(data.current_user) : "";
+                const udsUrl = user ? `/api/uds_instances?user=${user}` : "/api/uds_instances";
+                try {
+                    const u = await fetch(udsUrl).then((r) => r.ok ? r.json() : null);
+                    udsInstances = (u && Array.isArray(u.instances)) ? u.instances : [];
+                } catch (e) {
+                    udsInstances = [];
+                }
+                if (data && typeof data.update_ratio_max === "number" && intervalInput) {
+                    intervalInput.max = Math.max(1, data.update_ratio_max);
                 }
                 updateMultiInstanceWarning();
                 return data;
             })
             .catch(() => null);
+    }
+
+    function fillPortSelectWithUds() {
+        portSelect.innerHTML = "";
+        for (const inst of udsInstances) {
+            const opt = document.createElement("option");
+            opt.value = "uds:" + inst.uds_path;
+            opt.textContent = (inst.user || "?") + " — PID " + (inst.pid != null ? inst.pid : "?");
+            portSelect.appendChild(opt);
+        }
+        if (portSelect.options.length > 0) {
+            if (savedInstance && Array.from(portSelect.options).some(o => o.value === savedInstance)) {
+                portSelect.value = savedInstance;
+            } else {
+                portSelect.value = portSelect.options[0].value;
+            }
+        }
     }
 
     function updateMultiInstanceWarning() {
@@ -997,30 +1033,6 @@
         let suggestedPort = null;
         let suggestedUrl = null;
 
-        if (connectionInfo && lastScanPorts.length > 1) {
-            if (connectionInfo.current_cpp_port != null && connectionInfo.current_user) {
-                const msg = (tr.connectingToPortUser || "You are connecting to port %d of user %s.")
-                    .replace("%d", String(connectionInfo.current_cpp_port))
-                    .replace("%s", connectionInfo.current_user);
-                parts.push(msg);
-            }
-            parts.push(tr.multiInstanceWarn);
-        }
-        const selPort = (portInput.value || portSelect.value || "").trim();
-        if (connectionInfo && selPort && lastScanPorts.length > 1) {
-            const baseWeb = connectionInfo.base_web_port;
-            const actualWeb = connectionInfo.actual_web_port;
-            const baseTcp = connectionInfo.base_tcp_port;
-            const selTcp = parseInt(selPort, 10);
-            if (!isNaN(selTcp) && baseWeb != null && actualWeb != null && baseTcp != null) {
-                const offsetWeb = actualWeb - baseWeb;
-                const offsetTcp = selTcp - baseTcp;
-                if (offsetWeb !== offsetTcp) {
-                    const msg = tr.multiInstanceMismatch || "Web port %d and C++ port %d do not match base+N.";
-                    parts.push(msg.replace(/%d/, String(actualWeb)).replace(/%d/, String(selTcp)));
-                }
-            }
-        }
         const actualWeb = connectionInfo && connectionInfo.actual_web_port != null ? connectionInfo.actual_web_port : null;
         const suggestedWeb = connectionInfo && connectionInfo.suggested_web_port != null ? connectionInfo.suggested_web_port : null;
         if (connectionInfo && actualWeb != null && suggestedWeb != null && actualWeb !== suggestedWeb) {
@@ -1053,9 +1065,9 @@
                         .then((r) => r.ok ? r.json() : null)
                         .then((info) => {
                             const suf = document.getElementById("multiInstanceWarningSuggestedSuffix");
-                            if (suf && info && info.cpp_port != null) {
-                                const fmt = tr.suggestedPortSuffix || " está el puerto %d del usuario %s.";
-                                suf.textContent = fmt.replace("%d", String(info.cpp_port)).replace("%s", info.user != null ? info.user : "?");
+                            if (suf && info && info.user) {
+                                const fmt = tr.suggestedPortSuffixUser || " usuario %s.";
+                                suf.textContent = fmt.replace("%s", info.user);
                             }
                         })
                         .catch(() => {});
@@ -1139,7 +1151,7 @@
         }
         if (enabled) {
             updateAdvancedStatsStrip();
-            advStatsPollInterval = setInterval(updateAdvancedStatsStrip, 1500);
+            advStatsPollInterval = setInterval(updateAdvancedStatsStrip, 5000);
         }
     }
 
@@ -1147,11 +1159,11 @@
         connectionId += 1;
         const thisId = connectionId;
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        const host = hostInput.value || location.hostname;
-        const port = (portInput.value || portSelect.value || "").trim();
+        const sel = (portSelect && portSelect.value) ? (portSelect.value || "").trim() : "";
         const qs = new URLSearchParams();
-        if (host) qs.set("host", host);
-        if (port) qs.set("port", port);
+        if (sel.startsWith("uds:")) {
+            qs.set("uds_path", sel.slice(4));
+        }
         const storedPass = sessionStorage.getItem("varmon_password");
         if (storedPass) qs.set("password", storedPass);
         const qp = qs.toString();
@@ -1164,8 +1176,10 @@
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusConnected;
             statusEl.className = "status connected";
             clearReconnectPending();
-            sendInterval();
+            sendUpdateRatio();
             sendMonitored();
+            sendAlarmsToBackend();
+            sendSendFileOnFinish();
         };
         socket.onclose = () => {
             if (thisId !== connectionId) return;
@@ -1196,6 +1210,10 @@
             if (msg.type === "vars_names") onVarNames(msg.data);
             else if (msg.type === "vars_update") onVarsUpdate(msg.data);
             else if (msg.type === "set_result") onSetResult(msg);
+            else if (msg.type === "alarm_triggered") onAlarmTriggeredFromBackend(msg.triggered);
+            else if (msg.type === "alarm_cleared") onAlarmClearedFromBackend(msg.names);
+            else if (msg.type === "record_finished") onRecordFinished(msg);
+            else if (msg.type === "alarm_recording_ready") onAlarmRecordingReady(msg);
         };
     }
 
@@ -1240,16 +1258,16 @@
         if (statusEl) statusEl.title = "";
     }
 
-    function sendInterval() {
+    function sendUpdateRatio() {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
-                action: "set_interval",
-                value: parseInt(intervalInput.value) / 1000,
+                action: "set_update_ratio",
+                value: parseInt(intervalInput.value, 10) || 5,
             }));
         }
     }
 
-    intervalInput.addEventListener("change", () => { sendInterval(); saveConfig(); });
+    intervalInput.addEventListener("change", () => { sendUpdateRatio(); saveConfig(); });
 
     function sendMonitored() {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1846,7 +1864,7 @@
                         showArrayElemAlarmForm(row, eName, alarmBtn);
                     }
                     saveConfig();
-                    checkAlarms();
+                    sendAlarmsToBackend();
                 });
 
                 const genBtn = document.createElement("span");
@@ -1977,7 +1995,7 @@
                 ? `Alarma: Lo:${alarms[eName].lo ?? "-"} Hi:${alarms[eName].hi ?? "-"} (clic para quitar)`
                 : "Configurar alarma";
             saveConfig();
-            checkAlarms();
+            sendAlarmsToBackend();
         });
 
         const cancel = document.createElement("button");
@@ -2262,7 +2280,7 @@
                 delete alarms[name];
                 delete prevAlarmState[name];
                 saveConfig();
-                checkAlarms();
+                sendAlarmsToBackend();
                 updateMonitorItemStyles();
                 updateStatsPanel(wrap, name);
             });
@@ -2435,7 +2453,7 @@
                 alarms[name] = { lo, hi };
             }
             saveConfig();
-            checkAlarms();
+            sendAlarmsToBackend();
             updateMonitorItemStyles();
             updateStatsPanel(wrap, name);
             refreshAlarmListPanel();
@@ -2487,37 +2505,23 @@
         }
     }
 
-    function checkAlarms() {
-        const newActive = new Set();
-        const triggered = [];
-
-        for (const name of monitoredNames) {
-            const vd = varsByName[name];
-            if (!vd || typeof vd.value !== "number") continue;
-            checkAlarmEntry(name, vd.value, newActive, triggered);
+    function sendAlarmsToBackend() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            const payload = {};
+            for (const [name, cfg] of Object.entries(alarms)) {
+                if (cfg && (cfg.lo != null || cfg.hi != null)) {
+                    payload[name] = { lo: cfg.lo ?? null, hi: cfg.hi ?? null };
+                }
+            }
+            ws.send(JSON.stringify({ action: "set_alarms", alarms: payload }));
         }
+    }
 
-        for (const eName of Object.keys(alarms)) {
-            if (!isArrayElem(eName)) continue;
-            const val = getArrayElemValue(eName);
-            if (val === undefined) continue;
-            checkAlarmEntry(eName, val, newActive, triggered);
-        }
-
-        for (const name of monitoredNames) {
-            prevAlarmState[name] = newActive.has(name);
-        }
-        for (const eName of Object.keys(alarms)) {
-            if (isArrayElem(eName)) prevAlarmState[eName] = newActive.has(eName);
-        }
-
-        activeAlarms = newActive;
-        monitorListEl.querySelectorAll(".monitor-item[data-name]").forEach(el => {
-            el.classList.toggle("alarm-active", activeAlarms.has(el.dataset.name));
-        });
-
-        if (triggered.length > 0) {
-            onAlarmTriggered(triggered);
+    function sendSendFileOnFinish() {
+        const cb = document.getElementById("sendFileOnFinishCheckbox");
+        const val = cb ? cb.checked : false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "set_send_file_on_finish", value: val }));
         }
     }
 
@@ -2535,6 +2539,90 @@
         });
         n.addEventListener("click", () => { window.focus(); n.close(); });
         setTimeout(() => n.close(), 8000);
+    }
+
+    function updateAlarmActiveDOM() {
+        if (!monitorListEl) return;
+        monitorListEl.querySelectorAll(".monitor-item[data-name]").forEach(el => {
+            el.classList.toggle("alarm-active", activeAlarms.has(el.dataset.name));
+        });
+        monitorListEl.querySelectorAll(".arr-alarm-btn").forEach(el => {
+            const eName = el.closest("[data-name]")?.dataset?.name || el.dataset?.elemName;
+            if (eName) el.classList.toggle("alarm-firing", activeAlarms.has(eName));
+        });
+    }
+
+    function onAlarmTriggeredFromBackend(triggered) {
+        if (!Array.isArray(triggered)) return;
+        triggered.forEach(t => activeAlarms.add(t.name));
+        updateAlarmActiveDOM();
+        const reasons = triggered.map(t => t.reason).join(" | ");
+        sendAlarmNotification(reasons);
+        showAlarmBanner(reasons);
+        plotsPaused = true;
+        updatePauseBtn();
+    }
+
+    function onAlarmClearedFromBackend(names) {
+        if (!Array.isArray(names)) return;
+        names.forEach(n => activeAlarms.delete(n));
+        updateAlarmActiveDOM();
+    }
+
+    function showRecordPathToast(path) {
+        const el = document.getElementById("recordPathToast");
+        const textEl = document.getElementById("recordPathText");
+        if (el && textEl) {
+            textEl.textContent = path || "";
+            el.style.display = path ? "block" : "none";
+            if (path) setTimeout(() => { el.style.display = "none"; }, 12000);
+        }
+    }
+
+    function onRecordFinished(msg) {
+        const path = (msg.path || msg.filename || "").trim();
+        const text = path ? path : (msg.message || "Grabación finalizada.");
+        showRecordPathToast(text);
+        if (msg.file_base64) {
+            try {
+                const bin = atob(msg.file_base64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const isTsv = (msg.filename || "").toLowerCase().endsWith(".tsv");
+                const blob = new Blob([bytes], { type: isTsv ? "text/tab-separated-values" : "text/csv" });
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = msg.filename || "record.tsv";
+                a.click();
+                URL.revokeObjectURL(a.href);
+            } catch (e) { /* ignore */ }
+        }
+        if (isRecording) {
+            isRecording = false;
+            if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
+            recordBtn.textContent = "\u25CF REC";
+            recordBtn.classList.remove("recording");
+            if (recordTimerEl) recordTimerEl.style.display = "none";
+        }
+    }
+
+    function onAlarmRecordingReady(msg) {
+        const path = msg.path || msg.filename || "";
+        showRecordPathToast(path);
+        if (msg.file_base64) {
+            try {
+                const bin = atob(msg.file_base64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const isTsv = (msg.filename || "").toLowerCase().endsWith(".tsv");
+                const blob = new Blob([bytes], { type: isTsv ? "text/tab-separated-values" : "text/csv" });
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = msg.filename || "alarm.tsv";
+                a.click();
+                URL.revokeObjectURL(a.href);
+            } catch (e) { /* ignore */ }
+        }
     }
 
     function onAlarmTriggered(triggers) {
@@ -2716,7 +2804,7 @@
                 }
             }
         }
-        checkAlarms();
+        sendAlarmsToBackend();
         refreshAllStats();
     }
 
@@ -2772,7 +2860,7 @@
             el.classList.remove("alarm-active");
         });
         saveConfig();
-        checkAlarms();
+        sendAlarmsToBackend();
         updateMonitorItemStyles();
         refreshAllStats();
         dismissAlarmBanner();
@@ -2804,7 +2892,7 @@
                 e.stopPropagation();
                 delete alarms[name];
                 saveConfig();
-                checkAlarms();
+                sendAlarmsToBackend();
                 updateMonitorItemStyles();
                 refreshAllStats();
                 refreshAlarmListPanel();
@@ -2905,6 +2993,9 @@
 
     function startRecording() {
         if (monitoredNames.size === 0) return;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "start_recording" }));
+        }
         isRecording = true;
         recordColumns = buildRecordColumns();
         recordBuffer = [];
@@ -2922,23 +3013,22 @@
             recordTimerEl.textContent = mm + ":" + ss;
 
             if (elapsed >= MAX_RECORD_SEC) {
-                stopRecording(true);
+                stopRecording(false);
                 startRecording();
             }
         }, 500);
     }
 
     function stopRecording(download) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "stop_recording" }));
+        }
         isRecording = false;
         if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
 
         recordBtn.textContent = "\u25CF REC";
         recordBtn.classList.remove("recording");
         recordTimerEl.style.display = "none";
-
-        if (download && recordBuffer.length > 0) {
-            downloadTSV();
-        }
         recordBuffer = [];
     }
 
@@ -3577,15 +3667,7 @@
         reconnectBtn.classList.remove("btn-pending");
     }
 
-    hostInput.addEventListener("input", markReconnectPending);
-    portInput.addEventListener("input", () => { markReconnectPending(); updateMultiInstanceWarning(); });
-    portSelect.addEventListener("change", () => {
-        if (portSelect.value) {
-            portInput.value = portSelect.value;
-        }
-        markReconnectPending();
-        updateMultiInstanceWarning();
-    });
+    portSelect.addEventListener("change", () => { markReconnectPending(); updateMultiInstanceWarning(); });
 
     const multiInstanceWarningCloseBtn = document.getElementById("multiInstanceWarningClose");
     if (multiInstanceWarningCloseBtn) {
@@ -3597,44 +3679,24 @@
             try { ws.close(); } catch (e) { /* ignore */ }
             ws = null;
         }
-        if (!hostInput.value) hostInput.value = location.hostname || "localhost";
-        const prevPort = (portInput.value || portSelect.value || "").trim();
         try {
-            let scanUrl = `/api/scan_ports?host=${encodeURIComponent(hostInput.value)}`;
-            if (prevPort) scanUrl += `&port=${encodeURIComponent(prevPort)}`;
-            const resp = await fetch(scanUrl);
-            if (resp.ok) {
-                const data = await resp.json();
-                lastScanPorts = Array.isArray(data.ports) ? data.ports : [];
-                warningDismissed = false;
-                portSelect.innerHTML = "";
-                const hasPorts = lastScanPorts.length > 0;
-                if (hasPorts) {
-                    for (const p of data.ports) {
-                        const opt = document.createElement("option");
-                        opt.value = String(p);
-                        opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
-                        portSelect.appendChild(opt);
-                    }
-                } else if (Array.isArray(data.range) && data.range.length === 2) {
-                    const [start, end] = data.range;
-                    for (let p = start; p <= end; p++) {
-                        const opt = document.createElement("option");
-                        opt.value = String(p);
-                        opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
-                        portSelect.appendChild(opt);
-                    }
-                }
-                if (portSelect.options.length > 0) {
-                    const hasPrev = prevPort && Array.from(portSelect.options).some(o => o.value === prevPort);
-                    portSelect.value = hasPrev ? prevPort : portSelect.options[0].value;
-                }
-                if (portSelect.value) portInput.value = portSelect.value;
+            const [connResp, udsResp] = await Promise.all([
+                fetch("/api/connection_info").then((r) => r.ok ? r.json() : null),
+                fetch("/api/uds_instances").then((r) => r.ok ? r.json() : null)
+            ]);
+            if (connResp) connectionInfo = connResp;
+            udsInstances = (udsResp && Array.isArray(udsResp.instances)) ? udsResp.instances : [];
+            if (udsInstances.length > 0) {
+                fillPortSelectWithUds();
                 updateMultiInstanceWarning();
+                resetStateForNewTarget();
+                connect();
+            } else {
+                resetStateForNewTarget();
+                statusEl.textContent = (I18N[currentLang] || I18N.es).statusNoInstances || "No hay instancias VarMonitor (UDS)";
+                statusEl.className = "status disconnected";
             }
-        } catch (e) { /* ignorar */ }
-        resetStateForNewTarget();
-        connect();
+        } catch (e) { resetStateForNewTarget(); }
     });
 
     if (hideLevelsInput) {
@@ -3804,47 +3866,14 @@
     });
 
     async function initialScanAndConnect() {
-        if (!hostInput.value) {
-            hostInput.value = location.hostname || "localhost";
-        }
-        const portHint = (portInput.value || portSelect.value || "").trim();
-        try {
-            let scanUrl = `/api/scan_ports?host=${encodeURIComponent(hostInput.value)}`;
-            if (portHint) scanUrl += `&port=${encodeURIComponent(portHint)}`;
-            const resp = await fetch(scanUrl);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const data = await resp.json();
-            lastScanPorts = Array.isArray(data.ports) ? data.ports : [];
-            warningDismissed = false;
-            portSelect.innerHTML = "";
-            const hasPorts = lastScanPorts.length > 0;
-            if (hasPorts) {
-                for (const p of data.ports) {
-                    const opt = document.createElement("option");
-                    opt.value = String(p);
-                    opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
-                    portSelect.appendChild(opt);
-                }
-            } else if (Array.isArray(data.range) && data.range.length === 2) {
-                const [start, end] = data.range;
-                for (let p = start; p <= end; p++) {
-                    const opt = document.createElement("option");
-                    opt.value = String(p);
-                    opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
-                    portSelect.appendChild(opt);
-                }
-            }
-            if (!portSelect.value && portSelect.options.length > 0) {
-                portSelect.value = portSelect.options[0].value;
-            }
-            if (!portInput.value && portSelect.value) {
-                portInput.value = portSelect.value;
-            }
+        if (udsInstances.length > 0) {
+            fillPortSelectWithUds();
             updateMultiInstanceWarning();
             connect();
-        } catch (e) {
-            connect();
+            return;
         }
+        statusEl.textContent = (I18N[currentLang] || I18N.es).statusNoInstances || "No hay instancias VarMonitor (UDS)";
+        statusEl.className = "status disconnected";
     }
 
     // --- Data handlers ---
@@ -3890,7 +3919,6 @@
         schedulePlotRender();
 
         updateMonitorValues();
-        recordSample();
     }
 
     // --- Resize ---
