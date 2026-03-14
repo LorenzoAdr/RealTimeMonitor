@@ -1,6 +1,7 @@
 """FastAPI backend for VarMonitor web interface."""
 
 import asyncio
+import getpass
 import json
 import os
 import resource
@@ -10,6 +11,7 @@ import urllib.request
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -192,6 +194,29 @@ def _fetch_uptime_from_port(port: int, timeout: float = 1.0) -> float | None:
         return None
 
 
+def _fetch_instance_info_from_web_port(web_port: int, timeout: float = 0.4) -> dict | None:
+    """Obtiene cpp_port y user de otro backend vía GET /api/instance_info. None si falla."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{web_port}/api/instance_info")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _enrich_ports_with_users(ports: list[int], base_web: int, base_tcp: int) -> dict[int, str]:
+    """Para cada puerto C++ en ports, pregunta al backend web correspondiente y devuelve mapa puerto -> usuario."""
+    port_users: dict[int, str] = {}
+    for p in ports:
+        web_port = base_web + (p - base_tcp)
+        if web_port < 1 or web_port > 65535:
+            continue
+        info = _fetch_instance_info_from_web_port(web_port)
+        if info and info.get("user"):
+            port_users[p] = info["user"]
+    return port_users
+
+
 # Cache para suggested_web_port (puerto con menor uptime): (valor, timestamp)
 _suggested_web_port_cache: tuple[int | None, float] | None = None
 SUGGESTED_WEB_PORT_CACHE_TTL = 20.0  # segundos
@@ -251,6 +276,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="VarMonitor", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
 
 
 @app.get("/")
@@ -325,18 +351,29 @@ async def api_scan_ports(
     host: str = Query(TCP_HOST_DEFAULT),
     start: int | None = Query(None),
     end: int | None = Query(None),
-    port: int | None = Query(None, description="Puerto actual; si se pasa, se escanea [port, port+10]"),
+    port: int | None = Query(None, description="Puerto actual; se ignora el valor y se escanea siempre el rango base para listar todas las instancias"),
 ):
     """Escanea un rango de puertos para encontrar instancias activas de VarMonitor."""
     if start is not None and end is not None:
         pass
-    elif port is not None and 1 <= port <= 65535:
-        start = port
-        end = min(65535, port + 10)
     else:
-        start = TCP_PORT_DEFAULT
-        end = TCP_PORT_DEFAULT + 10
-    return await asyncio.to_thread(_do_scan_ports, host, start, end)
+        # Siempre escanear el rango base (ej. 1900–1910) para que aparezcan todos los procesos, estés en 8080 o 8081
+        start = _config["tcp_port"]
+        end = min(65535, start + 10)
+    result = await asyncio.to_thread(_do_scan_ports, host, start, end)
+    # Puerto autodescubierto (este backend) y usuario que ejecuta este Python
+    result["suggested_port"] = getattr(app.state, "preferred_tcp_port", None)
+    try:
+        result["user"] = getpass.getuser()
+    except Exception:
+        result["user"] = None
+    # Usuario por puerto: preguntar a cada backend web del rango (8080→1900, 8081→1901, …)
+    base_web = _config["web_port"]
+    base_tcp = _config["tcp_port"]
+    result["port_users"] = await asyncio.to_thread(
+        _enrich_ports_with_users, result["ports"], base_web, base_tcp
+    )
+    return result
 
 
 @app.get("/api/auth_required")
@@ -485,7 +522,25 @@ async def api_connection_info(request: Request):
     preferred = getattr(state, "preferred_tcp_port", None)
     if preferred is not None:
         out["preferred_tcp_port"] = preferred
+    out["current_cpp_port"] = preferred
+    try:
+        out["current_user"] = getpass.getuser()
+    except Exception:
+        out["current_user"] = None
     return out
+
+
+@app.get("/api/instance_info")
+async def api_instance_info(request: Request):
+    """Info ligera de esta instancia (puerto web, C++, usuario) para que otros frontends/backends la muestren."""
+    state = request.app.state
+    actual = getattr(state, "actual_web_port", None) or _config["web_port"]
+    preferred = getattr(state, "preferred_tcp_port", None)
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = None
+    return {"actual_web_port": actual, "cpp_port": preferred, "user": user}
 
 
 @app.websocket("/ws")

@@ -27,10 +27,7 @@
     let arrayElemHistory = {};
     const ARRAY_HIST_MAX = 2000;
 
-    let historyTimer = null;
-    const HISTORY_INTERVAL_MS = 500;
     let plotRafPending = false;
-    let lastSeq = 0;
     let localHistMaxSec = 30;
     /** Origen de tiempo compartido para todos los gráficos (segundos Unix). Opción B: se fija con el primer historial recibido. */
     let sessionStartTime = null;
@@ -313,7 +310,8 @@
             recordBtn: "● REC",
             resetConfigTitle: "Eliminar toda la configuración",
             clearAlarmsTitle: "Quitar todas las alarmas",
-            resetPlotsTitle: "Resetear curvas (histórico y zoom)",
+            resetPlotsTitle: "Quitar asignaciones de variables a gráficos",
+            resetPlotsBtn: "Limpiar",
             pausePlay: "▶ Play",
             pausePause: "⏸ Pause",
             screenshotTitle: "Capturar gráficos como PNG",
@@ -331,8 +329,15 @@
             removeGraphTitle: "Eliminar gráfico",
             monitorMenuTitle: "Más opciones",
             timeAxisTitle: "t (s)",
-            resetTimeBtn: "Reset tiempo",
+            resetTimeBtn: "Reset",
             resetTimeTitle: "Reiniciar origen de tiempo (empezar a grabar desde 0)",
+            smoothPlotsLabel: "Suavizado",
+            smoothPlotsTitle: "Ventana de media móvil para suavizar curvas (1 = sin suavizado)",
+            smoothOff: "No",
+            smooth3: "Suave (3)",
+            smooth5: "Medio (5)",
+            smooth7: "Fuerte (7)",
+            smooth11: "Muy fuerte (11)",
             authTitle: "Contraseña",
             authPrompt: "El monitor requiere contraseña para conectar.",
             authWrongAttempts: "Contraseña incorrecta. Intentos restantes: %d de 3.",
@@ -345,6 +350,10 @@
             notLatestPortWarn: "Te has conectado a un backend que no es el más reciente. ¿Estás seguro de que es el tuyo?",
             backendUptimeMinutes: "Este backend lleva %d min ejecutándose.",
             suggestedPortPrefix: "El más reciente es el puerto",
+            connectingToPortUser: "Te estás conectando al puerto %d del usuario %s.",
+            suggestedPortLine: "En el %d está el puerto %d del usuario %s.",
+            suggestedPortSuffix: " está el puerto %d del usuario %s.",
+            suggestedPortPrefixBefore: "En el ",
             advInfoLabel: "Adv info",
         },
         en: {
@@ -363,7 +372,8 @@
             recordBtn: "● REC",
             resetConfigTitle: "Delete all configuration",
             clearAlarmsTitle: "Clear all alarms",
-            resetPlotsTitle: "Reset curves (history and zoom)",
+            resetPlotsTitle: "Clear variable assignments from plots",
+            resetPlotsBtn: "Clear",
             pausePlay: "▶ Play",
             pausePause: "⏸ Pause",
             screenshotTitle: "Capture plots as PNG",
@@ -381,8 +391,15 @@
             removeGraphTitle: "Remove plot",
             monitorMenuTitle: "More options",
             timeAxisTitle: "t (s)",
-            resetTimeBtn: "Reset time",
+            resetTimeBtn: "Reset",
             resetTimeTitle: "Reset time origin (start recording from 0)",
+            smoothPlotsLabel: "Smooth",
+            smoothPlotsTitle: "Moving average window for smoothing curves (1 = off)",
+            smoothOff: "Off",
+            smooth3: "Light (3)",
+            smooth5: "Medium (5)",
+            smooth7: "Strong (7)",
+            smooth11: "Heavy (11)",
             authTitle: "Password",
             authPrompt: "The monitor requires a password to connect.",
             authWrongAttempts: "Wrong password. Attempts left: %d of 3.",
@@ -395,6 +412,10 @@
             notLatestPortWarn: "You have connected to a backend that is not the newest. Are you sure it is yours?",
             backendUptimeMinutes: "This backend has been running for %d min.",
             suggestedPortPrefix: "The newest is port",
+            connectingToPortUser: "You are connecting to port %d of user %s.",
+            suggestedPortLine: "On %d is port %d of user %s.",
+            suggestedPortSuffix: " is port %d of user %s.",
+            suggestedPortPrefixBefore: "On ",
             advInfoLabel: "Adv info",
         }
     };
@@ -462,8 +483,19 @@
         const clearAlarmsBtn = document.getElementById("clearAlarmsBtn");
         if (clearAlarmsBtn) clearAlarmsBtn.title = tr.clearAlarmsTitle;
 
-        if (resetPlotsBtn) resetPlotsBtn.title = tr.resetPlotsTitle;
-        if (resetTimeBtn) { resetTimeBtn.textContent = "\u231A " + tr.resetTimeBtn; resetTimeBtn.title = tr.resetTimeTitle; }
+        if (resetPlotsBtn) {
+            resetPlotsBtn.title = tr.resetPlotsTitle;
+            resetPlotsBtn.textContent = "\uD83D\uDDD1 " + (tr.resetPlotsBtn || "Limpiar");
+        }
+        const smoothPlotsLabelEl = document.getElementById("smoothPlotsLabel");
+        const smoothPlotsSelectEl = document.getElementById("smoothPlotsSelect");
+        if (smoothPlotsLabelEl && smoothPlotsLabelEl.firstChild) smoothPlotsLabelEl.firstChild.nodeValue = tr.smoothPlotsLabel + ": ";
+        if (smoothPlotsSelectEl) smoothPlotsSelectEl.title = tr.smoothPlotsTitle;
+        ["1", "3", "5", "7", "11"].forEach((v, i) => {
+            const opt = document.getElementById("smoothOpt" + v);
+            if (opt) opt.textContent = [tr.smoothOff, tr.smooth3, tr.smooth5, tr.smooth7, tr.smooth11][i];
+        });
+        if (resetTimeBtn) { resetTimeBtn.textContent = "\u27F3 " + tr.resetTimeBtn; resetTimeBtn.title = tr.resetTimeTitle; }
         if (screenshotBtn) screenshotBtn.title = tr.screenshotTitle;
 
         const authTitleEl = document.getElementById("authTitle");
@@ -528,6 +560,7 @@
                 graphList: graphList,
                 timeWindow: timeWindowSelect.value,
                 historyBuffer: historyBufferSelect.value,
+                smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
                 host: hostInput.value,
                 port: portInput.value || portSelect.value,
                 hideLevels: hideLevels,
@@ -562,6 +595,11 @@
             if (cfg.historyBuffer) {
                 historyBufferSelect.value = cfg.historyBuffer;
                 localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+            }
+            const smoothPlotsSelect = document.getElementById("smoothPlotsSelect");
+            if (smoothPlotsSelect && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
+                const v = String(cfg.smoothPlots);
+                if (["1", "3", "5", "7", "11"].includes(v)) smoothPlotsSelect.value = v;
             }
             if (typeof cfg.hideLevels === "number") {
                 hideLevels = cfg.hideLevels;
@@ -602,7 +640,6 @@
         monitoredOrder = [];
         varGraphAssignment = {};
         historyCache = {};
-        lastSeq = 0;
         graphList = [];
         alarms = {};
         activeAlarms.clear();
@@ -759,6 +796,7 @@
             graphList: graphList,
             timeWindow: timeWindowSelect.value,
             historyBuffer: historyBufferSelect.value,
+            smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
             host: hostInput.value,
             port: portInput.value || portSelect.value,
             hideLevels: hideLevels,
@@ -811,6 +849,11 @@
                     if (cfg.historyBuffer) {
                         historyBufferSelect.value = cfg.historyBuffer;
                         localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+                    }
+                    const smoothSel = document.getElementById("smoothPlotsSelect");
+                    if (smoothSel && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
+                        const v = String(cfg.smoothPlots);
+                        if (["1", "3", "5", "7", "11"].includes(v)) smoothSel.value = v;
                     }
                     if (typeof cfg.hideLevels === "number") {
                         hideLevels = cfg.hideLevels;
@@ -901,6 +944,11 @@
 
     resetPlotsBtn.addEventListener("click", resetPlots);
 
+    const smoothPlotsSelect = document.getElementById("smoothPlotsSelect");
+    if (smoothPlotsSelect) {
+        smoothPlotsSelect.addEventListener("change", () => { saveConfig(); schedulePlotRender(); });
+    }
+
     if (resetTimeBtn) resetTimeBtn.addEventListener("click", () => {
         sessionStartTime = Date.now() / 1000;
         trimHistoryToSessionStart();
@@ -950,6 +998,12 @@
         let suggestedUrl = null;
 
         if (connectionInfo && lastScanPorts.length > 1) {
+            if (connectionInfo.current_cpp_port != null && connectionInfo.current_user) {
+                const msg = (tr.connectingToPortUser || "You are connecting to port %d of user %s.")
+                    .replace("%d", String(connectionInfo.current_cpp_port))
+                    .replace("%s", connectionInfo.current_user);
+                parts.push(msg);
+            }
             parts.push(tr.multiInstanceWarn);
         }
         const selPort = (portInput.value || portSelect.value || "").trim();
@@ -980,6 +1034,9 @@
             suggestedUrl = window.location.protocol + "//" + window.location.hostname + ":" + suggestedWeb;
         }
 
+        const suggestedSuffixEl = document.getElementById("multiInstanceWarningSuggestedSuffix");
+        if (suggestedSuffixEl) suggestedSuffixEl.textContent = "";
+
         if (parts.length === 0) {
             warningDismissed = false;
             multiInstanceWarningEl.style.display = "none";
@@ -988,10 +1045,20 @@
             multiInstanceWarningText.textContent = parts.join(" ");
             if (multiInstanceWarningSuggestedWrap && multiInstanceWarningLink && multiInstanceWarningSuggestedPrefix) {
                 if (showSuggestedLink && suggestedPort != null && suggestedUrl) {
-                    multiInstanceWarningSuggestedPrefix.textContent = (tr.suggestedPortPrefix || "The port that is probably yours is") + " ";
+                    multiInstanceWarningSuggestedPrefix.textContent = (tr.suggestedPortPrefixBefore !== undefined ? tr.suggestedPortPrefixBefore : "En el ");
                     multiInstanceWarningLink.href = suggestedUrl;
                     multiInstanceWarningLink.textContent = String(suggestedPort);
                     multiInstanceWarningSuggestedWrap.style.display = "inline";
+                    fetch(suggestedUrl + "/api/instance_info")
+                        .then((r) => r.ok ? r.json() : null)
+                        .then((info) => {
+                            const suf = document.getElementById("multiInstanceWarningSuggestedSuffix");
+                            if (suf && info && info.cpp_port != null) {
+                                const fmt = tr.suggestedPortSuffix || " está el puerto %d del usuario %s.";
+                                suf.textContent = fmt.replace("%d", String(info.cpp_port)).replace("%s", info.user != null ? info.user : "?");
+                            }
+                        })
+                        .catch(() => {});
                 } else {
                     multiInstanceWarningSuggestedWrap.style.display = "none";
                 }
@@ -1099,7 +1166,6 @@
             clearReconnectPending();
             sendInterval();
             sendMonitored();
-            startHistoryPolling();
         };
         socket.onclose = () => {
             if (thisId !== connectionId) return;
@@ -1107,8 +1173,6 @@
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusDisconnected;
             statusEl.className = "status disconnected";
             statusEl.title = lastConnectionError || "";
-            stopHistoryPolling();
-            lastSeq = 0;
         };
         socket.onerror = () => socket.close();
         socket.onmessage = (e) => {
@@ -1131,8 +1195,6 @@
             clearConnectionError();
             if (msg.type === "vars_names") onVarNames(msg.data);
             else if (msg.type === "vars_update") onVarsUpdate(msg.data);
-            else if (msg.type === "history") onHistoryData(msg.data);
-            else if (msg.type === "histories") onHistoriesData(msg.data, msg.seq);
             else if (msg.type === "set_result") onSetResult(msg);
         };
     }
@@ -1238,33 +1300,6 @@
         const vd = varsByName[arrName];
         if (!vd || !Array.isArray(vd.value) || idx >= vd.value.length) return undefined;
         return vd.value[idx];
-    }
-
-    function startHistoryPolling() {
-        stopHistoryPolling();
-        historyTimer = setInterval(() => {
-            if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            const names = new Set();
-            for (const gid of graphList) {
-                getVarsForGraph(gid).forEach(name => {
-                    if (!isComputed(name) && !isArrayVar(name) && !isArrayElem(name)) names.add(name);
-                });
-            }
-            for (const name of expandedStats) {
-                if (!isComputed(name) && !isArrayVar(name)) names.add(name);
-            }
-            if (names.size > 0) {
-                ws.send(JSON.stringify({
-                    action: "get_histories",
-                    names: Array.from(names),
-                    since_seq: lastSeq,
-                }));
-            }
-        }, HISTORY_INTERVAL_MS);
-    }
-
-    function stopHistoryPolling() {
-        if (historyTimer) { clearInterval(historyTimer); historyTimer = null; }
     }
 
     // --- Column 1: Variable browser (tree view) ---
@@ -3060,48 +3095,6 @@
         }
     }
 
-    function onHistoryData(data) {
-        if (!data || !data.name) return;
-        if (sessionStartTime === null && data.timestamps && data.timestamps.length > 0) {
-            sessionStartTime = Math.min(...data.timestamps);
-        }
-        historyCache[data.name] = data;
-        schedulePlotRender();
-    }
-
-    function onHistoriesData(dataArr, seq) {
-        if (!Array.isArray(dataArr)) return;
-        if (typeof seq === "number" && seq > 0) lastSeq = seq;
-        for (const data of dataArr) {
-            if (!data || !data.name) continue;
-            const name = data.name;
-            const existing = historyCache[name];
-            if (existing && existing.timestamps && existing.timestamps.length > 0 && lastSeq > 0) {
-                const ts = existing.timestamps;
-                const vs = existing.values;
-                for (let i = 0; i < data.timestamps.length; i++) {
-                    ts.push(data.timestamps[i]);
-                    vs.push(data.values[i]);
-                }
-            } else {
-                historyCache[name] = data;
-            }
-        }
-        if (sessionStartTime === null) {
-            let globalMin = null;
-            for (const name in historyCache) {
-                const h = historyCache[name];
-                if (h && h.timestamps && h.timestamps.length > 0) {
-                    const m = Math.min(...h.timestamps);
-                    if (globalMin === null || m < globalMin) globalMin = m;
-                }
-            }
-            if (globalMin !== null) sessionStartTime = globalMin;
-        }
-        trimLocalHistory();
-        schedulePlotRender();
-    }
-
     function trimLocalHistory() {
         // Usar el máximo timestamp presente en los datos (misma base que el servidor) para evitar
         // desfase con Date.now() y el salto/discontinuidad al llegar al límite del buffer.
@@ -3398,6 +3391,21 @@
         rebuildMonitorList();
     }
 
+    /** Media móvil centrada para suavizar series (ventana impar). */
+    function movingAverage(values, windowSize) {
+        if (windowSize <= 1 || values.length === 0) return values.slice();
+        const half = Math.floor(windowSize / 2);
+        const out = [];
+        for (let i = 0; i < values.length; i++) {
+            const lo = Math.max(0, i - half);
+            const hi = Math.min(values.length - 1, i + half);
+            let sum = 0;
+            for (let j = lo; j <= hi; j++) sum += values[j];
+            out.push(sum / (hi - lo + 1));
+        }
+        return out;
+    }
+
     function renderPlots() {
         const windowSec = parseInt(timeWindowSelect.value);
         const activeSlots = [];
@@ -3463,13 +3471,19 @@
                 }
 
                 const t0 = origin != null ? origin : xs[0];
+                const smoothWindow = Math.max(1, parseInt(document.getElementById("smoothPlotsSelect")?.value, 10) || 1);
+                const yPlot = smoothWindow > 1 ? movingAverage(ys, smoothWindow) : ys;
                 traces.push({
                     x: xs.map(t => t - t0),
-                    y: ys,
+                    y: yPlot,
                     type: "scatter",
                     mode: "lines",
                     name: name,
-                    line: { color: TRACE_COLORS[idx % TRACE_COLORS.length], width: 1.5 },
+                    line: {
+                        color: TRACE_COLORS[idx % TRACE_COLORS.length],
+                        width: 1.5,
+                        shape: smoothWindow > 1 ? "linear" : "hv",
+                    },
                 });
             });
 
@@ -3599,7 +3613,7 @@
                     for (const p of data.ports) {
                         const opt = document.createElement("option");
                         opt.value = String(p);
-                        opt.textContent = String(p);
+                        opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
                         portSelect.appendChild(opt);
                     }
                 } else if (Array.isArray(data.range) && data.range.length === 2) {
@@ -3607,7 +3621,7 @@
                     for (let p = start; p <= end; p++) {
                         const opt = document.createElement("option");
                         opt.value = String(p);
-                        opt.textContent = String(p);
+                        opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
                         portSelect.appendChild(opt);
                     }
                 }
@@ -3620,7 +3634,6 @@
             }
         } catch (e) { /* ignorar */ }
         resetStateForNewTarget();
-        lastSeq = 0;
         connect();
     });
 
@@ -3809,7 +3822,7 @@
                 for (const p of data.ports) {
                     const opt = document.createElement("option");
                     opt.value = String(p);
-                    opt.textContent = String(p);
+                    opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
                     portSelect.appendChild(opt);
                 }
             } else if (Array.isArray(data.range) && data.range.length === 2) {
@@ -3817,7 +3830,7 @@
                 for (let p = start; p <= end; p++) {
                     const opt = document.createElement("option");
                     opt.value = String(p);
-                    opt.textContent = String(p);
+                    opt.textContent = (data.port_users && data.port_users[p]) ? (p + " — " + data.port_users[p]) : ((data.suggested_port === p && data.user) ? (p + " — " + data.user) : String(p));
                     portSelect.appendChild(opt);
                 }
             }
@@ -3861,9 +3874,23 @@
         if (computedVars.length > 0) evalComputedVars();
         const hadArrayElems = trackArrayElementHistories();
 
+        // Acumular buffer para gráficos desde el poll de monitorización (solo escalares; arrays en arrayElemHistory, computed en evalComputedVars).
+        const now = Date.now() / 1000;
+        for (let i = 0; i < data.length; i++) {
+            const v = data[i];
+            if (isComputed(v.name)) continue;
+            if (Array.isArray(v.value)) continue;
+            const num = typeof v.value === "number" ? v.value : (v.value === true ? 1 : v.value === false ? 0 : Number(v.value));
+            if (!isFinite(num)) continue;
+            if (!historyCache[v.name]) historyCache[v.name] = { timestamps: [], values: [] };
+            historyCache[v.name].timestamps.push(now);
+            historyCache[v.name].values.push(num);
+        }
+        trimLocalHistory();
+        schedulePlotRender();
+
         updateMonitorValues();
         recordSample();
-        if (hadArrayElems) schedulePlotRender();
     }
 
     // --- Resize ---

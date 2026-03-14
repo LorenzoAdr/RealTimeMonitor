@@ -110,7 +110,7 @@
 
     <div id="multiInstanceWarning" class="warning-banner" style="display:none" role="alert">
         <span id="multiInstanceWarningText"></span>
-        <span id="multiInstanceWarningSuggestedWrap" class="warning-banner-suggested" style="display:none"><span id="multiInstanceWarningSuggestedPrefix"></span><a id="multiInstanceWarningLink" href="#"></a>.</span>
+        <span id="multiInstanceWarningSuggestedWrap" class="warning-banner-suggested" style="display:none"><span id="multiInstanceWarningSuggestedPrefix"></span><a id="multiInstanceWarningLink" href="#"></a><span id="multiInstanceWarningSuggestedSuffix"></span>.</span>
         <button type="button" id="multiInstanceWarningClose" class="warning-banner-close" title="Cerrar aviso" aria-label="Cerrar">×</button>
     </div>
 
@@ -320,8 +320,17 @@ history_capacity = 100    # Muestras por variable en buffer C++
             <div class="col-header">
                 <h2 id="colPlotTitle">Gráficos</h2>
                 <div class="plot-controls">
-                    <button id="resetPlotsBtn" class="btn-small" title="Resetear curvas (histórico y zoom)">&#10227; Reset</button>
-                    <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo">&#9201; Reset tiempo</button>
+                    <label id="smoothPlotsLabel" title="Ventana de media móvil para suavizar curvas">Suavizado:
+                        <select id="smoothPlotsSelect">
+                            <option value="1" id="smoothOpt1">No</option>
+                            <option value="3" id="smoothOpt3">Suave (3)</option>
+                            <option value="5" id="smoothOpt5" selected>Medio (5)</option>
+                            <option value="7" id="smoothOpt7">Fuerte (7)</option>
+                            <option value="11" id="smoothOpt11">Muy fuerte (11)</option>
+                        </select>
+                    </label>
+                    <button id="resetPlotsBtn" class="btn-small" title="Quitar asignaciones de variables a gráficos">&#128465; Limpiar</button>
+                    <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo">&#10227; Reset</button>
                     <button id="pauseBtn" class="btn-small" title="Pausar/reanudar gráficos">&#9654; Play</button>
                     <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
                 </div>
