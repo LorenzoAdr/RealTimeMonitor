@@ -24,26 +24,17 @@ using Setter = std::function<void(const VarValue&)>;
 using ArrayGetter = std::function<std::vector<double>()>;
 using ArrayElementSetter = std::function<bool(size_t index, double value)>;
 
-struct TimestampedValue {
-    double value;
-    std::chrono::system_clock::time_point time;
-    uint64_t seq = 0;
-};
-
 struct VarEntry {
     std::string name;
     VarType type;
     Getter getter;
     Setter setter;
     ArrayElementSetter array_elem_setter;
-    std::vector<TimestampedValue> history;
-    size_t history_write_idx = 0;
-    bool history_full = false;
 };
 
 class VarMonitor {
 public:
-    explicit VarMonitor(size_t history_capacity = 100);
+    VarMonitor();
     ~VarMonitor();
 
     VarMonitor(const VarMonitor&) = delete;
@@ -92,17 +83,6 @@ public:
     bool set_var(const std::string& name, const VarValue& value);
     bool set_array_element(const std::string& name, size_t index, double value);
 
-    struct HistoryData {
-        std::string name;
-        std::vector<double> values;
-        std::vector<std::chrono::system_clock::time_point> timestamps;
-        std::vector<uint64_t> seqs;
-    };
-
-    std::optional<HistoryData> get_history(const std::string& name);
-    std::optional<HistoryData> get_history_since(const std::string& name, uint64_t since_seq);
-    uint64_t get_seq() const { return seq_num_.load(); }
-
     void client_connected();
     void client_disconnected();
     int client_count() const { return client_count_.load(); }
@@ -118,8 +98,6 @@ private:
     std::thread sample_thread_;
     std::thread rpc_thread_;
     int sample_interval_ms_ = 100;
-    size_t history_capacity_;
-    std::atomic<uint64_t> seq_num_{0};
 };
 
 VarMonitor* get_global_instance();
@@ -127,7 +105,6 @@ void set_global_instance(VarMonitor* instance);
 
 void set_tcp_port(uint16_t port);
 uint16_t get_tcp_port();
-size_t get_history_capacity();
 
 void set_config_path(const std::string& path);
 bool load_config();

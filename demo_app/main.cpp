@@ -44,7 +44,7 @@ int main() {
     double internal_buf[16] = {};
     std::mutex internal_mtx;
 
-    varmon::VarMonitor monitor(2000);
+    varmon::VarMonitor monitor;
 
     monitor.register_var("waves.sine", &sine_wave);
     monitor.register_var("waves.cosine", &cosine_wave);

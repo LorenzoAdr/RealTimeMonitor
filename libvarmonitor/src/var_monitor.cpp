@@ -10,8 +10,7 @@ static VarMonitor* g_instance = nullptr;
 VarMonitor* get_global_instance() { return g_instance; }
 void set_global_instance(VarMonitor* instance) { g_instance = instance; }
 
-VarMonitor::VarMonitor(size_t history_capacity)
-    : history_capacity_(history_capacity) {}
+VarMonitor::VarMonitor() = default;
 
 VarMonitor::~VarMonitor() {
     stop();
@@ -119,9 +118,6 @@ void VarMonitor::register_var(const std::string& name, VarType type,
     entry.type = type;
     entry.getter = std::move(getter);
     entry.setter = std::move(setter);
-    if (type != VarType::Array) {
-        entry.history.resize(history_capacity_);
-    }
     vars_[name] = std::move(entry);
 }
 
@@ -182,19 +178,6 @@ bool VarMonitor::start(int sample_interval_ms) {
     set_global_instance(this);
 
     load_config();
-
-    size_t cfg_cap = get_history_capacity();
-    if (cfg_cap != history_capacity_) {
-        std::unique_lock lock(mutex_);
-        history_capacity_ = cfg_cap;
-        for (auto& [name, entry] : vars_) {
-            if (entry.type != VarType::Array) {
-                entry.history.resize(history_capacity_);
-                entry.history_write_idx = 0;
-                entry.history_full = false;
-            }
-        }
-    }
 
     sample_thread_ = std::thread(&VarMonitor::sample_loop, this);
     rpc_thread_ = std::thread(&VarMonitor::tcp_server_loop, this);
@@ -263,55 +246,6 @@ bool VarMonitor::set_array_element(const std::string& name, size_t index, double
     return it->second.array_elem_setter(index, value);
 }
 
-std::optional<VarMonitor::HistoryData> VarMonitor::get_history(const std::string& name) {
-    std::shared_lock lock(mutex_);
-    auto it = vars_.find(name);
-    if (it == vars_.end()) return std::nullopt;
-    if (it->second.type == VarType::Array) return std::nullopt;
-
-    auto& entry = it->second;
-    HistoryData hd;
-    hd.name = name;
-
-    size_t count = entry.history_full ? history_capacity_ : entry.history_write_idx;
-    hd.values.reserve(count);
-    hd.timestamps.reserve(count);
-    hd.seqs.reserve(count);
-
-    size_t start = entry.history_full ? entry.history_write_idx : 0;
-    for (size_t i = 0; i < count; ++i) {
-        size_t idx = (start + i) % history_capacity_;
-        hd.values.push_back(entry.history[idx].value);
-        hd.timestamps.push_back(entry.history[idx].time);
-        hd.seqs.push_back(entry.history[idx].seq);
-    }
-    return hd;
-}
-
-std::optional<VarMonitor::HistoryData> VarMonitor::get_history_since(
-        const std::string& name, uint64_t since_seq) {
-    std::shared_lock lock(mutex_);
-    auto it = vars_.find(name);
-    if (it == vars_.end()) return std::nullopt;
-    if (it->second.type == VarType::Array) return std::nullopt;
-
-    auto& entry = it->second;
-    HistoryData hd;
-    hd.name = name;
-
-    size_t count = entry.history_full ? history_capacity_ : entry.history_write_idx;
-    size_t start = entry.history_full ? entry.history_write_idx : 0;
-    for (size_t i = 0; i < count; ++i) {
-        size_t idx = (start + i) % history_capacity_;
-        if (entry.history[idx].seq > since_seq) {
-            hd.values.push_back(entry.history[idx].value);
-            hd.timestamps.push_back(entry.history[idx].time);
-            hd.seqs.push_back(entry.history[idx].seq);
-        }
-    }
-    return hd;
-}
-
 void VarMonitor::client_connected() {
     client_count_.fetch_add(1);
 }
@@ -322,26 +256,6 @@ void VarMonitor::client_disconnected() {
 
 void VarMonitor::sample_loop() {
     while (running_.load()) {
-        if (client_count_.load() > 0) {
-            std::unique_lock lock(mutex_);
-            auto now = std::chrono::system_clock::now();
-            uint64_t seq = ++seq_num_;
-            for (auto& [name, entry] : vars_) {
-                if (entry.type == VarType::Array) continue;
-                double val = 0.0;
-                auto v = entry.getter();
-                switch (entry.type) {
-                    case VarType::Double: val = std::get<double>(v); break;
-                    case VarType::Int32:  val = static_cast<double>(std::get<int32_t>(v)); break;
-                    case VarType::Bool:   val = std::get<bool>(v) ? 1.0 : 0.0; break;
-                    case VarType::String: val = 0.0; break;
-                    case VarType::Array:  break;
-                }
-                entry.history[entry.history_write_idx] = {val, now, seq};
-                entry.history_write_idx = (entry.history_write_idx + 1) % history_capacity_;
-                if (entry.history_write_idx == 0) entry.history_full = true;
-            }
-        }
         std::this_thread::sleep_for(std::chrono::milliseconds(sample_interval_ms_));
     }
 }
