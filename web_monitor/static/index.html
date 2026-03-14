@@ -8,11 +8,39 @@
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
+    <div id="authOverlay" class="auth-overlay" style="display:none">
+        <div class="auth-modal">
+            <h2 id="authTitle">Contraseña</h2>
+            <p id="authPrompt" class="auth-prompt">El monitor requiere contraseña para conectar.</p>
+            <input type="password" id="authPasswordInput" class="auth-input" placeholder="Contraseña" autocomplete="current-password">
+            <button type="button" id="authSubmitBtn" class="btn-primary">Entrar</button>
+        </div>
+    </div>
+
     <header>
         <div class="header-left">
             <h1>VarMonitor</h1>
             <span id="connectionStatus" class="status disconnected">Desconectado</span>
             <span id="varCount" class="var-count"></span>
+        </div>
+        <div id="advancedStatsStrip" class="advanced-stats-strip" style="display:none" aria-hidden="true">
+            <div class="adv-block">
+                <span class="adv-label">RAM</span>
+                <span id="advRamHtml" class="adv-val" title="Navegador">HTML: —</span>
+                <span id="advRamPython" class="adv-val" title="Backend Python">Py: —</span>
+                <span id="advRamCpp" class="adv-val" title="Proceso C++">C++: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">CPU</span>
+                <span id="advCpuPython" class="adv-val" title="Backend Python">Py: —</span>
+                <span id="advCpuCpp" class="adv-val" title="Proceso C++">C++: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">Red</span>
+                <span id="advNetMbMsg" class="adv-val">MB/msg: —</span>
+                <span id="advNetMsgS" class="adv-val">msg/s: —</span>
+                <span id="advNetMbS" class="adv-val">MB/s: —</span>
+            </div>
         </div>
         <div class="header-right">
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
@@ -34,7 +62,7 @@
                         </div>
                     </div>
                     <label id="pollLabel">Poll (ms):
-                        <input type="number" id="intervalInput" value="200" min="100" max="5000" step="50">
+                        <input type="number" id="intervalInput" value="200" min="5" max="5000" step="5">
                     </label>
                     <button id="reconnectBtn" class="btn-small" title="Reconectar con el host/puerto seleccionados">Conectar</button>
                     <label><span id="langLabel">Idioma:</span>
@@ -71,10 +99,20 @@
                     </label>
                     <button id="exportConfigBtn" class="btn-small" title="Guardar configuración a archivo">&#128190; Guardar</button>
                     <button id="importConfigBtn" class="btn-small" title="Cargar configuración desde archivo">&#128194; Cargar</button>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="advInfoCheckbox" title="Mostrar RAM y carga de red en el header">
+                        <span id="advInfoLabel">Adv info</span>
+                    </label>
                 </div>
             </div>
         </div>
     </header>
+
+    <div id="multiInstanceWarning" class="warning-banner" style="display:none" role="alert">
+        <span id="multiInstanceWarningText"></span>
+        <span id="multiInstanceWarningSuggestedWrap" class="warning-banner-suggested" style="display:none"><span id="multiInstanceWarningSuggestedPrefix"></span><a id="multiInstanceWarningLink" href="#"></a>.</span>
+        <button type="button" id="multiInstanceWarningClose" class="warning-banner-close" title="Cerrar aviso" aria-label="Cerrar">×</button>
+    </div>
 
     <div id="varDrawer" class="var-drawer" style="display:none">
         <div class="var-drawer-inner">
@@ -283,6 +321,7 @@ history_capacity = 100    # Muestras por variable en buffer C++
                 <h2 id="colPlotTitle">Gráficos</h2>
                 <div class="plot-controls">
                     <button id="resetPlotsBtn" class="btn-small" title="Resetear curvas (histórico y zoom)">&#10227; Reset</button>
+                    <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo">&#9201; Reset tiempo</button>
                     <button id="pauseBtn" class="btn-small" title="Pausar/reanudar gráficos">&#9654; Play</button>
                     <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
                 </div>

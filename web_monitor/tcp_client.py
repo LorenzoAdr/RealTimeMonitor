@@ -71,6 +71,18 @@ class TcpBridge:
         resp = self._request({"cmd": "list_names"})
         return resp.get("data", [])
 
+    def get_server_info(self) -> dict | None:
+        """Respuesta completa de server_info (uptime_seconds, memory_rss_kb si está disponible). None si falla."""
+        try:
+            return self._request({"cmd": "server_info"})
+        except Exception:
+            return None
+
+    def get_uptime_seconds(self) -> float | None:
+        """Tiempo de vida del servidor C++ en segundos (si el servidor lo soporta)."""
+        info = self.get_server_info()
+        return info.get("uptime_seconds") if info else None
+
     def list_vars(self) -> list[dict]:
         resp = self._request({"cmd": "list_vars"})
         return resp.get("data", [])

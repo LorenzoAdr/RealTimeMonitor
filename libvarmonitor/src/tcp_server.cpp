@@ -13,12 +13,67 @@
 #include <vector>
 #include <chrono>
 #include <iomanip>
+#include <limits.h>
 
 namespace varmon {
+
+#ifdef __linux__
+static std::string get_executable_directory() {
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    std::string path(buf);
+    size_t last = path.rfind('/');
+    if (last == std::string::npos) return "";
+    return path.substr(0, last);
+}
+
+/** Read VmRSS from /proc/self/status (KB). Returns -1 if unavailable. */
+static long get_self_rss_kb() {
+    std::ifstream f("/proc/self/status");
+    if (!f) return -1;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.compare(0, 6, "VmRSS:") != 0) continue;
+        size_t i = 6;
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+        if (i >= line.size()) return -1;
+        try {
+            return std::stol(line.substr(i));
+        } catch (...) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+/** Read utime+stime (CPU jiffies) from /proc/self/stat. Returns -1 if unavailable. */
+static long long get_self_cpu_jiffies() {
+    std::ifstream f("/proc/self/stat");
+    if (!f) return -1;
+    std::string line;
+    if (!std::getline(f, line)) return -1;
+    size_t rparen = line.rfind(')');
+    if (rparen == std::string::npos || rparen + 2 >= line.size()) return -1;
+    std::istringstream iss(line.substr(rparen + 2));
+    std::vector<std::string> tokens;
+    for (std::string t; iss >> t; ) tokens.push_back(t);
+    if (tokens.size() < 13) return -1;
+    try {
+        unsigned long utime = std::stoul(tokens[11]);
+        unsigned long stime = std::stoul(tokens[12]);
+        return static_cast<long long>(utime) + static_cast<long long>(stime);
+    } catch (...) {
+        return -1;
+    }
+}
+#endif
 
 static uint16_t g_tcp_port = 9100;
 static size_t g_history_capacity = 100;
 static std::string g_config_path;
+static std::chrono::steady_clock::time_point g_server_start_time;
 
 void set_tcp_port(uint16_t port) { g_tcp_port = port; }
 uint16_t get_tcp_port() { return g_tcp_port; }
@@ -46,6 +101,17 @@ bool load_config() {
     }
 
     std::ifstream file(path);
+#ifdef __linux__
+    if (!file.is_open() && path == "varmon.conf") {
+        std::string exe_dir = get_executable_directory();
+        if (!exe_dir.empty()) {
+            for (const std::string& candidate : { exe_dir + "/../../varmon.conf", exe_dir + "/../varmon.conf" }) {
+                file.open(candidate);
+                if (file.is_open()) { path = candidate; break; }
+            }
+        }
+    }
+#endif
     if (!file.is_open()) {
         std::cerr << "[VarMonitor] AVISO: No se encontro el archivo de configuracion.\n"
                   << "  Buscado en: " << path << "\n"
@@ -221,7 +287,39 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
         std::string cmd = json_get_string(request, "cmd");
         std::string response;
 
-        if (cmd == "list_names") {
+        if (cmd == "server_info") {
+            auto now = std::chrono::steady_clock::now();
+            double sec = std::chrono::duration<double>(now - g_server_start_time).count();
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(3);
+            ss << "{\"type\":\"server_info\",\"uptime_seconds\":" << sec;
+#ifdef __linux__
+            long rss_kb = get_self_rss_kb();
+            if (rss_kb >= 0) ss << ",\"memory_rss_kb\":" << rss_kb;
+            long long cpu_jiffies = get_self_cpu_jiffies();
+            if (cpu_jiffies >= 0) {
+                static long long s_last_cpu_jiffies = -1;
+                static std::chrono::steady_clock::time_point s_last_wall;
+                long jiffies_per_sec = sysconf(_SC_CLK_TCK);
+                if (jiffies_per_sec <= 0) jiffies_per_sec = 100;
+                if (s_last_cpu_jiffies >= 0) {
+                    double wall_sec = std::chrono::duration<double>(now - s_last_wall).count();
+                    if (wall_sec >= 0.1) {
+                        double cpu_sec = (cpu_jiffies - s_last_cpu_jiffies) / static_cast<double>(jiffies_per_sec);
+                        double pct = (cpu_sec / wall_sec) * 100.0;
+                        if (pct < 0.0) pct = 0.0;
+                        if (pct > 100.0) pct = 100.0;
+                        ss << ",\"cpu_percent\":" << std::fixed << std::setprecision(2) << pct;
+                    }
+                }
+                s_last_cpu_jiffies = cpu_jiffies;
+                s_last_wall = now;
+            }
+#endif
+            ss << "}";
+            response = ss.str();
+        }
+        else if (cmd == "list_names") {
             auto names = mon->list_var_names();
             std::ostringstream ss;
             ss << "{\"type\":\"names\",\"data\":[";
@@ -451,6 +549,7 @@ void VarMonitor::tcp_server_loop() {
     }
 
     std::cout << "[VarMonitor] Servidor TCP escuchando en puerto " << g_tcp_port << "\n";
+    g_server_start_time = std::chrono::steady_clock::now();
 
     while (running_.load()) {
         fd_set rfds;

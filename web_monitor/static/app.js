@@ -16,6 +16,8 @@
     let varsByName = {};
     let knownVarNames = [];
     let monitoredNames = new Set();
+    /** Orden de visualización de variables monitorizadas (permite reordenar por drag-and-drop) */
+    let monitoredOrder = [];
     let varGraphAssignment = {};
     let historyCache = {};
     let graphList = [];
@@ -30,6 +32,8 @@
     let plotRafPending = false;
     let lastSeq = 0;
     let localHistMaxSec = 30;
+    /** Origen de tiempo compartido para todos los gráficos (segundos Unix). Opción B: se fija con el primer historial recibido. */
+    let sessionStartTime = null;
 
     const MAX_RECORD_SEC = 300;
     let isRecording = false;
@@ -60,13 +64,40 @@
     const recordTimerEl = document.getElementById("recordTimer");
     const screenshotBtn = document.getElementById("screenshotBtn");
     const resetPlotsBtn = document.getElementById("resetPlotsBtn");
+    const resetTimeBtn = document.getElementById("resetTimeBtn");
     const pauseBtn = document.getElementById("pauseBtn");
     const resetConfigBtn = document.getElementById("resetConfigBtn");
     const hideLevelsInput = document.getElementById("hideLevelsInput");
     const settingsBtn = document.getElementById("settingsBtn");
     const settingsPanel = document.getElementById("settingsPanel");
+    const multiInstanceWarningEl = document.getElementById("multiInstanceWarning");
+    const multiInstanceWarningText = document.getElementById("multiInstanceWarningText");
+    const multiInstanceWarningSuggestedWrap = document.getElementById("multiInstanceWarningSuggestedWrap");
+    const multiInstanceWarningSuggestedPrefix = document.getElementById("multiInstanceWarningSuggestedPrefix");
+    const multiInstanceWarningLink = document.getElementById("multiInstanceWarningLink");
     const langSelect = document.getElementById("langSelect");
     const themeSelect = document.getElementById("themeSelect");
+    const authOverlay = document.getElementById("authOverlay");
+    const authPasswordInput = document.getElementById("authPasswordInput");
+    const authSubmitBtn = document.getElementById("authSubmitBtn");
+    const advInfoCheckbox = document.getElementById("advInfoCheckbox");
+    const advancedStatsStrip = document.getElementById("advancedStatsStrip");
+    const advRamHtml = document.getElementById("advRamHtml");
+    const advRamPython = document.getElementById("advRamPython");
+    const advRamCpp = document.getElementById("advRamCpp");
+    const advCpuPython = document.getElementById("advCpuPython");
+    const advCpuCpp = document.getElementById("advCpuCpp");
+    const advNetMbMsg = document.getElementById("advNetMbMsg");
+    const advNetMsgS = document.getElementById("advNetMsgS");
+    const advNetMbS = document.getElementById("advNetMbS");
+    const advInfoLabel = document.getElementById("advInfoLabel");
+
+    const ADV_INFO_STORAGE_KEY = "varmon_adv_info";
+    const WS_BUFFER_MAX_AGE_MS = 10000;
+    let advStatsPollInterval = null;
+    const wsMessageBuffer = [];
+
+    let lastConnectionError = null;
 
     let browserSelection = new Set();
     let browserListDirty = true;
@@ -208,6 +239,7 @@
         computedVars.push({ name, expr, fn });
         computedHistories[name] = { timestamps: [], values: [] };
         monitoredNames.add(name);
+        monitoredOrder.push(name);
         return true;
     }
 
@@ -217,6 +249,7 @@
         delete varsByName[name];
         delete historyCache[name];
         monitoredNames.delete(name);
+        monitoredOrder = monitoredOrder.filter(n => n !== name);
         delete varGraphAssignment[name];
         expandedStats.delete(name);
     }
@@ -296,7 +329,23 @@
             graphTitle: "Gráfico",
             newGraphDropText: "Nuevo gráfico: suelta aquí para crear uno",
             removeGraphTitle: "Eliminar gráfico",
-            monitorMenuTitle: "Más opciones"
+            monitorMenuTitle: "Más opciones",
+            timeAxisTitle: "t (s)",
+            resetTimeBtn: "Reset tiempo",
+            resetTimeTitle: "Reiniciar origen de tiempo (empezar a grabar desde 0)",
+            authTitle: "Contraseña",
+            authPrompt: "El monitor requiere contraseña para conectar.",
+            authWrongAttempts: "Contraseña incorrecta. Intentos restantes: %d de 3.",
+            authLastAttempt: "Último intento. Si falla, el servidor se cerrará por seguridad.",
+            authServerClosed: "El servidor se ha cerrado por seguridad (3 intentos fallidos).",
+            authPlaceholder: "Contraseña",
+            authSubmit: "Entrar",
+            multiInstanceWarn: "Más de 1 proceso en ejecución. Elija correctamente los puertos de conexión (normalmente el más alto).",
+            multiInstanceMismatch: "El puerto web actual (%d) y el C++ seleccionado (%d) no corresponden al mismo índice (base+N). Compruebe que está en el backend y C++ correctos.",
+            notLatestPortWarn: "Te has conectado a un backend que no es el más reciente. ¿Estás seguro de que es el tuyo?",
+            backendUptimeMinutes: "Este backend lleva %d min ejecutándose.",
+            suggestedPortPrefix: "El más reciente es el puerto",
+            advInfoLabel: "Adv info",
         },
         en: {
             colBrowserTitle: "Available variables",
@@ -330,7 +379,23 @@
             graphTitle: "Plot",
             newGraphDropText: "New plot: drop here to create one",
             removeGraphTitle: "Remove plot",
-            monitorMenuTitle: "More options"
+            monitorMenuTitle: "More options",
+            timeAxisTitle: "t (s)",
+            resetTimeBtn: "Reset time",
+            resetTimeTitle: "Reset time origin (start recording from 0)",
+            authTitle: "Password",
+            authPrompt: "The monitor requires a password to connect.",
+            authWrongAttempts: "Wrong password. Attempts left: %d of 3.",
+            authLastAttempt: "Last attempt. If it fails, the server will shut down for security.",
+            authServerClosed: "The server has shut down for security (3 failed attempts).",
+            authPlaceholder: "Password",
+            authSubmit: "Enter",
+            multiInstanceWarn: "More than 1 process running. Choose the correct connection ports (usually the highest).",
+            multiInstanceMismatch: "Current web port (%d) and selected C++ port (%d) do not match the same instance (base+N). Ensure you are on the correct backend and C++.",
+            notLatestPortWarn: "You have connected to a backend that is not the newest. Are you sure it is yours?",
+            backendUptimeMinutes: "This backend has been running for %d min.",
+            suggestedPortPrefix: "The newest is port",
+            advInfoLabel: "Adv info",
         }
     };
 
@@ -398,7 +463,15 @@
         if (clearAlarmsBtn) clearAlarmsBtn.title = tr.clearAlarmsTitle;
 
         if (resetPlotsBtn) resetPlotsBtn.title = tr.resetPlotsTitle;
+        if (resetTimeBtn) { resetTimeBtn.textContent = "\u231A " + tr.resetTimeBtn; resetTimeBtn.title = tr.resetTimeTitle; }
         if (screenshotBtn) screenshotBtn.title = tr.screenshotTitle;
+
+        const authTitleEl = document.getElementById("authTitle");
+        const authPromptEl = document.getElementById("authPrompt");
+        if (authTitleEl) authTitleEl.textContent = tr.authTitle;
+        if (authPromptEl) authPromptEl.textContent = tr.authPrompt;
+        if (authPasswordInput) authPasswordInput.placeholder = tr.authPlaceholder;
+        if (authSubmitBtn) authSubmitBtn.textContent = tr.authSubmit;
 
         const timeWindowLabel = timeWindowSelect?.parentElement;
         if (timeWindowLabel && timeWindowLabel.tagName === "LABEL") {
@@ -423,6 +496,7 @@
             statusEl.textContent = statusEl.classList.contains("connected") ? tr.statusConnected : tr.statusDisconnected;
         }
         if (settingsBtn) settingsBtn.title = tr.settingsTitle;
+        if (advInfoLabel) advInfoLabel.textContent = tr.advInfoLabel || "Adv info";
         const monitorMenuBtnEl = document.getElementById("monitorMenuBtn");
         if (monitorMenuBtnEl) monitorMenuBtnEl.title = tr.monitorMenuTitle;
 
@@ -449,7 +523,7 @@
     function saveConfig() {
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify({
-                monitored: Array.from(monitoredNames),
+                monitored: monitoredOrder.slice(),
                 graphs: varGraphAssignment,
                 graphList: graphList,
                 timeWindow: timeWindowSelect.value,
@@ -475,7 +549,8 @@
             if (!raw) return;
             const cfg = JSON.parse(raw);
             if (Array.isArray(cfg.monitored)) {
-                cfg.monitored.forEach(n => monitoredNames.add(n));
+                monitoredOrder = cfg.monitored.slice();
+                monitoredOrder.forEach(n => monitoredNames.add(n));
             }
             if (cfg.graphs && typeof cfg.graphs === "object") {
                 varGraphAssignment = cfg.graphs;
@@ -524,6 +599,7 @@
     function resetConfig() {
         localStorage.removeItem(STORAGE_KEY);
         monitoredNames.clear();
+        monitoredOrder = [];
         varGraphAssignment = {};
         historyCache = {};
         lastSeq = 0;
@@ -546,6 +622,18 @@
     applyTheme(currentTheme);
     applyLanguage(currentLang);
     applyMonitorColumns();
+
+    try {
+        const saved = localStorage.getItem(ADV_INFO_STORAGE_KEY) === "1";
+        if (advInfoCheckbox) advInfoCheckbox.checked = saved;
+        setAdvInfoEnabled(saved);
+    } catch (e) {}
+
+    if (advInfoCheckbox) {
+        advInfoCheckbox.addEventListener("change", () => {
+            setAdvInfoEnabled(advInfoCheckbox.checked);
+        });
+    }
 
     resetConfigBtn.addEventListener("click", resetConfig);
 
@@ -666,7 +754,7 @@
 
     function exportConfigToFile() {
         const cfg = {
-            monitored: Array.from(monitoredNames),
+            monitored: monitoredOrder.slice(),
             graphs: varGraphAssignment,
             graphList: graphList,
             timeWindow: timeWindowSelect.value,
@@ -708,8 +796,10 @@
                 try {
                     const cfg = JSON.parse(reader.result);
                     monitoredNames.clear();
+                    monitoredOrder = [];
                     if (Array.isArray(cfg.monitored)) {
-                        cfg.monitored.forEach(n => monitoredNames.add(n));
+                        monitoredOrder = cfg.monitored.slice();
+                        monitoredOrder.forEach(n => monitoredNames.add(n));
                     }
                     if (cfg.graphs && typeof cfg.graphs === "object") {
                         varGraphAssignment = cfg.graphs;
@@ -811,19 +901,199 @@
 
     resetPlotsBtn.addEventListener("click", resetPlots);
 
+    if (resetTimeBtn) resetTimeBtn.addEventListener("click", () => {
+        sessionStartTime = Date.now() / 1000;
+        trimHistoryToSessionStart();
+        schedulePlotRender();
+    });
+
     // --- WebSocket ---
 
+    let connectionId = 0;
+    let connectionInfo = null;
+    let lastScanPorts = [];
+    let warningDismissed = false;
+
+    function fetchConnectionInfo() {
+        return fetch("/api/connection_info")
+            .then((r) => r.ok ? r.json() : null)
+            .then((data) => {
+                connectionInfo = data;
+                // Siempre aplicar el puerto preferido del backend (8080→1900, 8081→1901…) para que
+                // no gane el valor guardado en localStorage de otra sesión (p. ej. 9100 de 8081).
+                if (data) {
+                    const minMs = data.poll_interval_min_ms;
+                    if (typeof minMs === "number" && intervalInput) {
+                        intervalInput.min = Math.max(1, minMs);
+                    }
+                    if (data.preferred_tcp_port != null) {
+                        const preferred = String(data.preferred_tcp_port);
+                        portInput.value = preferred;
+                        if (portSelect.options.length) {
+                            const hasOpt = Array.from(portSelect.options).some(o => o.value === preferred);
+                            if (hasOpt) portSelect.value = preferred;
+                        }
+                    }
+                }
+                updateMultiInstanceWarning();
+                return data;
+            })
+            .catch(() => null);
+    }
+
+    function updateMultiInstanceWarning() {
+        if (!multiInstanceWarningEl || !multiInstanceWarningText) return;
+        const tr = (I18N[currentLang] || I18N.es);
+        const parts = [];
+        let showSuggestedLink = false;
+        let suggestedPort = null;
+        let suggestedUrl = null;
+
+        if (connectionInfo && lastScanPorts.length > 1) {
+            parts.push(tr.multiInstanceWarn);
+        }
+        const selPort = (portInput.value || portSelect.value || "").trim();
+        if (connectionInfo && selPort && lastScanPorts.length > 1) {
+            const baseWeb = connectionInfo.base_web_port;
+            const actualWeb = connectionInfo.actual_web_port;
+            const baseTcp = connectionInfo.base_tcp_port;
+            const selTcp = parseInt(selPort, 10);
+            if (!isNaN(selTcp) && baseWeb != null && actualWeb != null && baseTcp != null) {
+                const offsetWeb = actualWeb - baseWeb;
+                const offsetTcp = selTcp - baseTcp;
+                if (offsetWeb !== offsetTcp) {
+                    const msg = tr.multiInstanceMismatch || "Web port %d and C++ port %d do not match base+N.";
+                    parts.push(msg.replace(/%d/, String(actualWeb)).replace(/%d/, String(selTcp)));
+                }
+            }
+        }
+        const actualWeb = connectionInfo && connectionInfo.actual_web_port != null ? connectionInfo.actual_web_port : null;
+        const suggestedWeb = connectionInfo && connectionInfo.suggested_web_port != null ? connectionInfo.suggested_web_port : null;
+        if (connectionInfo && actualWeb != null && suggestedWeb != null && actualWeb !== suggestedWeb) {
+            const uptimeSec = connectionInfo.uptime_seconds;
+            if (uptimeSec != null && uptimeSec >= 0) {
+                const min = Math.floor(uptimeSec / 60);
+                parts.push((tr.backendUptimeMinutes || "This backend has been running for %d min.").replace("%d", String(min)));
+            }
+            showSuggestedLink = true;
+            suggestedPort = suggestedWeb;
+            suggestedUrl = window.location.protocol + "//" + window.location.hostname + ":" + suggestedWeb;
+        }
+
+        if (parts.length === 0) {
+            warningDismissed = false;
+            multiInstanceWarningEl.style.display = "none";
+            if (multiInstanceWarningSuggestedWrap) multiInstanceWarningSuggestedWrap.style.display = "none";
+        } else if (!warningDismissed) {
+            multiInstanceWarningText.textContent = parts.join(" ");
+            if (multiInstanceWarningSuggestedWrap && multiInstanceWarningLink && multiInstanceWarningSuggestedPrefix) {
+                if (showSuggestedLink && suggestedPort != null && suggestedUrl) {
+                    multiInstanceWarningSuggestedPrefix.textContent = (tr.suggestedPortPrefix || "The port that is probably yours is") + " ";
+                    multiInstanceWarningLink.href = suggestedUrl;
+                    multiInstanceWarningLink.textContent = String(suggestedPort);
+                    multiInstanceWarningSuggestedWrap.style.display = "inline";
+                } else {
+                    multiInstanceWarningSuggestedWrap.style.display = "none";
+                }
+            }
+            multiInstanceWarningEl.style.display = "flex";
+        }
+    }
+
+    function hideMultiInstanceWarning() {
+        warningDismissed = true;
+        if (multiInstanceWarningEl) multiInstanceWarningEl.style.display = "none";
+    }
+
+    function formatAdvNum(v) {
+        if (v == null || typeof v !== "number" || isNaN(v)) return "—";
+        if (v >= 100) return v.toFixed(0);
+        if (v >= 1) return v.toFixed(2);
+        return v.toFixed(3);
+    }
+
+    async function updateAdvancedStatsStrip() {
+        if (!advancedStatsStrip || advancedStatsStrip.style.display !== "flex") return;
+        if (advRamHtml) {
+            let htmlMb = null;
+            try {
+                const mem = typeof performance !== "undefined" && performance.memory;
+                if (mem && typeof mem.usedJSHeapSize === "number") {
+                    htmlMb = mem.usedJSHeapSize / (1024 * 1024);
+                }
+            } catch (err) { /* performance.memory no disponible (solo Chrome/Chromium) */ }
+            advRamHtml.textContent = "HTML: " + (htmlMb != null ? formatAdvNum(htmlMb) + " MB" : "—");
+            advRamHtml.title = htmlMb != null ? "Heap JS del navegador" : "No disponible en Firefox (solo Chrome/Chromium expone performance.memory)";
+        }
+        try {
+            const r = await fetch("/api/advanced_stats");
+            if (r.ok) {
+                const d = await r.json();
+                if (advRamPython) advRamPython.textContent = "Py: " + formatAdvNum(d.python_ram_mb) + " MB";
+                if (advRamCpp) advRamCpp.textContent = "C++: " + formatAdvNum(d.cpp_ram_mb) + " MB";
+                if (advCpuPython)
+                    advCpuPython.textContent = (d.python_cpu_percent != null && !isNaN(d.python_cpu_percent))
+                        ? "Py: " + formatAdvNum(d.python_cpu_percent) + "%"
+                        : "Py: —";
+                if (advCpuCpp)
+                    advCpuCpp.textContent = (d.cpp_cpu_percent != null && !isNaN(d.cpp_cpu_percent))
+                        ? "C++: " + formatAdvNum(d.cpp_cpu_percent) + "%"
+                        : "C++: —";
+            }
+        } catch (e) {
+            if (advRamPython) advRamPython.textContent = "Py: —";
+            if (advRamCpp) advRamCpp.textContent = "C++: —";
+            if (advCpuPython) advCpuPython.textContent = "Py: —";
+            if (advCpuCpp) advCpuCpp.textContent = "C++: —";
+        }
+        const now = Date.now();
+        const cutoff = now - WS_BUFFER_MAX_AGE_MS;
+        const recent = wsMessageBuffer.filter((x) => x.t >= cutoff);
+        const n = recent.length;
+        const totalBytes = recent.reduce((s, x) => s + x.size, 0);
+        const spanSec = (recent.length ? (now - Math.min(...recent.map((x) => x.t))) / 1000 : 0) || 1;
+        const msgPerS = n / spanSec;
+        const mbPerS = totalBytes / (1024 * 1024) / spanSec;
+        const mbPerMsg = n > 0 ? totalBytes / (1024 * 1024) / n : 0;
+        if (advNetMbMsg) advNetMbMsg.textContent = "MB/msg: " + formatAdvNum(mbPerMsg);
+        if (advNetMsgS) advNetMsgS.textContent = "msg/s: " + formatAdvNum(msgPerS);
+        if (advNetMbS) advNetMbS.textContent = "MB/s: " + formatAdvNum(mbPerS);
+    }
+
+    function setAdvInfoEnabled(enabled) {
+        try { localStorage.setItem(ADV_INFO_STORAGE_KEY, enabled ? "1" : "0"); } catch (e) {}
+        if (advancedStatsStrip) {
+            advancedStatsStrip.style.display = enabled ? "flex" : "none";
+            advancedStatsStrip.setAttribute("aria-hidden", !enabled);
+        }
+        if (advStatsPollInterval) {
+            clearInterval(advStatsPollInterval);
+            advStatsPollInterval = null;
+        }
+        if (enabled) {
+            updateAdvancedStatsStrip();
+            advStatsPollInterval = setInterval(updateAdvancedStatsStrip, 1500);
+        }
+    }
+
     function connect() {
+        connectionId += 1;
+        const thisId = connectionId;
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const host = hostInput.value || location.hostname;
         const port = (portInput.value || portSelect.value || "").trim();
         const qs = new URLSearchParams();
         if (host) qs.set("host", host);
         if (port) qs.set("port", port);
+        const storedPass = sessionStorage.getItem("varmon_password");
+        if (storedPass) qs.set("password", storedPass);
         const qp = qs.toString();
         const url = qp ? `${proto}//${location.host}/ws?${qp}` : `${proto}//${location.host}/ws`;
-        ws = new WebSocket(url);
-        ws.onopen = () => {
+        const socket = new WebSocket(url);
+        ws = socket;
+        socket.onopen = () => {
+            if (thisId !== connectionId) return;
+            clearConnectionError();
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusConnected;
             statusEl.className = "status connected";
             clearReconnectPending();
@@ -831,22 +1101,81 @@
             sendMonitored();
             startHistoryPolling();
         };
-        ws.onclose = () => {
+        socket.onclose = () => {
+            if (thisId !== connectionId) return;
+            ws = null;
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusDisconnected;
             statusEl.className = "status disconnected";
+            statusEl.title = lastConnectionError || "";
             stopHistoryPolling();
             lastSeq = 0;
-            ws = null;
         };
-        ws.onerror = () => ws.close();
-        ws.onmessage = (e) => {
+        socket.onerror = () => socket.close();
+        socket.onmessage = (e) => {
+            if (thisId !== connectionId) return;
+            const now = Date.now();
+            const size = typeof e.data === "string" ? new Blob([e.data]).size : (e.data && e.data.size) || 0;
+            wsMessageBuffer.push({ t: now, size });
+            const cutoff = now - WS_BUFFER_MAX_AGE_MS;
+            while (wsMessageBuffer.length > 0 && wsMessageBuffer[0].t < cutoff) wsMessageBuffer.shift();
             const msg = JSON.parse(e.data);
+            if (msg.type === "error") {
+                if (msg.message === "auth_required") {
+                    sessionStorage.removeItem("varmon_password");
+                    showAuthModal(msg.attempts_left, msg.attempt);
+                    return;
+                }
+                setConnectionError(msg.message);
+                return;
+            }
+            clearConnectionError();
             if (msg.type === "vars_names") onVarNames(msg.data);
             else if (msg.type === "vars_update") onVarsUpdate(msg.data);
             else if (msg.type === "history") onHistoryData(msg.data);
             else if (msg.type === "histories") onHistoriesData(msg.data, msg.seq);
             else if (msg.type === "set_result") onSetResult(msg);
         };
+    }
+
+    function showAuthModal(attemptsLeft, attempt) {
+        if (authOverlay) {
+            const tr = I18N[currentLang] || I18N.es;
+            const promptEl = document.getElementById("authPrompt");
+            if (promptEl) {
+                if (attempt !== undefined && attempt > 0) {
+                    if (attemptsLeft === 0)
+                        promptEl.textContent = tr.authServerClosed || "El servidor se ha cerrado por seguridad.";
+                    else if (attemptsLeft === 1)
+                        promptEl.textContent = tr.authLastAttempt || "Último intento. Si falla, el servidor se cerrará.";
+                    else
+                        promptEl.textContent = (tr.authWrongAttempts || "Intentos restantes: %d de 3.").replace("%d", attemptsLeft);
+                } else {
+                    promptEl.textContent = tr.authPrompt;
+                }
+            }
+            authOverlay.style.display = "flex";
+            if (authPasswordInput) {
+                authPasswordInput.value = "";
+                authPasswordInput.focus();
+            }
+        }
+    }
+
+    function hideAuthModal() {
+        if (authOverlay) authOverlay.style.display = "none";
+    }
+
+    function setConnectionError(message) {
+        lastConnectionError = message || null;
+        if (statusEl) {
+            statusEl.textContent = (message && message.length <= 60) ? message : ((I18N[currentLang] || I18N.es).statusDisconnected + (message ? ": " + message.substring(0, 50) + "…" : ""));
+            statusEl.title = message || "";
+        }
+    }
+
+    function clearConnectionError() {
+        lastConnectionError = null;
+        if (statusEl) statusEl.title = "";
     }
 
     function sendInterval() {
@@ -862,7 +1191,7 @@
 
     function sendMonitored() {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            const realNames = Array.from(monitoredNames).filter(n => !isComputed(n));
+            const realNames = monitoredOrder.filter(n => !isComputed(n));
             ws.send(JSON.stringify({
                 action: "set_monitored",
                 names: realNames,
@@ -1152,7 +1481,10 @@
 
     addToMonitorBtn.addEventListener("click", () => {
         browserSelection.forEach(name => {
-            monitoredNames.add(name);
+            if (!monitoredNames.has(name)) {
+                monitoredNames.add(name);
+                monitoredOrder.push(name);
+            }
             if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
         });
         browserSelection.clear();
@@ -1219,7 +1551,7 @@
             sel.addEventListener("change", handler);
         }
 
-        for (const name of monitoredNames) {
+        for (const name of monitoredOrder) {
             if (existingMap[name]) {
                 const sel = existingMap[name].querySelector(".graph-select");
                 if (sel && isArrayVar(name)) {
@@ -1253,16 +1585,24 @@
             el.className = "monitor-item";
             el.dataset.name = name;
 
-            // Drag & drop: permitir arrastrar variables monitorizadas hacia graficos
+            // Drag & drop: permitir arrastrar hacia graficos y reordenar dentro de la lista
             el.draggable = true;
             el.addEventListener("dragstart", (e) => {
                 e.dataTransfer.setData("text/plain", name);
+                e.dataTransfer.setData("application/x-monitor-reorder", name);
                 e.dataTransfer.effectAllowed = "copyMove";
                 ensureNewGraphDropTarget();
             });
             el.addEventListener("dragend", () => {
                 const addSlot = document.getElementById("plotAddSlot");
-                if (addSlot) addSlot.classList.remove("plot-add-over");
+                if (addSlot) {
+                    addSlot.classList.remove("plot-add-over");
+                    addSlot.remove();
+                }
+                monitorListEl.querySelectorAll(".monitor-item-wrap").forEach(w => {
+                    w.classList.remove("monitor-drop-before", "monitor-drop-after");
+                    delete w.dataset.dropPosition;
+                });
             });
 
             let sel = null;
@@ -1327,6 +1667,7 @@
                 if (isComputed(name)) removeComputedVar(name);
                 else {
                     monitoredNames.delete(name);
+                    monitoredOrder = monitoredOrder.filter(n => n !== name);
                     delete varGraphAssignment[name];
                     delete historyCache[name];
                     expandedStats.delete(name);
@@ -2721,6 +3062,9 @@
 
     function onHistoryData(data) {
         if (!data || !data.name) return;
+        if (sessionStartTime === null && data.timestamps && data.timestamps.length > 0) {
+            sessionStartTime = Math.min(...data.timestamps);
+        }
         historyCache[data.name] = data;
         schedulePlotRender();
     }
@@ -2743,17 +3087,121 @@
                 historyCache[name] = data;
             }
         }
+        if (sessionStartTime === null) {
+            let globalMin = null;
+            for (const name in historyCache) {
+                const h = historyCache[name];
+                if (h && h.timestamps && h.timestamps.length > 0) {
+                    const m = Math.min(...h.timestamps);
+                    if (globalMin === null || m < globalMin) globalMin = m;
+                }
+            }
+            if (globalMin !== null) sessionStartTime = globalMin;
+        }
         trimLocalHistory();
         schedulePlotRender();
     }
 
     function trimLocalHistory() {
-        const now = Date.now() / 1000;
-        const cutoff = now - localHistMaxSec;
+        // Usar el máximo timestamp presente en los datos (misma base que el servidor) para evitar
+        // desfase con Date.now() y el salto/discontinuidad al llegar al límite del buffer.
+        let maxTs = null;
+        for (const name in historyCache) {
+            const h = historyCache[name];
+            if (!h || !h.timestamps || h.timestamps.length === 0 || isComputed(name)) continue;
+            const m = h.timestamps[h.timestamps.length - 1];
+            if (maxTs === null || m > maxTs) maxTs = m;
+        }
+        for (const key of Object.keys(arrayElemHistory)) {
+            const h = arrayElemHistory[key];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            const m = h.timestamps[h.timestamps.length - 1];
+            if (maxTs === null || m > maxTs) maxTs = m;
+        }
+        if (maxTs === null) return;
+        const cutoff = maxTs - localHistMaxSec;
         for (const name in historyCache) {
             const h = historyCache[name];
             if (!h || !h.timestamps || h.timestamps.length === 0) continue;
             if (isComputed(name)) continue;
+            let lo = 0;
+            while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
+            if (lo > 0) {
+                h.timestamps = h.timestamps.slice(lo);
+                h.values = h.values.slice(lo);
+            }
+        }
+        for (const key of Object.keys(arrayElemHistory)) {
+            const h = arrayElemHistory[key];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            let lo = 0;
+            while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
+            if (lo > 0) {
+                h.timestamps = h.timestamps.slice(lo);
+                h.values = h.values.slice(lo);
+            }
+        }
+        for (const cv of computedVars) {
+            const h = computedHistories[cv.name];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            let lo = 0;
+            while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
+            if (lo > 0) {
+                h.timestamps = h.timestamps.slice(lo);
+                h.values = h.values.slice(lo);
+            }
+        }
+        // Actualizar el origen de sesión al mínimo que queda: así el eje X sigue mostrando
+        // 0..buffer segundos y no se produce el salto cada vez que se recorta.
+        let newMin = null;
+        for (const name in historyCache) {
+            const h = historyCache[name];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            const m = h.timestamps[0];
+            if (newMin === null || m < newMin) newMin = m;
+        }
+        for (const key of Object.keys(arrayElemHistory)) {
+            const h = arrayElemHistory[key];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            const m = h.timestamps[0];
+            if (newMin === null || m < newMin) newMin = m;
+        }
+        for (const cv of computedVars) {
+            const h = computedHistories[cv.name];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            const m = h.timestamps[0];
+            if (newMin === null || m < newMin) newMin = m;
+        }
+        if (newMin !== null) sessionStartTime = newMin;
+    }
+
+    /** Elimina puntos con timestamp anterior al origen de sesión (tras "Reset tiempo"). */
+    function trimHistoryToSessionStart() {
+        if (sessionStartTime == null) return;
+        const cutoff = sessionStartTime;
+        for (const name in historyCache) {
+            const h = historyCache[name];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            let lo = 0;
+            while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
+            if (lo > 0) {
+                h.timestamps = h.timestamps.slice(lo);
+                h.values = h.values.slice(lo);
+            }
+        }
+        for (const key of Object.keys(arrayElemHistory)) {
+            const h = arrayElemHistory[key];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
+            let lo = 0;
+            while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
+            if (lo > 0) {
+                h.timestamps = h.timestamps.slice(lo);
+                h.values = h.values.slice(lo);
+            }
+        }
+        for (const cv of computedVars) {
+            const h = computedHistories[cv.name];
+            if (!h || !h.timestamps || h.timestamps.length === 0) continue;
             let lo = 0;
             while (lo < h.timestamps.length && h.timestamps[lo] < cutoff) lo++;
             if (lo > 0) {
@@ -2809,6 +3257,7 @@
             if (!name) return;
             if (!monitoredNames.has(name) && !isArrayElem(name)) {
                 monitoredNames.add(name);
+                monitoredOrder.push(name);
                 if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
                 sendMonitored();
             }
@@ -2910,6 +3359,7 @@
                 // Si la variable aun no esta monitorizada, añadirla
                 if (!monitoredNames.has(name) && !isArrayElem(name)) {
                     monitoredNames.add(name);
+                    monitoredOrder.push(name);
                     if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
                     sendMonitored();
                 }
@@ -2951,7 +3401,28 @@
     function renderPlots() {
         const windowSec = parseInt(timeWindowSelect.value);
         const activeSlots = [];
-
+        // Origen = mínimo timestamp real en los datos mostrados, para que al recortar el buffer
+        // el eje X no salte (siempre 0 = borde izquierdo de lo que hay).
+        let dataOrigin = null;
+        let globalXMax = null;
+        for (const gid of graphList) {
+            const varsInGraph = getVarsForGraph(gid);
+            for (const name of varsInGraph) {
+                const isArrElem = name.includes("[") && name.endsWith("]");
+                const hist = isArrElem ? arrayElemHistory[name] : historyCache[name];
+                if (!hist || !hist.timestamps || hist.timestamps.length === 0) continue;
+                const xs = hist.timestamps;
+                const tMax = xs[xs.length - 1];
+                const tMin = windowSec > 0 ? Math.max(xs[0], tMax - windowSec) : xs[0];
+                if (dataOrigin === null || tMin < dataOrigin) dataOrigin = tMin;
+                const relMax = tMax - tMin;
+                if (globalXMax === null || relMax > globalXMax) globalXMax = relMax;
+            }
+        }
+        const origin = dataOrigin != null ? dataOrigin : sessionStartTime;
+        if (globalXMax === null) globalXMax = windowSec > 0 ? windowSec : 60;
+        const win = windowSec > 0 ? windowSec : 60;
+        const sharedXRange = [0, Math.min(Math.max(globalXMax, 0.1), win)];
 
         for (const gid of graphList) {
             const varsInGraph = getVarsForGraph(gid);
@@ -2991,7 +3462,7 @@
                     }
                 }
 
-                const t0 = xs[0];
+                const t0 = origin != null ? origin : xs[0];
                 traces.push({
                     x: xs.map(t => t - t0),
                     y: ys,
@@ -3034,6 +3505,9 @@
                 height: Math.max(cRect.height, 80),
                 hovermode: "x unified",
                 xaxis: {
+                    title: (I18N[currentLang] || I18N.es).timeAxisTitle,
+                    range: sharedXRange,
+                    autorange: false,
                     gridcolor: colors.gridcolor,
                     zerolinecolor: colors.gridcolor,
                 },
@@ -3090,19 +3564,61 @@
     }
 
     hostInput.addEventListener("input", markReconnectPending);
-    portInput.addEventListener("input", markReconnectPending);
+    portInput.addEventListener("input", () => { markReconnectPending(); updateMultiInstanceWarning(); });
     portSelect.addEventListener("change", () => {
         if (portSelect.value) {
             portInput.value = portSelect.value;
         }
         markReconnectPending();
+        updateMultiInstanceWarning();
     });
 
-    reconnectBtn.addEventListener("click", () => {
+    const multiInstanceWarningCloseBtn = document.getElementById("multiInstanceWarningClose");
+    if (multiInstanceWarningCloseBtn) {
+        multiInstanceWarningCloseBtn.addEventListener("click", hideMultiInstanceWarning);
+    }
+
+    reconnectBtn.addEventListener("click", async () => {
         if (ws) {
             try { ws.close(); } catch (e) { /* ignore */ }
+            ws = null;
         }
-        // Reset de estado al cambiar de instancia
+        if (!hostInput.value) hostInput.value = location.hostname || "localhost";
+        const prevPort = (portInput.value || portSelect.value || "").trim();
+        try {
+            let scanUrl = `/api/scan_ports?host=${encodeURIComponent(hostInput.value)}`;
+            if (prevPort) scanUrl += `&port=${encodeURIComponent(prevPort)}`;
+            const resp = await fetch(scanUrl);
+            if (resp.ok) {
+                const data = await resp.json();
+                lastScanPorts = Array.isArray(data.ports) ? data.ports : [];
+                warningDismissed = false;
+                portSelect.innerHTML = "";
+                const hasPorts = lastScanPorts.length > 0;
+                if (hasPorts) {
+                    for (const p of data.ports) {
+                        const opt = document.createElement("option");
+                        opt.value = String(p);
+                        opt.textContent = String(p);
+                        portSelect.appendChild(opt);
+                    }
+                } else if (Array.isArray(data.range) && data.range.length === 2) {
+                    const [start, end] = data.range;
+                    for (let p = start; p <= end; p++) {
+                        const opt = document.createElement("option");
+                        opt.value = String(p);
+                        opt.textContent = String(p);
+                        portSelect.appendChild(opt);
+                    }
+                }
+                if (portSelect.options.length > 0) {
+                    const hasPrev = prevPort && Array.from(portSelect.options).some(o => o.value === prevPort);
+                    portSelect.value = hasPrev ? prevPort : portSelect.options[0].value;
+                }
+                if (portSelect.value) portInput.value = portSelect.value;
+                updateMultiInstanceWarning();
+            }
+        } catch (e) { /* ignorar */ }
         resetStateForNewTarget();
         lastSeq = 0;
         connect();
@@ -3137,6 +3653,8 @@
         varsByName = {};
         knownVarNames = [];
         monitoredNames.clear();
+        monitoredOrder = [];
+        sessionStartTime = null;
         varGraphAssignment = {};
         historyCache = {};
         graphList = [];
@@ -3186,28 +3704,86 @@
     monitorListEl.addEventListener("dragover", (e) => {
         if (!e.dataTransfer) return;
         e.preventDefault();
-        e.dataTransfer.dropEffect = "copy";
-        monitorListEl.classList.add("mon-drop-over");
+        const isReorder = e.dataTransfer.types.includes("application/x-monitor-reorder");
+        if (isReorder) {
+            e.dataTransfer.dropEffect = "move";
+            monitorListEl.classList.remove("mon-drop-over");
+            const under = document.elementFromPoint(e.clientX, e.clientY);
+            const wrap = under && under.closest ? under.closest(".monitor-item-wrap") : null;
+            monitorListEl.querySelectorAll(".monitor-item-wrap").forEach(w => {
+                w.classList.remove("monitor-drop-before", "monitor-drop-after");
+                delete w.dataset.dropPosition;
+            });
+            if (wrap) {
+                const rect = wrap.getBoundingClientRect();
+                const mid = rect.top + rect.height / 2;
+                const before = e.clientY < mid;
+                wrap.classList.add(before ? "monitor-drop-before" : "monitor-drop-after");
+                wrap.dataset.dropPosition = before ? "before" : "after";
+            }
+        } else {
+            e.dataTransfer.dropEffect = "copy";
+            monitorListEl.classList.add("mon-drop-over");
+        }
     });
 
-    monitorListEl.addEventListener("dragleave", () => {
-        // Cualquier salida limpia el estado visual para evitar resaltes atascados
-        monitorListEl.classList.remove("mon-drop-over");
+    monitorListEl.addEventListener("dragleave", (e) => {
+        if (!monitorListEl.contains(e.relatedTarget)) {
+            monitorListEl.classList.remove("mon-drop-over");
+            monitorListEl.querySelectorAll(".monitor-item-wrap").forEach(w => {
+                w.classList.remove("monitor-drop-before", "monitor-drop-after");
+                delete w.dataset.dropPosition;
+            });
+        }
     });
 
     monitorListEl.addEventListener("drop", (e) => {
         if (!e.dataTransfer) return;
         e.preventDefault();
         monitorListEl.classList.remove("mon-drop-over");
+        monitorListEl.querySelectorAll(".monitor-item-wrap").forEach(w => {
+            w.classList.remove("monitor-drop-before", "monitor-drop-after");
+            delete w.dataset.dropPosition;
+        });
+
+        const reorderName = e.dataTransfer.getData("application/x-monitor-reorder");
+        if (reorderName) {
+            const wrap = e.target.closest ? e.target.closest(".monitor-item-wrap") : null;
+            const targetName = wrap ? wrap.dataset.name : null;
+            const pos = wrap ? (wrap.dataset.dropPosition || "after") : "after";
+            const fromIdx = monitoredOrder.indexOf(reorderName);
+            if (fromIdx === -1) return;
+            let toIdx = targetName ? monitoredOrder.indexOf(targetName) : monitoredOrder.length;
+            if (toIdx === -1) toIdx = monitoredOrder.length;
+            if (pos === "after") toIdx += 1;
+            if (toIdx > fromIdx) toIdx -= 1;
+            if (fromIdx === toIdx) return;
+            monitoredOrder.splice(fromIdx, 1);
+            monitoredOrder.splice(toIdx, 0, reorderName);
+            const draggedWrap = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(reorderName)}"]`);
+            if (draggedWrap && wrap && draggedWrap !== wrap) {
+                if (pos === "before") {
+                    monitorListEl.insertBefore(draggedWrap, wrap);
+                } else {
+                    if (wrap.nextSibling) monitorListEl.insertBefore(draggedWrap, wrap.nextSibling);
+                    else monitorListEl.appendChild(draggedWrap);
+                }
+            } else if (draggedWrap && !wrap) {
+                monitorListEl.appendChild(draggedWrap);
+            }
+            saveConfig();
+            return;
+        }
+
         const name = e.dataTransfer.getData("text/plain");
         if (!name) return;
         if (!knownVarNames.includes(name)) return;
         if (!monitoredNames.has(name)) {
             monitoredNames.add(name);
+            monitoredOrder.push(name);
             if (!(name in varGraphAssignment)) varGraphAssignment[name] = "";
             sendMonitored();
         }
-        // Asegurar que la selección de la Columna 1 se actualiza
         browserSelection.delete(name);
         saveConfig();
         rebuildMonitorList();
@@ -3215,18 +3791,21 @@
     });
 
     async function initialScanAndConnect() {
-        // Host por defecto: el hostname de la URL actual
         if (!hostInput.value) {
             hostInput.value = location.hostname || "localhost";
         }
+        const portHint = (portInput.value || portSelect.value || "").trim();
         try {
-            const resp = await fetch(`/api/scan_ports?host=${encodeURIComponent(hostInput.value)}`);
+            let scanUrl = `/api/scan_ports?host=${encodeURIComponent(hostInput.value)}`;
+            if (portHint) scanUrl += `&port=${encodeURIComponent(portHint)}`;
+            const resp = await fetch(scanUrl);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            lastScanPorts = Array.isArray(data.ports) ? data.ports : [];
+            warningDismissed = false;
             portSelect.innerHTML = "";
-            const hasPorts = Array.isArray(data.ports) && data.ports.length > 0;
+            const hasPorts = lastScanPorts.length > 0;
             if (hasPorts) {
-                // Rellenar solo con los puertos encontrados
                 for (const p of data.ports) {
                     const opt = document.createElement("option");
                     opt.value = String(p);
@@ -3234,7 +3813,6 @@
                     portSelect.appendChild(opt);
                 }
             } else if (Array.isArray(data.range) && data.range.length === 2) {
-                // Sin instancias activas: usar el rango sugerido por el backend
                 const [start, end] = data.range;
                 for (let p = start; p <= end; p++) {
                     const opt = document.createElement("option");
@@ -3243,19 +3821,16 @@
                     portSelect.appendChild(opt);
                 }
             }
-            // Si no hay configuracion previa de puerto, usar el primero del selector
             if (!portSelect.value && portSelect.options.length > 0) {
                 portSelect.value = portSelect.options[0].value;
             }
             if (!portInput.value && portSelect.value) {
                 portInput.value = portSelect.value;
             }
-            // Auto-conectar si se ha encontrado al menos una instancia
-            if (hasPorts) {
-                connect();
-            }
+            updateMultiInstanceWarning();
+            connect();
         } catch (e) {
-            // En caso de error, no tocamos el contenido actual de portSelect ni auto-conectamos.
+            connect();
         }
     }
 
@@ -3352,5 +3927,31 @@
         }
     });
 
-    initialScanAndConnect();
+    async function checkAuthThenStart() {
+        try {
+            const r = await fetch("/api/auth_required");
+            const d = await r.json();
+            if (d.auth_required && !sessionStorage.getItem("varmon_password")) {
+                showAuthModal();
+                return;
+            }
+        } catch (e) { /* ignorar */ }
+        await fetchConnectionInfo();
+        initialScanAndConnect();
+    }
+
+    if (authSubmitBtn && authPasswordInput) {
+        authSubmitBtn.addEventListener("click", () => {
+            const p = authPasswordInput.value.trim();
+            if (!p) return;
+            sessionStorage.setItem("varmon_password", p);
+            hideAuthModal();
+            initialScanAndConnect();
+        });
+        authPasswordInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") authSubmitBtn.click();
+        });
+    }
+
+    checkAuthThenStart();
 })();
