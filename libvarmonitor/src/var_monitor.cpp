@@ -1,4 +1,5 @@
 #include "var_monitor.hpp"
+#include "shm_publisher.hpp"
 #include <iostream>
 #include <algorithm>
 #include <mutex>
@@ -179,15 +180,18 @@ bool VarMonitor::start(int sample_interval_ms) {
 
     load_config();
 
-    sample_thread_ = std::thread(&VarMonitor::sample_loop, this);
-    rpc_thread_ = std::thread(&VarMonitor::tcp_server_loop, this);
+    shm_publisher::init();
 
-    std::cout << "[VarMonitor] Servidor TCP iniciado (puerto " << get_tcp_port() << ")\n";
+    sample_thread_ = std::thread(&VarMonitor::sample_loop, this);
+    rpc_thread_ = std::thread(&VarMonitor::uds_server_loop, this);
+
+    std::cout << "[VarMonitor] Servidor UDS iniciado\n";
     return true;
 }
 
 void VarMonitor::stop() {
     if (!running_.exchange(false)) return;
+    shm_publisher::shutdown();
     if (sample_thread_.joinable()) sample_thread_.join();
     if (rpc_thread_.joinable()) rpc_thread_.detach();
     std::cout << "[VarMonitor] Detenido\n";
@@ -258,6 +262,10 @@ void VarMonitor::sample_loop() {
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(sample_interval_ms_));
     }
+}
+
+void VarMonitor::write_shm_snapshot() {
+    shm_publisher::write_snapshot(this);
 }
 
 } // namespace varmon

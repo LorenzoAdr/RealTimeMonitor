@@ -1,10 +1,11 @@
 #include "var_monitor.hpp"
+#include "shm_publisher.hpp"
 
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <sys/un.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <pwd.h>
 #include <cstring>
 #include <thread>
 #include <sstream>
@@ -70,12 +71,17 @@ static long long get_self_cpu_jiffies() {
 }
 #endif
 
-static uint16_t g_tcp_port = 9100;
 static std::string g_config_path;
 static std::chrono::steady_clock::time_point g_server_start_time;
+static std::string g_uds_path;
 
-void set_tcp_port(uint16_t port) { g_tcp_port = port; }
-uint16_t get_tcp_port() { return g_tcp_port; }
+static std::string get_username() {
+    const char* u = std::getenv("USER");
+    if (u && u[0]) return u;
+    struct passwd* pw = getpwuid(geteuid());
+    if (pw && pw->pw_name) return std::string(pw->pw_name);
+    return "unknown";
+}
 
 void set_config_path(const std::string& path) { g_config_path = path; }
 
@@ -113,10 +119,7 @@ bool load_config() {
     if (!file.is_open()) {
         std::cerr << "[VarMonitor] AVISO: No se encontro el archivo de configuracion.\n"
                   << "  Buscado en: " << path << "\n"
-                  << "  Usando valores por defecto (tcp_port=" << g_tcp_port << ")\n"
-                  << "  Para cambiar la ruta:\n"
-                  << "    - Variable de entorno: VARMON_CONFIG=/ruta/a/varmon.conf\n"
-                  << "    - En codigo: varmon::set_config_path(\"/ruta/a/varmon.conf\")\n";
+                  << "  Para cambiar la ruta: VARMON_CONFIG=/ruta/a/varmon.conf o set_config_path()\n";
         return false;
     }
 
@@ -124,21 +127,15 @@ bool load_config() {
     while (std::getline(file, line)) {
         line = trim(line);
         if (line.empty() || line[0] == '#') continue;
-
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
-
-        if (key == "tcp_port") {
-            int port = std::stoi(val);
-            if (port > 0 && port <= 65535) g_tcp_port = static_cast<uint16_t>(port);
-        }
+        (void)key;
+        (void)val;
     }
 
-    std::cout << "[VarMonitor] Config cargada desde " << path
-              << " (tcp_port_base=" << g_tcp_port << ")\n";
+    std::cout << "[VarMonitor] Config cargada desde " << path << "\n";
     return true;
 }
 
@@ -271,9 +268,6 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
 
     mon->client_connected();
 
-    int flag = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-
     while (running.load()) {
         std::string request;
         if (!recv_message(client_fd, request)) break;
@@ -287,6 +281,13 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             std::ostringstream ss;
             ss << std::fixed << std::setprecision(3);
             ss << "{\"type\":\"server_info\",\"uptime_seconds\":" << sec;
+            if (varmon::shm_publisher::is_active()) {
+                ss << ",\"shm_name\":\"" << json_escape(varmon::shm_publisher::get_shm_name()) << "\"";
+                ss << ",\"sem_name\":\"" << json_escape(varmon::shm_publisher::get_sem_name()) << "\"";
+            }
+            if (!g_uds_path.empty()) {
+                ss << ",\"uds_path\":\"" << json_escape(g_uds_path) << "\"";
+            }
 #ifdef __linux__
             long rss_kb = get_self_rss_kb();
             if (rss_kb >= 0) ss << ",\"memory_rss_kb\":" << rss_kb;
@@ -378,6 +379,30 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             response = ok ? "{\"type\":\"unregister_result\",\"ok\":true}"
                           : "{\"type\":\"unregister_result\",\"ok\":false}";
         }
+        else if (cmd == "set_shm_subscription") {
+            std::vector<std::string> names;
+            std::string needle = "\"names\":[";
+            auto pos = request.find(needle);
+            if (pos != std::string::npos) {
+                pos += needle.size();
+                while (pos < request.size()) {
+                    auto q = request.find('"', pos);
+                    if (q == std::string::npos) break;
+                    auto end = q + 1;
+                    while (end < request.size()) {
+                        if (request[end] == '"' && (end == 0 || request[end - 1] != '\\')) break;
+                        end++;
+                    }
+                    if (end >= request.size()) break;
+                    names.push_back(request.substr(q + 1, end - q - 1));
+                    pos = end + 1;
+                    if (pos < request.size() && request[pos] == ',') pos++;
+                    if (pos < request.size() && request[pos] == ']') break;
+                }
+            }
+            varmon::shm_publisher::set_subscription(names);
+            response = "{\"type\":\"shm_subscription_result\",\"ok\":true}";
+        }
         else {
             response = "{\"type\":\"error\",\"message\":\"unknown command\"}";
         }
@@ -389,68 +414,56 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
     ::close(client_fd);
 }
 
-void VarMonitor::tcp_server_loop() {
-    int server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        std::cerr << "[VarMonitor] Error creando socket TCP\n";
+void VarMonitor::uds_server_loop() {
+#ifdef __linux__
+    int uds_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (uds_fd < 0) {
+        std::cerr << "[VarMonitor] Error creando socket UDS\n";
         return;
     }
-
-    int opt = 1;
-    ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Intentar bind en un rango de puertos consecutivos empezando en g_tcp_port.
-    uint16_t base_port = g_tcp_port;
-    const uint16_t max_offset = 10;
-    bool bound = false;
-
-    for (uint16_t offset = 0; offset <= max_offset; ++offset) {
-        uint16_t port = static_cast<uint16_t>(base_port + offset);
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port = htons(port);
-
-        if (::bind(server_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
-            g_tcp_port = port;
-            bound = true;
-            break;
-        }
-    }
-
-    if (!bound) {
-        std::cerr << "[VarMonitor] Error en bind: no hay puertos libres en rango ["
-                  << base_port << "," << (base_port + max_offset) << "]\n";
-        ::close(server_fd);
+    std::string user = get_username();
+    std::ostringstream oss;
+    oss << "/tmp/varmon-" << user << "-" << getpid() << ".sock";
+    g_uds_path = oss.str();
+    ::unlink(g_uds_path.c_str());
+    struct sockaddr_un sun{};
+    sun.sun_family = AF_UNIX;
+    if (g_uds_path.size() >= sizeof(sun.sun_path)) {
+        std::cerr << "[VarMonitor] Path UDS demasiado largo\n";
+        ::close(uds_fd);
         return;
     }
-
-    if (::listen(server_fd, 8) < 0) {
-        std::cerr << "[VarMonitor] Error en listen\n";
-        ::close(server_fd);
+    std::memcpy(sun.sun_path, g_uds_path.c_str(), g_uds_path.size() + 1);
+    if (::bind(uds_fd, reinterpret_cast<struct sockaddr*>(&sun), sizeof(sun)) != 0 ||
+        ::listen(uds_fd, 8) != 0) {
+        std::cerr << "[VarMonitor] Error bind/listen UDS en " << g_uds_path << "\n";
+        ::close(uds_fd);
         return;
     }
-
-    std::cout << "[VarMonitor] Servidor TCP escuchando en puerto " << g_tcp_port << "\n";
+    std::cout << "[VarMonitor] UDS escuchando en " << g_uds_path << "\n";
     g_server_start_time = std::chrono::steady_clock::now();
 
     while (running_.load()) {
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(server_fd, &rfds);
+        FD_SET(uds_fd, &rfds);
         struct timeval tv{1, 0};
-        int ret = ::select(server_fd + 1, &rfds, nullptr, nullptr, &tv);
+        int ret = ::select(uds_fd + 1, &rfds, nullptr, nullptr, &tv);
         if (ret <= 0) continue;
-
-        struct sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
-        int client_fd = ::accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_addr), &client_len);
-        if (client_fd < 0) continue;
-
-        std::thread(handle_client, client_fd, std::ref(running_)).detach();
+        if (FD_ISSET(uds_fd, &rfds)) {
+            int client_fd = ::accept(uds_fd, nullptr, nullptr);
+            if (client_fd >= 0) {
+                std::thread(handle_client, client_fd, std::ref(running_)).detach();
+            }
+        }
     }
 
-    ::close(server_fd);
+    ::close(uds_fd);
+    if (!g_uds_path.empty()) ::unlink(g_uds_path.c_str());
+#else
+    (void)0;
+    std::cerr << "[VarMonitor] UDS solo soportado en Linux\n";
+#endif
 }
 
 } // namespace varmon

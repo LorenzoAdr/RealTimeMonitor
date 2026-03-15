@@ -6,3 +6,4 @@ __pycache__/
 *.o
 *.a
 .env
+web_monitor/recordings/

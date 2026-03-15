@@ -87,9 +87,12 @@ public:
     void client_disconnected();
     int client_count() const { return client_count_.load(); }
 
+    /** Escribe snapshot de variables escalares en SHM y señala al lector (sem_post). Llamar desde el lazo RT cada ciclo (ej. 10 ms). */
+    void write_shm_snapshot();
+
 private:
     void sample_loop();
-    void tcp_server_loop();
+    void uds_server_loop();
 
     std::unordered_map<std::string, VarEntry> vars_;
     mutable std::shared_mutex mutex_;
@@ -102,9 +105,6 @@ private:
 
 VarMonitor* get_global_instance();
 void set_global_instance(VarMonitor* instance);
-
-void set_tcp_port(uint16_t port);
-uint16_t get_tcp_port();
 
 void set_config_path(const std::string& path);
 bool load_config();

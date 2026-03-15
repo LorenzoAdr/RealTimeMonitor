@@ -1,24 +1,23 @@
-"""Pure TCP client for VarMonitor — no ctypes, no .so needed."""
+"""Cliente VarMonitor por Unix domain socket (length-prefixed JSON)."""
 
 import json
 import socket
 import struct
 import threading
 
-class TcpBridge:
-    def __init__(self, host: str = "localhost", port: int = 9100, timeout: float = 5.0):
-        self._host = host
-        self._port = port
+
+class UdsBridge:
+    def __init__(self, uds_path: str, timeout: float = 5.0):
+        self._uds_path = uds_path
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
         self._timeout = timeout
         self._connect()
 
     def _connect(self):
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.settimeout(self._timeout)
-        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self._sock.connect((self._host, self._port))
+        self._sock.connect(self._uds_path)
 
     def disconnect(self):
         if self._sock:
@@ -72,16 +71,10 @@ class TcpBridge:
         return resp.get("data", [])
 
     def get_server_info(self) -> dict | None:
-        """Respuesta completa de server_info (uptime_seconds, memory_rss_kb si está disponible). None si falla."""
         try:
             return self._request({"cmd": "server_info"})
         except Exception:
             return None
-
-    def get_uptime_seconds(self) -> float | None:
-        """Tiempo de vida del servidor C++ en segundos (si el servidor lo soporta)."""
-        info = self.get_server_info()
-        return info.get("uptime_seconds") if info else None
 
     def list_vars(self) -> list[dict]:
         resp = self._request({"cmd": "list_vars"})
@@ -132,10 +125,16 @@ class TcpBridge:
         return result
 
     def get_histories_since(self, names: list[str], since_seq: int) -> dict:
-        """Returns {"seq": <current_seq>, "data": [...]} with only new points."""
         resp = self._request({
             "cmd": "get_histories_since",
             "names": names,
             "since_seq": since_seq,
         })
         return {"seq": resp.get("seq", 0), "data": resp.get("data", [])}
+
+    def set_shm_subscription(self, names: list[str]) -> bool:
+        try:
+            resp = self._request({"cmd": "set_shm_subscription", "names": names})
+            return resp.get("ok", False)
+        except Exception:
+            return False
