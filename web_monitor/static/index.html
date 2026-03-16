@@ -21,6 +21,14 @@
         <div class="header-left">
             <h1>VarMonitor</h1>
             <span id="connectionStatus" class="status disconnected">Desconectado</span>
+            <div id="headerModeControls" class="header-mode-controls mode-prominent">
+                <label id="modeLabel"><span id="modeLabelText">Modo:</span>
+                    <select id="modeSelect">
+                        <option value="live">Live</option>
+                        <option value="offline">Análisis</option>
+                    </select>
+                </label>
+            </div>
             <span id="varCount" class="var-count"></span>
         </div>
         <div id="advancedStatsStrip" class="advanced-stats-strip" style="display:none" aria-hidden="true">
@@ -44,6 +52,17 @@
         </div>
         <div class="header-right">
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
+            <div id="offlineControls" class="offline-controls" style="display:none">
+                <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar TSV A</button>
+                <input type="file" id="localTsvInput" accept=".tsv,text/tab-separated-values" style="display:none">
+                <label id="recordingSelectLabel">Run A:
+                    <select id="recordingSelectA">
+                        <option value="">(sin grabaciones)</option>
+                    </select>
+                </label>
+                <button id="loadServerRecordingBtn" class="btn-small" title="Cargar grabación seleccionada del servidor">Cargar</button>
+                <span id="offlineDatasetStatus" class="offline-dataset-status offline-empty">Sin archivo cargado</span>
+            </div>
             <span class="monitor-cols-label">Cols:</span>
             <button id="monitorColsAddBtn" class="btn-small" title="Añadir columna">+</button>
             <button id="monitorColsRemoveBtn" class="btn-small" title="Quitar columna">-</button>
@@ -109,6 +128,7 @@
     <div id="recordPathToast" class="record-path-toast" style="display:none" role="status">
         <span id="recordPathLabel">Guardado en:</span>
         <code id="recordPathText"></code>
+        <button id="recordPathAnalyzeBtn" class="btn-small record-path-analyze-btn" style="display:none">Entrar a análisis</button>
     </div>
 
     <div id="multiInstanceWarning" class="warning-banner" style="display:none" role="alert">
@@ -130,6 +150,9 @@
                 <input type="text" id="varFilter" placeholder="Filtrar variables...">
             </div>
             <div class="select-actions">
+                <label class="drawer-agrupar-label" title="Mostrar variables agrupadas por categorías o en lista plana">
+                    <input type="checkbox" id="groupVarsCheckbox" checked> <span id="groupVarsLabel">Agrupar</span>
+                </label>
                 <button id="collapseAll" class="btn-small" title="Colapsar todo">&#9660;</button>
                 <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
                 <button id="selectAll" class="btn-small">Sel. todo</button>
@@ -330,11 +353,45 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     <button id="resetPlotsBtn" class="btn-small" title="Quitar asignaciones de variables a gráficos">&#128465; Limpiar</button>
                     <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo">&#10227; Reset</button>
                     <button id="pauseBtn" class="btn-small" title="Pausar/reanudar gráficos">&#9654; Play</button>
+                    <div id="offlinePlaybackControls" class="offline-playback-controls" style="display:none">
+                        <button id="offlinePlayPauseBtn" class="btn-small" title="Reproducir/pausar análisis offline">&#9654; Play</button>
+                        <input id="offlineScrubber" type="range" min="0" max="1000" step="1" value="0" title="Posición temporal del análisis offline">
+                        <label id="offlineSpeedLabel">Vel:
+                            <select id="offlineSpeedSelect">
+                                <option value="0.25">0.25x</option>
+                                <option value="0.5">0.5x</option>
+                                <option value="1" selected>1x</option>
+                                <option value="2">2x</option>
+                                <option value="4">4x</option>
+                            </select>
+                        </label>
+                        <button id="setMarkerABtn" class="btn-small" title="Fijar marcador A en tiempo actual">A</button>
+                        <button id="setMarkerBBtn" class="btn-small" title="Fijar marcador B en tiempo actual">B</button>
+                        <button id="clearMarkersBtn" class="btn-small" title="Limpiar marcadores A/B">AB×</button>
+                        <span id="offlineTimeLabel" class="offline-time-label">t=0.000s</span>
+                        <span id="markerInfoLabel" class="offline-marker-label">A: -- | B: --</span>
+                    </div>
                     <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
                 </div>
             </div>
             <div id="plotArea" class="plot-area">
                 <div id="plotEmpty" class="plot-empty">Selecciona variables y asígnalas a un gráfico</div>
+            </div>
+            <div id="anomalyPanel" class="anomaly-panel" style="display:none">
+                <div class="anomaly-controls">
+                    <label>Δ salto:
+                        <input id="anomalyJumpInput" type="number" step="any" value="1.0">
+                    </label>
+                    <label>Lo:
+                        <input id="anomalyLoInput" type="number" step="any" value="">
+                    </label>
+                    <label>Hi:
+                        <input id="anomalyHiInput" type="number" step="any" value="">
+                    </label>
+                    <button id="runAnomalyScanBtn" class="btn-small">Analizar anomalías</button>
+                    <button id="clearAnomalyScanBtn" class="btn-small">Limpiar</button>
+                </div>
+                <div id="anomalyList" class="anomaly-list"></div>
             </div>
         </section>
     </main>

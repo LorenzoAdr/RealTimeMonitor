@@ -418,6 +418,48 @@ async def api_uds_instances(user: str | None = Query(None, description="Filtrar 
     return {"instances": instances}
 
 
+@app.get("/api/recordings")
+async def api_recordings():
+    """Lista grabaciones TSV del backend (recordings/), ordenadas por mtime desc."""
+    _ensure_recordings_dir()
+    rows: list[dict] = []
+    try:
+        for fn in os.listdir(RECORDINGS_DIR):
+            if not fn.lower().endswith(".tsv"):
+                continue
+            path = os.path.join(RECORDINGS_DIR, fn)
+            if not os.path.isfile(path):
+                continue
+            st = os.stat(path)
+            kind = "alarm" if fn.lower().startswith("alarm_") else ("record" if fn.lower().startswith("record_") else "other")
+            rows.append({
+                "filename": fn,
+                "size": int(st.st_size),
+                "mtime": float(st.st_mtime),
+                "kind": kind,
+            })
+    except Exception:
+        rows = []
+    rows.sort(key=lambda x: -x["mtime"])
+    return {"recordings": rows}
+
+
+@app.get("/api/recordings/{filename}")
+async def api_recording_download(filename: str):
+    """Descarga segura de una grabación dentro de recordings/."""
+    _ensure_recordings_dir()
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+    root = os.path.abspath(RECORDINGS_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    return FileResponse(path, media_type="text/tab-separated-values", filename=safe_name)
+
+
 @app.get("/api/auth_required")
 async def api_auth_required():
     """Indica si el WebSocket exige contraseña (para mostrar login antes de conectar)."""
