@@ -25,16 +25,21 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 DEFAULTS = {
     "web_port": 8080,
+    "web_port_scan_max": 10,
     "lan_ip": "",
     "bind_host": "",
     "auth_password": "",
     "cycle_interval_ms": 100,
     "update_ratio_max": 100,
+    "server_state_dir": "",
 }
+
+CONFIG_ABS_PATH = ""
 
 
 def load_config() -> dict:
     """Read varmon.conf (key = value). No external dependencies."""
+    global CONFIG_ABS_PATH
     cfg = dict(DEFAULTS)
     path = os.environ.get("VARMON_CONFIG")
     if not path:
@@ -56,16 +61,18 @@ def load_config() -> dict:
                     continue
                 key, val = line.split("=", 1)
                 key, val = key.strip(), val.strip()
-                if key in ("web_port", "cycle_interval_ms", "update_ratio_max"):
+                if key in ("web_port", "web_port_scan_max", "cycle_interval_ms", "update_ratio_max"):
                     cfg[key] = int(val)
-                elif key in ("lan_ip", "bind_host", "auth_password"):
+                elif key in ("lan_ip", "bind_host", "auth_password", "server_state_dir"):
                     cfg[key] = val
-        print(f"[VarMonitor Web] Config cargada desde {os.path.abspath(path)}")
+        CONFIG_ABS_PATH = os.path.abspath(path)
+        print(f"[VarMonitor Web] Config cargada desde {CONFIG_ABS_PATH}")
         if (cfg.get("auth_password") or "").strip():
             print(f"[VarMonitor Web] Auth: activada (se requiere contraseña en el WebSocket)")
         else:
             print(f"[VarMonitor Web] Auth: desactivada")
     except FileNotFoundError:
+        CONFIG_ABS_PATH = os.path.abspath(path)
         print(f"[VarMonitor Web] AVISO: No se encontro el archivo de configuracion.")
         print(f"  Buscado en: {os.path.abspath(path)}")
         print(f"  Usando valores por defecto (web_port={cfg['web_port']})")
@@ -178,7 +185,7 @@ def _get_suggested_web_port(
         cached_val, cached_at = _suggested_web_port_cache
         if now - cached_at < SUGGESTED_WEB_PORT_CACHE_TTL:
             return cached_val
-    ports_in_use = _scan_web_ports_list(base_web)
+    ports_in_use = _scan_web_ports_list(base_web, int(_config.get("web_port_scan_max", 10)))
     if not ports_in_use:
         _suggested_web_port_cache = (actual_port, now)
         return actual_port
@@ -324,11 +331,81 @@ def _first_uds_bridge():
 
 # Directorio para grabaciones (backend)
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+STATE_ROOT_DIR = (_config.get("server_state_dir") or "").strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_state")
+TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
+SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
 ALARM_BUFFER_SEC = 11.0  # 10 s + 1 s para registro en alarma
 
 
 def _ensure_recordings_dir():
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+def _ensure_state_dirs():
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+
+def _safe_json_name(name: str) -> str | None:
+    safe = os.path.basename((name or "").strip())
+    if not safe:
+        return None
+    safe = safe.replace(".json", "")
+    if not safe:
+        return None
+    return safe
+
+
+def _json_path(base_dir: str, name: str) -> str | None:
+    safe = _safe_json_name(name)
+    if not safe:
+        return None
+    path = os.path.abspath(os.path.join(base_dir, safe + ".json"))
+    root = os.path.abspath(base_dir)
+    if not path.startswith(root + os.sep):
+        return None
+    return path
+
+
+def _save_runtime_config_overrides(updates: dict) -> None:
+    """Persist selected runtime config keys into varmon.conf."""
+    allowed = {"web_port", "web_port_scan_max", "server_state_dir"}
+    clean = {k: updates[k] for k in updates.keys() if k in allowed}
+    if not clean:
+        return
+    path = CONFIG_ABS_PATH or os.path.abspath("varmon.conf")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines: list[str] = []
+    existing: dict[str, str] = {}
+    if os.path.isfile(path):
+        with open(path, "r") as f:
+            lines = f.read().splitlines()
+        for ln in lines:
+            s = ln.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            existing[k.strip()] = v.strip()
+    for k, v in clean.items():
+        existing[k] = str(v)
+    output: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        s = ln.strip()
+        if "=" not in s or s.startswith("#"):
+            output.append(ln)
+            continue
+        k = s.split("=", 1)[0].strip()
+        if k in existing:
+            output.append(f"{k} = {existing[k]}")
+            seen.add(k)
+        else:
+            output.append(ln)
+    for k, v in existing.items():
+        if k not in seen:
+            output.append(f"{k} = {v}")
+    with open(path, "w") as f:
+        f.write("\n".join(output).rstrip() + "\n")
 
 
 def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]], var_names: list[str] | None = None) -> None:
@@ -379,9 +456,20 @@ def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]
             f.write("\t".join(row_parts) + "\n")
 
 
-def _evaluate_alarms(snapshot: list[dict], alarms_config: dict, prev_state: dict) -> tuple[dict, list[dict], list[str]]:
-    """Evalúa umbrales en snapshot. Devuelve (nuevo_estado, triggered [{name, reason, value}], cleared [name])."""
+def _evaluate_alarms(
+    snapshot: list[dict],
+    alarms_config: dict,
+    prev_state: dict,
+    pending_since_ms: dict,
+    now_ms: int,
+) -> tuple[dict, dict, list[dict], list[str]]:
+    """Evalúa umbrales en snapshot.
+
+    Devuelve (nuevo_estado, nuevo_pending_since_ms, triggered [{name, reason, value}], cleared [name]).
+    Soporta histéresis y delay de activación por alarma.
+    """
     new_state = dict(prev_state)
+    new_pending = dict(pending_since_ms)
     triggered = []
     cleared = []
     var_by_name = {e["name"]: e for e in snapshot}
@@ -394,21 +482,48 @@ def _evaluate_alarms(snapshot: list[dict], alarms_config: dict, prev_state: dict
             continue
         lo = cfg.get("lo")
         hi = cfg.get("hi")
+        hys = cfg.get("hys")
+        delay_ms = cfg.get("delayMs")
+        hys = max(0.0, float(hys)) if isinstance(hys, (int, float)) else 0.0
+        delay_ms = max(0, int(delay_ms)) if isinstance(delay_ms, (int, float)) else 0
         alarming = False
         reason = ""
-        if hi is not None and val > hi:
-            alarming = True
-            reason = f"{name} = {val:.4f} > Hi:{hi}"
-        if lo is not None and val < lo:
-            alarming = True
-            reason = f"{name} = {val:.4f} < Lo:{lo}"
-        was = prev_state.get(name, False)
-        new_state[name] = alarming
-        if alarming and not was:
+        was = bool(prev_state.get(name, False))
+
+        over_hi = (hi is not None and val > hi)
+        under_lo = (lo is not None and val < lo)
+        if was:
+            clear_hi = (hi is None) or (val <= (float(hi) - hys))
+            clear_lo = (lo is None) or (val >= (float(lo) + hys))
+            if clear_hi and clear_lo:
+                alarming = False
+            else:
+                alarming = (hi is not None and val > (float(hi) - hys)) or (lo is not None and val < (float(lo) + hys))
+        else:
+            alarming = over_hi or under_lo
+
+        if not alarming:
+            new_pending.pop(name, None)
+            new_state[name] = False
+        else:
+            if name not in new_pending:
+                new_pending[name] = now_ms
+            if now_ms - int(new_pending[name]) >= delay_ms:
+                new_state[name] = True
+            else:
+                new_state[name] = False
+
+        if new_state[name] and not was:
+            if hi is not None and val > hi:
+                reason = f"{name} = {val:.4f} > Hi:{hi}"
+            elif lo is not None and val < lo:
+                reason = f"{name} = {val:.4f} < Lo:{lo}"
+            else:
+                reason = f"{name} en alarma ({val:.4f})"
             triggered.append({"name": name, "reason": reason, "value": val})
-        elif was and not alarming:
+        elif was and not new_state[name]:
             cleared.append(name)
-    return new_state, triggered, cleared
+    return new_state, new_pending, triggered, cleared
 
 
 @app.get("/api/uds_instances")
@@ -458,6 +573,261 @@ async def api_recording_download(filename: str):
     if not os.path.isfile(path):
         return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
     return FileResponse(path, media_type="text/tab-separated-values", filename=safe_name)
+
+
+@app.post("/api/save_tsv")
+@app.post("/api/recordings/save_tsv")
+async def api_recording_save_tsv(request: Request, download: int = Query(0), kind: str = Query("snapshot")):
+    """Guarda TSV recibido en body JSON {content, filename?}. Devuelve ruta/filename o descarga directa."""
+    _ensure_recordings_dir()
+    try:
+        payload = await request.json()
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return JSONResponse({"error": "Contenido TSV vacío"}, status_code=400)
+        now = time.strftime("%Y%m%d_%H%M%S")
+        safe_kind = "segment" if str(kind).strip().lower().startswith("seg") else "snapshot"
+        base_name = payload.get("filename")
+        if isinstance(base_name, str) and base_name.strip():
+            safe_name = os.path.basename(base_name.strip())
+            if not safe_name.lower().endswith(".tsv"):
+                safe_name += ".tsv"
+        else:
+            safe_name = f"{safe_kind}_{now}.tsv"
+        path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+        root = os.path.abspath(RECORDINGS_DIR)
+        if not path.startswith(root + os.sep):
+            return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+        with open(path, "w") as f:
+            f.write(content if content.endswith("\n") else (content + "\n"))
+        if int(download or 0) == 1:
+            return FileResponse(path, media_type="text/tab-separated-values", filename=safe_name)
+        return {"ok": True, "filename": safe_name, "path": path}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/templates")
+async def api_templates():
+    _ensure_state_dirs()
+    rows: list[str] = []
+    try:
+        for fn in os.listdir(TEMPLATES_DIR):
+            if fn.lower().endswith(".json"):
+                rows.append(fn[:-5])
+    except Exception:
+        rows = []
+    rows.sort()
+    return {"templates": rows}
+
+
+@app.get("/api/templates/{name}")
+async def api_template_get(name: str):
+    _ensure_state_dirs()
+    path = _json_path(TEMPLATES_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Plantilla no encontrada"}, status_code=404)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return {"name": _safe_json_name(name), "data": data}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/templates/{name}")
+async def api_template_put(name: str, request: Request, download: int = Query(0)):
+    _ensure_state_dirs()
+    path = _json_path(TEMPLATES_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        payload = await request.json()
+        data = payload.get("data")
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        if int(download or 0) == 1:
+            return FileResponse(path, media_type="application/json", filename=os.path.basename(path))
+        return {"ok": True, "name": _safe_json_name(name)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/templates/{name}")
+async def api_template_delete(name: str):
+    _ensure_state_dirs()
+    path = _json_path(TEMPLATES_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/sessions")
+async def api_sessions():
+    _ensure_state_dirs()
+    rows: list[str] = []
+    try:
+        for fn in os.listdir(SESSIONS_DIR):
+            if fn.lower().endswith(".json"):
+                rows.append(fn[:-5])
+    except Exception:
+        rows = []
+    rows.sort()
+    return {"sessions": rows}
+
+
+@app.get("/api/sessions/{name}")
+async def api_session_get(name: str):
+    _ensure_state_dirs()
+    path = _json_path(SESSIONS_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Estado no encontrado"}, status_code=404)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return {"name": _safe_json_name(name), "data": data}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/sessions/{name}")
+async def api_session_put(name: str, request: Request, download: int = Query(0)):
+    _ensure_state_dirs()
+    path = _json_path(SESSIONS_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        payload = await request.json()
+        data = payload.get("data")
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        if int(download or 0) == 1:
+            return FileResponse(path, media_type="application/json", filename=os.path.basename(path))
+        return {"ok": True, "name": _safe_json_name(name)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/sessions/{name}")
+async def api_session_delete(name: str):
+    _ensure_state_dirs()
+    path = _json_path(SESSIONS_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/storage")
+async def api_admin_storage():
+    _ensure_recordings_dir()
+    _ensure_state_dirs()
+    recs: list[dict] = []
+    try:
+        for fn in os.listdir(RECORDINGS_DIR):
+            if not fn.lower().endswith(".tsv"):
+                continue
+            path = os.path.join(RECORDINGS_DIR, fn)
+            if not os.path.isfile(path):
+                continue
+            st = os.stat(path)
+            kind = "alarm" if fn.lower().startswith("alarm_") else ("record" if fn.lower().startswith("record_") else ("snapshot" if fn.lower().startswith("snapshot_") else ("segment" if fn.lower().startswith("segment_") else "other")))
+            recs.append({"name": fn, "kind": kind, "size": int(st.st_size), "mtime": float(st.st_mtime)})
+    except Exception:
+        recs = []
+    recs.sort(key=lambda x: -x["mtime"])
+    templates = sorted([fn[:-5] for fn in os.listdir(TEMPLATES_DIR) if fn.lower().endswith(".json")]) if os.path.isdir(TEMPLATES_DIR) else []
+    sessions = sorted([fn[:-5] for fn in os.listdir(SESSIONS_DIR) if fn.lower().endswith(".json")]) if os.path.isdir(SESSIONS_DIR) else []
+    return {
+        "paths": {
+            "config_file": CONFIG_ABS_PATH,
+            "recordings_dir": os.path.abspath(RECORDINGS_DIR),
+            "server_state_dir": os.path.abspath(STATE_ROOT_DIR),
+            "templates_dir": os.path.abspath(TEMPLATES_DIR),
+            "sessions_dir": os.path.abspath(SESSIONS_DIR),
+        },
+        "runtime": {
+            "web_port": int(_config.get("web_port", 8080)),
+            "web_port_scan_max": int(_config.get("web_port_scan_max", 10)),
+        },
+        "recordings": recs,
+        "templates": templates,
+        "sessions": sessions,
+    }
+
+
+@app.post("/api/admin/storage/delete")
+async def api_admin_storage_delete(request: Request):
+    _ensure_recordings_dir()
+    _ensure_state_dirs()
+    try:
+        payload = await request.json()
+        kind = str(payload.get("kind") or "").strip().lower()
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return JSONResponse({"error": "Nombre vacío"}, status_code=400)
+        if kind == "recording":
+            safe_name = os.path.basename(name)
+            if safe_name != name:
+                return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+            path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+            root = os.path.abspath(RECORDINGS_DIR)
+            if not path.startswith(root + os.sep):
+                return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+        elif kind == "template":
+            path = _json_path(TEMPLATES_DIR, name)
+            if not path:
+                return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+        elif kind == "session":
+            path = _json_path(SESSIONS_DIR, name)
+            if not path:
+                return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+        else:
+            return JSONResponse({"error": "Tipo inválido"}, status_code=400)
+        if os.path.exists(path):
+            os.remove(path)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/runtime_config")
+async def api_admin_runtime_config(request: Request):
+    global _config
+    try:
+        payload = await request.json()
+        updates: dict = {}
+        if "web_port" in payload:
+            v = int(payload.get("web_port"))
+            if v < 1 or v > 65535:
+                return JSONResponse({"error": "web_port inválido"}, status_code=400)
+            _config["web_port"] = v
+            updates["web_port"] = v
+        if "web_port_scan_max" in payload:
+            v = int(payload.get("web_port_scan_max"))
+            if v < 0 or v > 100:
+                return JSONResponse({"error": "web_port_scan_max inválido"}, status_code=400)
+            _config["web_port_scan_max"] = v
+            updates["web_port_scan_max"] = v
+        if hasattr(request.app.state, "max_web_port_in_range"):
+            request.app.state.max_web_port_in_range = None
+        _save_runtime_config_overrides(updates)
+        return {"ok": True, "runtime": {"web_port": int(_config.get("web_port", 8080)), "web_port_scan_max": int(_config.get("web_port_scan_max", 10))}}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/auth_required")
@@ -568,15 +938,17 @@ async def api_connection_info(request: Request):
     state = request.app.state
     actual = getattr(state, "actual_web_port", None) or _config["web_port"]
     base_web = _config["web_port"]
+    scan_max = int(_config.get("web_port_scan_max", 10))
     max_web = getattr(state, "max_web_port_in_range", None)
     if max_web is None:
-        max_web = await asyncio.to_thread(_scan_web_ports_max, base_web)
+        max_web = await asyncio.to_thread(_scan_web_ports_max, base_web, scan_max)
         if max_web is not None:
             state.max_web_port_in_range = max_web
     uptime = time.monotonic() - state.startup_time if hasattr(state, "startup_time") else None
     suggested_web_port = max_web if max_web is not None else actual
     out = {
         "base_web_port": base_web,
+        "web_port_scan_max": scan_max,
         "actual_web_port": actual,
         "max_web_port_in_range": max_web,
         "suggested_web_port": suggested_web_port,
@@ -643,6 +1015,7 @@ async def websocket_endpoint(ws: WebSocket):
     # Alarmas y grabación (plan dos tasas)
     alarms_config: dict = {}  # { name: { lo, hi } }
     prev_alarm_state: dict = {}
+    alarm_pending_since_ms: dict = {}
     recording = False
     record_buffer: list[tuple[float, list[dict]]] = []
     alarm_buffer: list[tuple[float, list[dict]]] = []  # ventana rodante ALARM_BUFFER_SEC
@@ -720,7 +1093,9 @@ async def websocket_endpoint(ws: WebSocket):
                                 alarm_buffer.pop(0)
                         # Evaluar alarmas
                         if alarms_config:
-                            prev_alarm_state, triggered, cleared = _evaluate_alarms(snapshot, alarms_config, prev_alarm_state)
+                            prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                                snapshot, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                            )
                             if cleared:
                                 try:
                                     await ws.send_json({"type": "alarm_cleared", "names": cleared})
@@ -769,18 +1144,68 @@ async def websocket_endpoint(ws: WebSocket):
                         mon_data = [v for v in latest_snapshot if v["name"] in name_set]
                         await ws.send_json({"type": "vars_update", "data": mon_data})
                 else:
-                    # Sin SHM: pedir vars por UDS a tasa visual; si hay grabación, rellenar buffer también
-                    interval_between_updates = update_ratio * cycle_interval_sec
-                    if monitored_names and (now - last_vars_update_at >= interval_between_updates):
-                        last_vars_update_at = now
-                        mon_data = []
+                    # Sin SHM: tomar snapshot completo cada ciclo (backend-first para alarmas/grabación).
+                    if monitored_names:
+                        snapshot_now: list[dict] = []
                         for name in monitored_names:
                             vinfo = await asyncio.to_thread(bridge.get_var, name)
                             if vinfo:
-                                mon_data.append(vinfo)
-                        await ws.send_json({"type": "vars_update", "data": mon_data})
-                        if recording and mon_data:
-                            record_buffer.append((time.time(), mon_data))
+                                snapshot_now.append(vinfo)
+                        if snapshot_now:
+                            t_snap = time.time()
+                            latest_snapshot = snapshot_now
+                            if alarms_config:
+                                alarm_buffer.append((t_snap, snapshot_now))
+                                cutoff = t_snap - ALARM_BUFFER_SEC
+                                while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                                    alarm_buffer.pop(0)
+                                prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                                    snapshot_now, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                                )
+                                if cleared:
+                                    try:
+                                        await ws.send_json({"type": "alarm_cleared", "names": cleared})
+                                    except Exception:
+                                        pass
+                                if triggered:
+                                    await ws.send_json({
+                                        "type": "alarm_triggered",
+                                        "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
+                                    })
+                                    # Programar escritura y notificación del fichero de alarma 1 s después.
+                                    async def send_alarm_file_later_fallback():
+                                        await asyncio.sleep(1.0)
+                                        buf_now = list(alarm_buffer)
+                                        if not buf_now:
+                                            return
+                                        _ensure_recordings_dir()
+                                        from datetime import datetime
+                                        fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+                                        path = os.path.join(RECORDINGS_DIR, fn)
+                                        var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
+                                        if not var_names:
+                                            var_names = ["time_s"]
+                                        _write_snapshots_tsv(path, buf_now, var_names)
+                                        msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
+                                        if send_file_on_finish:
+                                            try:
+                                                with open(path, "rb") as f:
+                                                    import base64
+                                                    msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+                                            except Exception:
+                                                pass
+                                        try:
+                                            await ws.send_json(msg)
+                                        except Exception:
+                                            pass
+                                    asyncio.create_task(send_alarm_file_later_fallback())
+                            if recording:
+                                record_buffer.append((t_snap, snapshot_now))
+                    # Envío visual a tasa reducida.
+                    interval_between_updates = update_ratio * cycle_interval_sec
+                    if monitored_names and latest_snapshot is not None and (now - last_vars_update_at >= interval_between_updates):
+                        last_vars_update_at = now
+                        await ws.send_json({"type": "vars_update", "data": latest_snapshot})
 
             except Exception as e:
                 print(f"[VarMonitor Web] WebSocket error (C++ {connection_label}): {e}", flush=True)
@@ -841,9 +1266,16 @@ async def websocket_endpoint(ws: WebSocket):
                     ac = cmd.get("alarms")
                     if isinstance(ac, dict):
                         alarms_config.clear()
+                        prev_alarm_state.clear()
+                        alarm_pending_since_ms.clear()
                         for k, v in ac.items():
                             if isinstance(v, dict) and (v.get("lo") is not None or v.get("hi") is not None):
-                                alarms_config[k] = {"lo": v.get("lo"), "hi": v.get("hi")}
+                                alarms_config[k] = {
+                                    "lo": v.get("lo"),
+                                    "hi": v.get("hi"),
+                                    "hys": v.get("hys"),
+                                    "delayMs": v.get("delayMs"),
+                                }
                 elif action == "set_send_file_on_finish":
                     send_file_on_finish = bool(cmd.get("value", False))
                 elif action == "start_recording":
@@ -927,7 +1359,7 @@ if __name__ == "__main__":
     bind_host = (_config.get("bind_host") or "").strip()
     listen_host = bind_host if bind_host else "0.0.0.0"
 
-    port = _find_available_port(listen_host, base_port)
+    port = _find_available_port(listen_host, base_port, int(_config.get("web_port_scan_max", 10)))
     app.state.actual_web_port = port
     app.state.startup_time = time.monotonic()
 

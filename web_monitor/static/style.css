@@ -17,18 +17,25 @@
     --radius: 6px;
     --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
     --monitor-columns: 1;
+    --monitor-compact-level: 0;
+    --mode-wash: transparent;
+    --mode-header-bg: var(--surface);
+    --mode-header-border: var(--border);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: var(--bg);
+    background:
+        radial-gradient(1200px 420px at 50% -120px, var(--mode-wash), transparent 72%),
+        var(--bg);
     color: var(--text);
     height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: background 200ms ease, color 200ms ease;
 }
 
 body.theme-light {
@@ -55,9 +62,34 @@ header {
     align-items: center;
     gap: 12px;
     padding: 10px 20px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
+    background: var(--mode-header-bg);
+    border-bottom: 1px solid var(--mode-header-border);
     flex-shrink: 0;
+    transition: background 200ms ease, border-color 200ms ease, box-shadow 200ms ease;
+}
+
+body.mode-live {
+    --mode-wash: rgba(99, 102, 241, 0.16);
+    --mode-header-bg: linear-gradient(180deg, rgba(99, 102, 241, 0.20), var(--surface) 58%);
+    --mode-header-border: rgba(99, 102, 241, 0.52);
+}
+
+body.mode-analysis {
+    --mode-wash: rgba(248, 113, 113, 0.15);
+    --mode-header-bg: linear-gradient(180deg, rgba(248, 113, 113, 0.18), var(--surface) 58%);
+    --mode-header-border: rgba(248, 113, 113, 0.52);
+}
+
+body.theme-light.mode-live {
+    --mode-wash: rgba(37, 99, 235, 0.12);
+    --mode-header-bg: linear-gradient(180deg, rgba(37, 99, 235, 0.16), var(--surface) 60%);
+    --mode-header-border: rgba(37, 99, 235, 0.42);
+}
+
+body.theme-light.mode-analysis {
+    --mode-wash: rgba(220, 38, 38, 0.10);
+    --mode-header-bg: linear-gradient(180deg, rgba(220, 38, 38, 0.13), var(--surface) 60%);
+    --mode-header-border: rgba(220, 38, 38, 0.42);
 }
 
 .header-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -170,15 +202,31 @@ header {
     border-radius: var(--radius);
     box-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
     z-index: 100;
-    width: max-content;
-    min-width: 240px;
+    width: min(96vw, 460px);
+    min-width: 0;
+    max-height: 78vh;
+    overflow: auto;
+}
+
+#settingsPanel {
+    width: fit-content;
+    max-width: min(96vw, 460px);
 }
 
 .settings-group {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px 14px;
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+    gap: 8px 10px;
     font-size: 0.8rem;
+    align-items: start;
+}
+
+#settingsPanel .settings-group {
+    grid-template-columns: 1fr;
+}
+
+#settingsPanel .settings-group > * {
+    grid-column: 1 / -1;
 }
 
 .settings-group label {
@@ -188,6 +236,10 @@ header {
     align-items: center;
     gap: 6px;
     justify-content: space-between;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
 }
 
 .settings-group select {
@@ -197,6 +249,105 @@ header {
     background: var(--bg);
     color: var(--text);
     font-size: 0.75rem;
+}
+
+.settings-group .port-control,
+.settings-group .monitor-menu-row,
+.settings-group .template-row,
+.settings-group #adminStorageBtn,
+.settings-group .settings-section-title {
+    grid-column: 1 / -1;
+}
+
+.settings-group .port-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+}
+
+.settings-group .port-control label {
+    flex: 1;
+    border: none;
+    padding: 0;
+    background: transparent;
+    justify-content: flex-start;
+}
+
+.settings-section-title {
+    color: var(--accent);
+    font-size: 0.74rem;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    padding-top: 2px;
+}
+
+.settings-group #exportConfigBtn,
+.settings-group #importConfigBtn {
+    justify-self: start;
+}
+
+.settings-group input[type="number"],
+.settings-group input[type="text"],
+.settings-group select {
+    min-width: 120px;
+}
+
+.settings-inline-label {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    min-width: 80px;
+}
+
+#adminStorageOverlay .help-modal h3 {
+    padding: 14px 18px 0;
+}
+
+#adminStorageOverlay .help-body {
+    padding: 14px 18px 18px;
+    overflow: auto;
+}
+
+#adminStorageOverlay .help-actions {
+    padding: 10px 18px 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+}
+
+#adminStorageOverlay .admin-full-row {
+    grid-column: 1 / -1;
+}
+
+#adminStorageOverlay .admin-full-row input[type="text"] {
+    width: 100%;
+    min-width: 0;
+}
+
+#adminStorageOverlay .admin-runtime-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: center;
+}
+
+#adminStorageOverlay .admin-runtime-row label {
+    margin: 0;
+}
+
+@media (max-width: 900px) {
+    .settings-panel {
+        min-width: 0;
+        width: 96vw;
+    }
+    .settings-group {
+        grid-template-columns: 1fr;
+    }
 }
 
 .header-mode-controls {
@@ -276,7 +427,7 @@ header {
 .port-control {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 8px;
 }
 
 .port-select-wrap {
@@ -350,6 +501,20 @@ main {
     overflow-y: auto;
 }
 .col-plot { flex: 1; min-width: 300px; }
+
+.monitor-resize-handle {
+    width: 6px;
+    flex: 0 0 6px;
+    cursor: col-resize;
+    background: transparent;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    transition: background 0.15s;
+}
+.monitor-resize-handle:hover,
+.monitor-resize-handle.dragging {
+    background: rgba(108, 140, 255, 0.18);
+}
 
 .col-header {
     padding: 8px 10px;
@@ -434,6 +599,20 @@ main {
 
 .monitor-menu-row .btn-small {
     flex: 1;
+}
+.template-row select {
+    flex: 1;
+    min-width: 100px;
+    padding: 2px 4px;
+}
+.perf-telemetry-panel {
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
 }
 
 .monitor-alarm-panel {
@@ -985,11 +1164,29 @@ main {
 }
 .monitor-item:hover { background: var(--surface-hover); }
 
+body.monitor-compact .monitor-item {
+    padding: calc(5px - (var(--monitor-compact-level) * 0.03px)) calc(8px - (var(--monitor-compact-level) * 0.03px));
+    margin-bottom: 1px;
+}
+body.monitor-compact .monitor-item .mon-name {
+    font-size: calc(0.84rem - (var(--monitor-compact-level) * 0.0019rem));
+}
+body.monitor-compact .monitor-item .mon-value {
+    font-size: calc(0.88rem - (var(--monitor-compact-level) * 0.0018rem));
+    width: calc(90px - (var(--monitor-compact-level) * 0.22px));
+    min-width: calc(90px - (var(--monitor-compact-level) * 0.22px));
+}
+body.monitor-compact .stats-panel {
+    padding-top: calc(4px - (var(--monitor-compact-level) * 0.02px));
+    padding-bottom: calc(4px - (var(--monitor-compact-level) * 0.02px));
+}
+
 .monitor-item .mon-name {
     display: block;
     flex: 0 0 auto;
     min-width: max-content;
     white-space: nowrap;
+    font-weight: 700;
 }
 
 .monitor-item {
@@ -1659,6 +1856,53 @@ main {
     flex-direction: column;
     gap: 4px;
 }
+.notes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+}
+.note-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 3px 6px;
+    font-size: 0.7rem;
+}
+.segment-controls {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.segment-controls select {
+    min-width: 140px;
+    padding: 2px 4px;
+}
+.arinc-bus-health-panel {
+    margin-top: 6px;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.monitor-list.monitor-virtualized .monitor-item-wrap {
+    content-visibility: auto;
+    contain-intrinsic-size: 28px;
+}
+.browser-virtual-window {
+    position: relative;
+}
+.browser-virtual-spacer {
+    width: 100%;
+}
 .anomaly-item {
     display: flex;
     align-items: center;
@@ -1985,4 +2229,5 @@ main {
     main { flex-direction: column; }
     .col-browser, .col-monitor { width: 100%; height: 200px; }
     .col-plot { min-height: 300px; }
+    .monitor-resize-handle { display: none; }
 }

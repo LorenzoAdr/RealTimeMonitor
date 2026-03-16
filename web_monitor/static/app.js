@@ -36,6 +36,8 @@
 
     const MAX_RECORD_SEC = 300;
     let isRecording = false;
+    let isLocalRecording = false;
+    let localRecordSamples = [];
     let recordBuffer = [];
     let recordColumns = [];
     let recordStartTime = null;
@@ -64,6 +66,19 @@
     const runAnomalyScanBtn = document.getElementById("runAnomalyScanBtn");
     const clearAnomalyScanBtn = document.getElementById("clearAnomalyScanBtn");
     const anomalyListEl = document.getElementById("anomalyList");
+    const notesListEl = document.getElementById("notesList");
+    const prevEventBtn = document.getElementById("prevEventBtn");
+    const nextEventBtn = document.getElementById("nextEventBtn");
+    const addNoteBtn = document.getElementById("addNoteBtn");
+    const exportPdfReportBtn = document.getElementById("exportPdfReportBtn");
+    const segStartBtn = document.getElementById("segStartBtn");
+    const segEndBtn = document.getElementById("segEndBtn");
+    const segSaveBtn = document.getElementById("segSaveBtn");
+    const segCutBtn = document.getElementById("segCutBtn");
+    const segmentSelectEl = document.getElementById("segmentSelect");
+    const segmentGoBtn = document.getElementById("segmentGoBtn");
+    const downsampleMaxPointsInput = document.getElementById("downsampleMaxPointsInput");
+    const arincBusHealthPanel = document.getElementById("arincBusHealthPanel");
     const offlineDatasetStatus = document.getElementById("offlineDatasetStatus");
     const varFilter = document.getElementById("varFilter");
     const varBrowserList = document.getElementById("varBrowserList");
@@ -77,6 +92,7 @@
     const plotEmpty = document.getElementById("plotEmpty");
     const plotArea = document.getElementById("plotArea");
     const recordBtn = document.getElementById("recordBtn");
+    const localRecordBtn = document.getElementById("localRecordBtn");
     const recordTimerEl = document.getElementById("recordTimer");
     const screenshotBtn = document.getElementById("screenshotBtn");
     const resetPlotsBtn = document.getElementById("resetPlotsBtn");
@@ -115,6 +131,36 @@
     const advInfoLabel = document.getElementById("advInfoLabel");
     const sendFileOnFinishCheckbox = document.getElementById("sendFileOnFinishCheckbox");
     const recordPathAnalyzeBtn = document.getElementById("recordPathAnalyzeBtn");
+    const monitorResizeHandle = document.getElementById("monitorResizeHandle");
+    const compactMonitorSlider = document.getElementById("compactMonitorSlider");
+    const adaptiveLoadCheckbox = document.getElementById("adaptiveLoadCheckbox");
+    const layoutUndoBtn = document.getElementById("layoutUndoBtn");
+    const layoutRedoBtn = document.getElementById("layoutRedoBtn");
+    const dashboardTemplateSelect = document.getElementById("dashboardTemplateSelect");
+    const templateSaveBtn = document.getElementById("templateSaveBtn");
+    const templateLoadBtn = document.getElementById("templateLoadBtn");
+    const snapshotFramesInput = document.getElementById("snapshotFramesInput");
+    const snapshotBtn = document.getElementById("snapshotBtn");
+    const adminStorageBtn = document.getElementById("adminStorageBtn");
+    const adminStorageOverlay = document.getElementById("adminStorageOverlay");
+    const adminStorageCloseBtn = document.getElementById("adminStorageCloseBtn");
+    const adminConfigPath = document.getElementById("adminConfigPath");
+    const adminRecordingsPath = document.getElementById("adminRecordingsPath");
+    const adminStatePath = document.getElementById("adminStatePath");
+    const adminBasePortInput = document.getElementById("adminBasePortInput");
+    const adminPortRangeInput = document.getElementById("adminPortRangeInput");
+    const adminApplyRuntimeBtn = document.getElementById("adminApplyRuntimeBtn");
+    const adminDeleteAllRecordingsBtn = document.getElementById("adminDeleteAllRecordingsBtn");
+    const adminDeleteAllTemplatesBtn = document.getElementById("adminDeleteAllTemplatesBtn");
+    const adminRecordingsList = document.getElementById("adminRecordingsList");
+    const adminTemplatesList = document.getElementById("adminTemplatesList");
+    const expandAllMonBtn = document.getElementById("expandAllMonBtn");
+    const collapseAllMonBtn = document.getElementById("collapseAllMonBtn");
+    const segStartLabel = document.getElementById("segStartLabel");
+    const segEndLabel = document.getElementById("segEndLabel");
+    const advUiRenderMs = document.getElementById("advUiRenderMs");
+    const advUiFps = document.getElementById("advUiFps");
+    const advUiPts = document.getElementById("advUiPts");
 
     const ADV_INFO_STORAGE_KEY = "varmon_adv_info";
     const SEND_FILE_ON_FINISH_KEY = "varmon_send_file_on_finish";
@@ -130,6 +176,7 @@
     let alarms = {};
     let activeAlarms = new Set();
     let prevAlarmState = {};
+    let alarmPendingSince = {};
     let hideLevels = 0;
     let lastAutoTsvTime = 0;
     const AUTO_TSV_COOLDOWN_MS = 10000;
@@ -137,6 +184,7 @@
     const AUTO_TSV_DELAY_MS = 1000;
     let expandedStats = new Set();
     let activeGenerators = {};
+    let pendingGeneratorRestore = [];
     const GEN_RATE_MS = 50;
     let computedVars = [];
     let computedHistories = {};
@@ -145,24 +193,44 @@
     let currentLang = "es";
     let currentTheme = "dark";
     let monitorColumnsCount = 1;
+    let monitorPaneWidthPx = null;
     let sharedZoomXRange = null; // [min, max] en tiempo relativo para todos los gráficos
     let syncingSharedZoom = false;
     let pendingSharedZoomSync = null;
     let pendingSharedZoomAutorange = false;
     let sharedZoomSyncTimer = null;
     let offlineDataset = null; // Run A
+    let offlineRecordingName = "";
     let markerA = null;
     let markerB = null;
     let deltaByName = {};
     let anomalyResults = [];
+    let eventCursorIndex = -1;
+    let notesByTs = [];
+    let segmentDraft = { start: null, end: null };
+    let offlineSegments = [];
+    let compactMonitorLevel = 0;
+    let adaptiveLoadEnabled = true;
+    let downsampleMaxPoints = 2000;
+    let renderStats = { lastMs: 0, avgMs: 0, fps: 0, traces: 0, points: 0, ticks: 0, lastTick: 0 };
+    let nextAllowedRenderAt = 0;
+    let layoutHistoryPast = [];
+    let layoutHistoryFuture = [];
+    let applyingLayoutHistory = false;
+    let lastLayoutSnapshot = "";
+    let browserVirtualEnabled = false;
+    let browserVirtualRowPx = 24;
+    let browserVirtualOverscan = 10;
+    let browserVirtualRows = [];
+    let arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
 
     const ARINC_SUFFIXES = ["label", "sdi", "data", "ssm", "parity", "value"];
     const ARINC_LABEL_DEFS = {
         // Ejemplos demo para validar rápidamente la interpretación ARINC en UI.
-        "203": { name: "PITCH_ANGLE_DEMO", encoding: "bnr", signed: true, bits: 19, scale: 1, units: "deg" },
-        "310": { name: "IAS_DEMO", encoding: "bnr", signed: false, bits: 19, scale: 1, units: "kt" },
-        "271": { name: "ALTITUDE_BCD_DEMO", encoding: "bcd", signed: false, bits: 19, scale: 1, units: "ft" },
-        "default": { name: "GENERIC_ARINC", encoding: "bnr", signed: false, bits: 19, scale: 1, units: "" },
+        "203": { name: "PITCH_ANGLE_DEMO", encoding: "bnr", signed: true, bits: 19, scale: 1, units: "deg", min: -90, max: 90, ssmAllowed: [0, 3] },
+        "310": { name: "IAS_DEMO", encoding: "bnr", signed: false, bits: 19, scale: 1, units: "kt", min: 0, max: 450, ssmAllowed: [0, 3] },
+        "271": { name: "ALTITUDE_BCD_DEMO", encoding: "bcd", signed: false, bits: 19, scale: 1, units: "ft", min: -1000, max: 60000, ssmAllowed: [0, 3] },
+        "default": { name: "GENERIC_ARINC", encoding: "bnr", signed: false, bits: 19, scale: 1, units: "", min: null, max: null, ssmAllowed: [0, 1, 2, 3] },
     };
     let offlinePlayback = {
         isPlaying: false,
@@ -279,6 +347,21 @@
         }
     }
 
+    function stopAllGenerators() {
+        for (const name in activeGenerators) stopGenerator(name);
+    }
+
+    function restorePendingGeneratorsIfPossible() {
+        if (!isLiveMode() || !ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!Array.isArray(pendingGeneratorRestore) || pendingGeneratorRestore.length === 0) return;
+        const rows = pendingGeneratorRestore.slice();
+        pendingGeneratorRestore = [];
+        rows.forEach((g) => {
+            if (!g || !g.name || !g.type || !g.params) return;
+            try { startGenerator(g.name, g.type, g.params); } catch (e) {}
+        });
+    }
+
     // --- Computed variables ---
 
     function addComputedVar(name, expr) {
@@ -360,10 +443,11 @@
     function getArincConfig(name) {
         const vf = ensureVarFormatEntry(name);
         if (!vf.arinc || typeof vf.arinc !== "object") {
-            vf.arinc = { lsb: 1 };
+            vf.arinc = { lsb: 1, encodingOverride: "" };
         }
         const lsbNum = Number(vf.arinc.lsb);
         vf.arinc.lsb = Number.isFinite(lsbNum) && lsbNum !== 0 ? lsbNum : 1;
+        if (typeof vf.arinc.encodingOverride !== "string") vf.arinc.encodingOverride = "";
         return vf.arinc;
     }
 
@@ -427,7 +511,11 @@
         const parity = (word >>> 31) & 0x1;
         const parityOk = (popcount32(word) % 2) === 1; // ARINC usa paridad impar
 
-        const def = labelDef || ARINC_LABEL_DEFS[labelOct] || ARINC_LABEL_DEFS.default;
+        const baseDef = labelDef || ARINC_LABEL_DEFS[labelOct] || ARINC_LABEL_DEFS.default;
+        const def = { ...baseDef };
+        if (cfg && typeof cfg.encodingOverride === "string" && cfg.encodingOverride) {
+            def.encoding = cfg.encodingOverride;
+        }
         const bits = Math.max(1, Math.min(19, Number(def.bits) || 19));
         const mask = (1 << bits) - 1;
         let valueRaw;
@@ -446,6 +534,11 @@
         const lsb = Number.isFinite(Number(cfg.lsb)) && Number(cfg.lsb) !== 0 ? Number(cfg.lsb) : 1;
         const scale = Number.isFinite(Number(def.scale)) ? Number(def.scale) : 1;
         const value = Number.isFinite(valueRaw) ? valueRaw * lsb * scale : Number.NaN;
+        const min = Number.isFinite(Number(def.min)) ? Number(def.min) : null;
+        const max = Number.isFinite(Number(def.max)) ? Number(def.max) : null;
+        const rangeOk = Number.isFinite(value) ? ((min == null || value >= min) && (max == null || value <= max)) : false;
+        const ssmOk = isSsmOkForEncoding({ encoding: def.encoding, ssm }, cfg);
+        const labelKnown = !!ARINC_LABEL_DEFS[labelOct];
 
         return {
             label,
@@ -460,7 +553,20 @@
             labelName: def.name || "GENERIC_ARINC",
             units: def.units || "",
             encoding: def.encoding || "bnr",
+            rangeOk,
+            ssmOk,
+            labelKnown,
         };
+    }
+
+    function isSsmOkForEncoding(decoded, cfg = {}) {
+        if (!decoded) return true;
+        const enc = String((cfg && cfg.encodingOverride) || decoded.encoding || "bnr").toLowerCase();
+        const ssm = Number(decoded.ssm);
+        if (!Number.isFinite(ssm)) return true;
+        if (enc === "bcd") return true; // Por ahora, SSM no se evalua en BCD.
+        if (enc === "discrete") return ssm === 0;
+        return ssm === 3; // BNR por defecto.
     }
 
     function rebuildKnownVarNamesWithDerived() {
@@ -484,6 +590,13 @@
     function pushArincDerivedSample(baseName, ts, word, appendHistory) {
         const cfg = getArincConfig(baseName);
         const decoded = decodeArinc429(word, cfg);
+        arincBusHealth.totalWords += 1;
+        if (!decoded.parityOk) arincBusHealth.parityErrors += 1;
+        if (!isSsmOkForEncoding(decoded, cfg)) arincBusHealth.ssmErrors += 1;
+        if (!decoded.labelKnown) arincBusHealth.unknownLabels += 1;
+        arincBusHealth.labels[decoded.labelOct] = (arincBusHealth.labels[decoded.labelOct] || 0) + 1;
+        if (!decoded.parityOk) arincBusHealth.parityByLabel[decoded.labelOct] = (arincBusHealth.parityByLabel[decoded.labelOct] || 0) + 1;
+        if (!decoded.labelKnown) arincBusHealth.unknownByLabel[decoded.labelOct] = (arincBusHealth.unknownByLabel[decoded.labelOct] || 0) + 1;
         const vals = {
             label: decoded.label,
             sdi: decoded.sdi,
@@ -501,6 +614,7 @@
             historyCache[dName].timestamps.push(ts);
             historyCache[dName].values.push(v);
         }
+        return decoded;
     }
 
     function rebuildArincDerivedHistoryForBase(baseName) {
@@ -591,7 +705,7 @@
             filterPlaceholder: "Filtrar variables...",
             selectAll: "Sel. todo",
             selectNone: "Ninguno",
-            addToMonitor: "Monitorizar →",
+            addToMonitor: "+ Monitorizar",
             hideLevelsLabel: "Niveles:",
             statusConnected: "Conectado",
             statusDisconnected: "Desconectado",
@@ -635,7 +749,7 @@
             offlineNoRecordings: "(sin grabaciones)",
             offlineDatasetNone: "Sin archivo cargado",
             offlineDatasetLoaded: "Cargado:",
-            analyzePromptBtn: "Entrar a análisis",
+            analyzePromptBtn: "Analizar este archivo",
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
             statusOffline: "Modo análisis (offline)",
@@ -668,7 +782,7 @@
             filterPlaceholder: "Filter variables...",
             selectAll: "Select all",
             selectNone: "None",
-            addToMonitor: "Monitor →",
+            addToMonitor: "+ Monitor",
             hideLevelsLabel: "Levels:",
             statusConnected: "Connected",
             statusDisconnected: "Disconnected",
@@ -712,7 +826,7 @@
             offlineNoRecordings: "(no recordings)",
             offlineDatasetNone: "No file loaded",
             offlineDatasetLoaded: "Loaded:",
-            analyzePromptBtn: "Open analysis",
+            analyzePromptBtn: "Analyze this file",
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
             statusOffline: "Analysis mode (offline)",
@@ -850,10 +964,21 @@
         if (sendFileOnFinishLabelEl) sendFileOnFinishLabelEl.textContent = tr.sendFileOnFinishLabel || "Enviar fichero al terminar";
         const recordPathLabelEl = document.getElementById("recordPathLabel");
         if (recordPathLabelEl) recordPathLabelEl.textContent = tr.recordPathLabel || "Guardado en:";
-        if (recordPathAnalyzeBtn) recordPathAnalyzeBtn.textContent = tr.analyzePromptBtn || "Entrar a análisis";
+        if (recordPathAnalyzeBtn) {
+            recordPathAnalyzeBtn.textContent = tr.analyzePromptBtn || "Analizar este archivo";
+            recordPathAnalyzeBtn.title = "Abrir este archivo en modo análisis manteniendo el layout";
+        }
         if (advInfoLabel) advInfoLabel.textContent = tr.advInfoLabel || "Adv info";
         const monitorMenuBtnEl = document.getElementById("monitorMenuBtn");
         if (monitorMenuBtnEl) monitorMenuBtnEl.title = tr.monitorMenuTitle;
+        if (localRecordBtn) {
+            localRecordBtn.title = currentLang === "en"
+                ? "Local frontend recording (includes virtual vars)"
+                : "Grabación local en frontend (incluye virtuales)";
+            updateLocalRecordBtnUi();
+        }
+        const browserToggleBtnEl = document.getElementById("browserToggleBtn");
+        if (browserToggleBtnEl) browserToggleBtnEl.title = currentLang === "en" ? "Add variables to monitor" : "Añadir variables a monitorizar";
 
         document.querySelectorAll(".plot-slot-header .plot-slot-title").forEach((el, i) => {
             el.textContent = " " + tr.graphTitle + " " + (i + 1);
@@ -874,6 +999,198 @@
 
     function applyMonitorColumns() {
         document.documentElement.style.setProperty("--monitor-columns", String(monitorColumnsCount));
+        applyMonitorPaneWidth();
+    }
+
+    function updateCompactMonitorUi() {
+        document.body.classList.toggle("monitor-compact", compactMonitorLevel > 0);
+        document.documentElement.style.setProperty("--monitor-compact-level", String(Math.max(0, Math.min(100, compactMonitorLevel))));
+        if (compactMonitorSlider) compactMonitorSlider.value = String(Math.max(0, Math.min(100, compactMonitorLevel)));
+    }
+
+    function renderPerfTelemetry() {
+        const r = renderStats;
+        if (advUiRenderMs) advUiRenderMs.textContent = `render: ${r.lastMs.toFixed(1)}ms (${r.avgMs.toFixed(1)}ms avg)`;
+        if (advUiFps) advUiFps.textContent = `fps: ${r.fps.toFixed(1)} ${adaptiveLoadEnabled ? "A" : ""}`;
+        if (advUiPts) advUiPts.textContent = `pts: ${r.points}`;
+    }
+
+    function renderNotesList() {
+        if (!notesListEl) return;
+        notesListEl.innerHTML = "";
+        if (!Array.isArray(notesByTs) || notesByTs.length === 0) return;
+        const rows = notesByTs.slice().sort((a, b) => a.ts - b.ts).slice(-120);
+        for (let i = 0; i < rows.length; i++) {
+            const n = rows[i];
+            const row = document.createElement("div");
+            row.className = "note-item";
+            const txt = document.createElement("span");
+            const relTs = (offlineDataset && Number.isFinite(offlineDataset.minTs))
+                ? Math.max(0, n.ts - offlineDataset.minTs) : n.ts;
+            txt.textContent = `${relTs.toFixed(3)}s | ${n.text}`;
+            const go = document.createElement("button");
+            go.className = "btn-small";
+            go.textContent = "Ir";
+            go.addEventListener("click", () => {
+                applyOfflineTime(n.ts);
+                schedulePlotRender();
+            });
+            const del = document.createElement("button");
+            del.className = "btn-small";
+            del.textContent = "✕";
+            del.title = "Borrar nota";
+            del.addEventListener("click", () => {
+                const idx = notesByTs.indexOf(n);
+                if (idx >= 0) {
+                    notesByTs.splice(idx, 1);
+                    renderNotesList();
+                    saveConfig();
+                }
+            });
+            row.appendChild(txt);
+            row.appendChild(go);
+            row.appendChild(del);
+            notesListEl.appendChild(row);
+        }
+    }
+
+    function renderSegmentsUi() {
+        if (!segmentSelectEl) return;
+        const fmtDraft = (v) => {
+            if (!Number.isFinite(v)) return "--";
+            if (offlineDataset && Number.isFinite(offlineDataset.minTs)) return `${(v - offlineDataset.minTs).toFixed(3)}s`;
+            return `${v.toFixed(3)}s`;
+        };
+        if (segStartLabel) segStartLabel.textContent = `S: ${fmtDraft(segmentDraft.start)}`;
+        if (segEndLabel) segEndLabel.textContent = `E: ${fmtDraft(segmentDraft.end)}`;
+        segmentSelectEl.innerHTML = "";
+        const list = Array.isArray(offlineSegments) ? offlineSegments : [];
+        if (list.length === 0) {
+            const op = document.createElement("option");
+            op.value = "";
+            op.textContent = "(sin segmentos)";
+            segmentSelectEl.appendChild(op);
+            return;
+        }
+        for (let i = 0; i < list.length; i++) {
+            const seg = list[i];
+            const op = document.createElement("option");
+            op.value = String(i);
+            const s = (offlineDataset && Number.isFinite(offlineDataset.minTs)) ? seg.start - offlineDataset.minTs : seg.start;
+            const e = (offlineDataset && Number.isFinite(offlineDataset.minTs)) ? seg.end - offlineDataset.minTs : seg.end;
+            op.textContent = `${seg.name || ("Seg " + (i + 1))} [${s.toFixed(2)}-${e.toFixed(2)}s]`;
+            segmentSelectEl.appendChild(op);
+        }
+    }
+
+    function buildLayoutSnapshot() {
+        return JSON.stringify({
+            monitoredOrder: monitoredOrder.slice(),
+            varGraphAssignment: varGraphAssignment,
+            arrayElemAssignment: arrayElemAssignment,
+            graphList: graphList.slice(),
+            monitorColumnsCount,
+            monitorPaneWidthPx,
+            hideLevels,
+            compactMonitorLevel,
+        });
+    }
+
+    function applyLayoutSnapshot(snapshotRaw) {
+        try {
+            const s = JSON.parse(snapshotRaw);
+            applyingLayoutHistory = true;
+            monitoredNames.clear();
+            monitoredOrder = Array.isArray(s.monitoredOrder) ? s.monitoredOrder.slice() : [];
+            monitoredOrder.forEach((n) => monitoredNames.add(n));
+            varGraphAssignment = (s.varGraphAssignment && typeof s.varGraphAssignment === "object") ? { ...s.varGraphAssignment } : {};
+            arrayElemAssignment = (s.arrayElemAssignment && typeof s.arrayElemAssignment === "object") ? { ...s.arrayElemAssignment } : {};
+            graphList = Array.isArray(s.graphList) ? s.graphList.slice() : [];
+            if (typeof s.monitorColumnsCount === "number") monitorColumnsCount = Math.max(1, Math.min(3, s.monitorColumnsCount));
+            monitorPaneWidthPx = (typeof s.monitorPaneWidthPx === "number" && Number.isFinite(s.monitorPaneWidthPx)) ? s.monitorPaneWidthPx : null;
+            if (typeof s.hideLevels === "number") hideLevels = s.hideLevels;
+            if (typeof s.compactMonitorLevel === "number") compactMonitorLevel = Math.max(0, Math.min(100, s.compactMonitorLevel));
+            if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
+            applyMonitorColumns();
+            updateCompactMonitorUi();
+            rebuildMonitorList();
+            rebuildPlotArea();
+            renderBrowserList();
+            schedulePlotRender();
+            saveConfig();
+        } catch (e) {
+            console.error("No se pudo aplicar snapshot layout:", e);
+        } finally {
+            applyingLayoutHistory = false;
+        }
+    }
+
+    function maybePushLayoutHistory() {
+        if (applyingLayoutHistory) return;
+        const snap = buildLayoutSnapshot();
+        if (snap === lastLayoutSnapshot) return;
+        layoutHistoryPast.push(snap);
+        if (layoutHistoryPast.length > 80) layoutHistoryPast.shift();
+        layoutHistoryFuture = [];
+        lastLayoutSnapshot = snap;
+    }
+
+    function doLayoutUndo() {
+        if (layoutHistoryPast.length <= 1) return;
+        const current = layoutHistoryPast.pop();
+        layoutHistoryFuture.push(current);
+        const prev = layoutHistoryPast[layoutHistoryPast.length - 1];
+        if (prev) applyLayoutSnapshot(prev);
+    }
+
+    function doLayoutRedo() {
+        if (layoutHistoryFuture.length === 0) return;
+        const next = layoutHistoryFuture.pop();
+        if (!next) return;
+        layoutHistoryPast.push(next);
+        applyLayoutSnapshot(next);
+    }
+
+    function renderArincBusHealth() {
+        if (!arincBusHealthPanel) return;
+        if (isOfflineMode()) {
+            arincBusHealthPanel.innerHTML =
+                `<div>ARINC bus health</div>` +
+                `<div>Words: ${arincBusHealth.totalWords} | Parity err: ${arincBusHealth.parityErrors} | SSM err: ${arincBusHealth.ssmErrors}</div>`;
+            return;
+        }
+        const labels = Object.entries(arincBusHealth.labels || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+        const top = labels.length ? labels.map(([k, v]) => `${k}:${v}`).join(" | ") : "—";
+        const topParity = Object.entries(arincBusHealth.parityByLabel || {}).sort((a, b) => b[1] - a[1]).slice(0, 4);
+        const topParityTxt = topParity.length ? topParity.map(([k, v]) => `${k}:${v}`).join(" | ") : "—";
+        arincBusHealthPanel.innerHTML =
+            `<div>ARINC bus health</div>` +
+            `<div>Words: ${arincBusHealth.totalWords} | Parity err: ${arincBusHealth.parityErrors} | SSM err: ${arincBusHealth.ssmErrors} | Unknown label: ${arincBusHealth.unknownLabels}</div>` +
+            `<div>Top labels (trafico): ${top}</div>` +
+            `<div>Top labels (paridad): ${topParityTxt}</div>`;
+    }
+
+    function clampMonitorPaneWidth(px) {
+        const mainEl = document.querySelector("main");
+        const mainW = mainEl ? mainEl.getBoundingClientRect().width : window.innerWidth;
+        const minW = 240 * monitorColumnsCount;
+        const maxW = Math.max(minW + 80, mainW - 320);
+        return Math.max(minW, Math.min(maxW, px));
+    }
+
+    function applyMonitorPaneWidth() {
+        const monitorEl = document.querySelector(".col-monitor");
+        if (!monitorEl) return;
+        if (window.matchMedia("(max-width: 900px)").matches) {
+            monitorEl.style.width = "";
+            return;
+        }
+        if (Number.isFinite(monitorPaneWidthPx) && monitorPaneWidthPx > 0) {
+            monitorPaneWidthPx = clampMonitorPaneWidth(monitorPaneWidthPx);
+            monitorEl.style.width = `${monitorPaneWidthPx}px`;
+        } else {
+            monitorEl.style.width = "";
+        }
     }
 
     // --- Config persistence (localStorage) ---
@@ -899,9 +1216,18 @@
                 lang: currentLang,
                 theme: currentTheme,
                 monitorColumns: monitorColumnsCount,
+                monitorPaneWidth: monitorPaneWidthPx,
                 appMode: appMode,
+                offlineRecordingName: offlineRecordingName || "",
                 offlineSpeed: offlineSpeedSelect ? offlineSpeedSelect.value : "1",
+                compactMonitor: compactMonitorLevel,
+                adaptiveLoad: adaptiveLoadEnabled,
+                downsampleMaxPoints: downsampleMaxPoints,
+                notesByTs: notesByTs,
+                offlineSegments: offlineSegments,
+                snapshotFrames: snapshotFramesInput ? Number(snapshotFramesInput.value || 40) : 40,
             }));
+            maybePushLayoutHistory();
         } catch (e) { /* quota exceeded or private mode */ }
     }
 
@@ -966,11 +1292,26 @@
             if (typeof cfg.monitorColumns === "number" && cfg.monitorColumns >= 1 && cfg.monitorColumns <= 3) {
                 monitorColumnsCount = cfg.monitorColumns;
             }
+            if (typeof cfg.monitorPaneWidth === "number" && Number.isFinite(cfg.monitorPaneWidth) && cfg.monitorPaneWidth > 0) {
+                monitorPaneWidthPx = cfg.monitorPaneWidth;
+            }
+            if (typeof cfg.compactMonitor === "boolean") compactMonitorLevel = cfg.compactMonitor ? 70 : 0;
+            if (typeof cfg.compactMonitor === "number") compactMonitorLevel = Math.max(0, Math.min(100, cfg.compactMonitor));
+            if (typeof cfg.adaptiveLoad === "boolean") adaptiveLoadEnabled = cfg.adaptiveLoad;
+            if (typeof cfg.downsampleMaxPoints === "number" && Number.isFinite(cfg.downsampleMaxPoints)) {
+                downsampleMaxPoints = Math.max(200, Math.floor(cfg.downsampleMaxPoints));
+            }
+            if (Array.isArray(cfg.notesByTs)) notesByTs = cfg.notesByTs;
+            if (Array.isArray(cfg.offlineSegments)) offlineSegments = cfg.offlineSegments;
             if (cfg.appMode === "offline" || cfg.appMode === "live") {
                 appMode = cfg.appMode;
             }
+            if (typeof cfg.offlineRecordingName === "string") offlineRecordingName = cfg.offlineRecordingName;
             if (offlineSpeedSelect && cfg.offlineSpeed != null) {
                 offlineSpeedSelect.value = String(cfg.offlineSpeed);
+            }
+            if (snapshotFramesInput && Number.isFinite(Number(cfg.snapshotFrames))) {
+                snapshotFramesInput.value = String(Math.max(2, Math.floor(Number(cfg.snapshotFrames))));
             }
         } catch (e) { /* corrupt data */ }
     }
@@ -989,6 +1330,22 @@
         varFormat = {};
         arrayElemAssignment = {};
         arrayElemHistory = {};
+        monitorPaneWidthPx = null;
+        notesByTs = [];
+        offlineSegments = [];
+        compactMonitorLevel = 0;
+        adaptiveLoadEnabled = true;
+        downsampleMaxPoints = 2000;
+        arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
+        layoutHistoryPast = [];
+        layoutHistoryFuture = [];
+        updateCompactMonitorUi();
+        if (adaptiveLoadCheckbox) adaptiveLoadCheckbox.checked = true;
+        if (downsampleMaxPointsInput) downsampleMaxPointsInput.value = "2000";
+        renderNotesList();
+        renderSegmentsUi();
+        renderArincBusHealth();
+        applyMonitorPaneWidth();
         sendMonitored();
         renderBrowserList();
         rebuildPlotArea();
@@ -1001,7 +1358,26 @@
     applyTheme(currentTheme);
     applyLanguage(currentLang);
     applyMonitorColumns();
+    updateCompactMonitorUi();
+    if (adaptiveLoadCheckbox) adaptiveLoadCheckbox.checked = !!adaptiveLoadEnabled;
+    if (compactMonitorSlider) compactMonitorSlider.value = String(compactMonitorLevel);
+    if (downsampleMaxPointsInput) downsampleMaxPointsInput.value = String(downsampleMaxPoints);
+    renderSegmentsUi();
+    renderNotesList();
+    renderPerfTelemetry();
+    renderArincBusHealth();
     setModeUi();
+    (async () => {
+        if (appMode !== "offline" || !offlineRecordingName) return;
+        try {
+            await refreshServerRecordings();
+            await loadRecordingFromServer(offlineRecordingName, { preserveLayout: true });
+        } catch (e) {
+            console.warn("No se pudo restaurar TSV guardado:", offlineRecordingName, e);
+        }
+    })();
+    lastLayoutSnapshot = buildLayoutSnapshot();
+    layoutHistoryPast = [lastLayoutSnapshot];
 
     try {
         const saved = localStorage.getItem(ADV_INFO_STORAGE_KEY) === "1";
@@ -1045,7 +1421,7 @@
                 const text = await f.text();
                 const ds = parseTsvDataset(text, f.name);
                 if (!isOfflineMode()) setAppMode("offline", { keepData: true });
-                loadOfflineDataset(ds, { target: "A" });
+                loadOfflineDataset(ds, { target: "A", recordingName: "" });
             } catch (e) {
                 alert("Error cargando TSV: " + (e && e.message ? e.message : String(e)));
             } finally {
@@ -1129,6 +1505,440 @@
             schedulePlotRender();
         });
     }
+    if (prevEventBtn) {
+        prevEventBtn.addEventListener("click", () => {
+            if (!anomalyResults.length) return;
+            eventCursorIndex = Math.max(0, eventCursorIndex <= 0 ? anomalyResults.length - 1 : eventCursorIndex - 1);
+            const ev = anomalyResults[eventCursorIndex];
+            if (ev) { applyOfflineTime(ev.ts); schedulePlotRender(); }
+        });
+    }
+    if (nextEventBtn) {
+        nextEventBtn.addEventListener("click", () => {
+            if (!anomalyResults.length) return;
+            eventCursorIndex = (eventCursorIndex + 1) % anomalyResults.length;
+            const ev = anomalyResults[eventCursorIndex];
+            if (ev) { applyOfflineTime(ev.ts); schedulePlotRender(); }
+        });
+    }
+    if (addNoteBtn) {
+        addNoteBtn.addEventListener("click", () => {
+            if (!offlineDataset || !Number.isFinite(offlinePlayback.currentTs)) return;
+            const txt = prompt("Nota para este timestamp:");
+            if (!txt) return;
+            notesByTs.push({ ts: offlinePlayback.currentTs, text: txt.trim() });
+            if (notesByTs.length > 300) notesByTs = notesByTs.slice(-300);
+            renderNotesList();
+            saveConfig();
+        });
+    }
+    function getOfflineValueFromSample(sample, name) {
+        if (!sample || !Array.isArray(sample.data)) return "";
+        const arrMatch = /^(.+)\[(\d+)\]$/.exec(String(name || ""));
+        if (arrMatch) {
+            const base = arrMatch[1];
+            const idx = parseInt(arrMatch[2], 10);
+            const entry = sample.data.find((e) => e && e.name === base && Array.isArray(e.value));
+            if (!entry || !Array.isArray(entry.value) || idx < 0 || idx >= entry.value.length) return "";
+            const v = entry.value[idx];
+            return v == null ? "" : String(v);
+        }
+        const entry = sample.data.find((e) => e && e.name === name);
+        if (!entry) return "";
+        if (Array.isArray(entry.value)) return entry.value.map((v) => (v == null ? "" : String(v))).join(",");
+        return entry.value == null ? "" : String(entry.value);
+    }
+
+    function buildColumnsSpecFromOfflineSamples(samples, names) {
+        const specs = [];
+        for (const name of names) {
+            const arrMatch = /^(.+)\[(\d+)\]$/.exec(String(name || ""));
+            if (arrMatch) {
+                specs.push({ type: "scalar", name });
+                continue;
+            }
+            let maxLen = 0;
+            for (const s of samples) {
+                if (!s || !Array.isArray(s.data)) continue;
+                const e = s.data.find((it) => it && it.name === name && Array.isArray(it.value));
+                if (e && Array.isArray(e.value) && e.value.length > maxLen) maxLen = e.value.length;
+            }
+            if (maxLen > 0) specs.push({ type: "array", name, size: maxLen });
+            else specs.push({ type: "scalar", name });
+        }
+        return specs;
+    }
+
+    function buildTsvFromOfflineSamples(samples, names) {
+        const safeSamples = Array.isArray(samples) ? samples : [];
+        if (!safeSamples.length || !Array.isArray(names) || !names.length) return null;
+        const specs = buildColumnsSpecFromOfflineSamples(safeSamples, names);
+        const header = ["time_s"];
+        specs.forEach((sp) => {
+            if (sp.type === "array") {
+                for (let i = 0; i < sp.size; i++) header.push(`${sp.name}_${i}`);
+            } else {
+                header.push(sp.name);
+            }
+        });
+        const lines = [header.join("\t")];
+        for (const s of safeSamples) {
+            const ts = Number(s && s.ts);
+            if (!Number.isFinite(ts)) continue;
+            const row = [ts.toFixed(6)];
+            for (const sp of specs) {
+                if (sp.type === "array") {
+                    const arrEntry = (s.data || []).find((e) => e && e.name === sp.name && Array.isArray(e.value));
+                    const arr = arrEntry && Array.isArray(arrEntry.value) ? arrEntry.value : [];
+                    for (let i = 0; i < sp.size; i++) {
+                        const v = i < arr.length ? arr[i] : "";
+                        row.push(v == null ? "" : String(v));
+                    }
+                } else {
+                    row.push(getOfflineValueFromSample(s, sp.name));
+                }
+            }
+            lines.push(row.join("\t"));
+        }
+        return lines.join("\n") + "\n";
+    }
+
+    function buildTsvFromLiveHistory(frameCount, names) {
+        const scalarNames = [];
+        const arraySpecs = [];
+        for (const name of names) {
+            const arrMatch = /^(.+)\[(\d+)\]$/.exec(String(name || ""));
+            if (arrMatch) {
+                scalarNames.push(name);
+                continue;
+            }
+            const vd = varsByName[name];
+            let size = Array.isArray(vd?.value) ? vd.value.length : 0;
+            for (const key of Object.keys(arrayElemHistory)) {
+                const m = /^(.+)\[(\d+)\]$/.exec(key);
+                if (!m || m[1] !== name) continue;
+                size = Math.max(size, Number(m[2]) + 1);
+            }
+            if (size > 0) arraySpecs.push({ name, size });
+            else scalarNames.push(name);
+        }
+        const header = ["time_s"];
+        scalarNames.forEach((n) => header.push(n));
+        arraySpecs.forEach((sp) => { for (let i = 0; i < sp.size; i++) header.push(`${sp.name}_${i}`); });
+        const lines = [header.join("\t")];
+
+        let refTs = null;
+        for (const n of scalarNames) {
+            const h = historyCache[n];
+            if (h && Array.isArray(h.timestamps) && h.timestamps.length) { refTs = h.timestamps; break; }
+        }
+        if (!refTs) {
+            for (const sp of arraySpecs) {
+                const h0 = arrayElemHistory[`${sp.name}[0]`];
+                if (h0 && Array.isArray(h0.timestamps) && h0.timestamps.length) { refTs = h0.timestamps; break; }
+            }
+        }
+        if (!refTs || refTs.length === 0) return lines.join("\n") + "\n";
+
+        const start = Math.max(0, refTs.length - Math.max(2, frameCount));
+        for (let i = start; i < refTs.length; i++) {
+            const ts = Number(refTs[i]);
+            const row = [Number.isFinite(ts) ? ts.toFixed(6) : ""];
+            for (const n of scalarNames) {
+                const h = historyCache[n];
+                const v = (h && Array.isArray(h.values) && i < h.values.length) ? h.values[i] : "";
+                row.push(v == null ? "" : String(v));
+            }
+            for (const sp of arraySpecs) {
+                for (let k = 0; k < sp.size; k++) {
+                    const h = arrayElemHistory[`${sp.name}[${k}]`];
+                    const v = (h && Array.isArray(h.values) && i < h.values.length) ? h.values[i] : "";
+                    row.push(v == null ? "" : String(v));
+                }
+            }
+            lines.push(row.join("\t"));
+        }
+        return lines.join("\n") + "\n";
+    }
+
+    function buildSnapshotTsv(frameCount) {
+        const names = monitoredOrder.slice();
+        if (!names.length) return null;
+        if (isOfflineMode() && offlineDataset && Array.isArray(offlineDataset.samples) && offlineDataset.samples.length) {
+            const idx = Math.max(0, Math.min(offlineDataset.samples.length - 1, binarySearchSampleIndex(offlineDataset.samples, offlinePlayback.currentTs || offlineDataset.minTs)));
+            const half = Math.floor(frameCount / 2);
+            const start = Math.max(0, idx - half);
+            const end = Math.min(offlineDataset.samples.length - 1, start + frameCount - 1);
+            const subset = offlineDataset.samples.slice(start, end + 1);
+            return buildTsvFromOfflineSamples(subset, names);
+        } else {
+            return buildTsvFromLiveHistory(frameCount, names);
+        }
+    }
+
+    function buildLocalFrontendSample(ts) {
+        const row = [];
+        for (const name of monitoredOrder) {
+            if (isArrayElem(name)) {
+                const v = getNumericValueForAlarmName(name);
+                if (Number.isFinite(v)) row.push({ name, type: "double", value: v, timestamp: ts });
+                continue;
+            }
+            const vd = varsByName[name];
+            if (!vd) continue;
+            if (Array.isArray(vd.value)) row.push({ name, type: "array", value: vd.value.slice(), timestamp: ts });
+            else row.push({ name, type: vd.type || "double", value: vd.value, timestamp: ts });
+        }
+        return { ts, data: row };
+    }
+
+    function updateLocalRecordBtnUi() {
+        if (!localRecordBtn) return;
+        localRecordBtn.textContent = isLocalRecording ? "■ Stop local" : "● Rec local";
+        localRecordBtn.classList.toggle("recording", !!isLocalRecording);
+    }
+
+    async function stopLocalRecording(saveFile = true) {
+        if (!isLocalRecording && localRecordSamples.length === 0) return;
+        isLocalRecording = false;
+        updateLocalRecordBtnUi();
+        if (!saveFile) { localRecordSamples = []; return; }
+        const names = monitoredOrder.slice();
+        const tsv = buildTsvFromOfflineSamples(localRecordSamples, names);
+        localRecordSamples = [];
+        if (!tsv) return;
+        const d = new Date();
+        const fname = `localrec_${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}_${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}.tsv`;
+        try {
+            await saveTsvToServer(tsv, { kind: "snapshot", filename: fname });
+        } catch (e) {
+            alert("No se pudo guardar REC local: " + (e && e.message ? e.message : String(e)));
+        }
+    }
+
+    function startLocalRecording() {
+        if (!isLiveMode()) return;
+        isLocalRecording = true;
+        localRecordSamples = [];
+        updateLocalRecordBtnUi();
+    }
+    async function saveTsvToServer(tsvContent, opts = {}) {
+        const kind = opts.kind || "snapshot";
+        const filename = opts.filename || "";
+        const download = (sendFileOnFinishCheckbox && sendFileOnFinishCheckbox.checked) ? 1 : 0;
+        const r = await fetch(`/api/save_tsv?kind=${encodeURIComponent(kind)}&download=${download}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: tsvContent, filename }),
+        });
+        if (!r.ok) {
+            let msg = "No se pudo guardar TSV en servidor";
+            try {
+                const err = await r.json();
+                if (err && err.error) msg += `: ${err.error}`;
+            } catch (e) {}
+            throw new Error(msg);
+        }
+        const isDownloadResponse = (r.headers.get("content-type") || "").includes("tab-separated-values");
+        let d = null;
+        if (isDownloadResponse) {
+            const blob = await r.blob();
+            const disp = r.headers.get("content-disposition") || "";
+            let dlName = filename || `${kind}.tsv`;
+            const m = /filename="?([^"]+)"?/i.exec(disp);
+            if (m && m[1]) dlName = m[1];
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = dlName;
+            a.click();
+            URL.revokeObjectURL(a.href);
+            d = { filename: dlName, path: dlName };
+        } else {
+            d = await r.json();
+            if (download && d && d.filename) {
+                const dl = await fetch("/api/recordings/" + encodeURIComponent(d.filename));
+                if (dl.ok) {
+                    const blob = await dl.blob();
+                    const a = document.createElement("a");
+                    a.href = URL.createObjectURL(blob);
+                    a.download = d.filename;
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                }
+            }
+        }
+        if (d && d.path) showRecordPathToast(d.path, { filename: d.filename || "" });
+        return d;
+    }
+    if (snapshotBtn) {
+        snapshotBtn.addEventListener("click", async () => {
+            const frameCount = Math.max(2, Math.floor(Number(snapshotFramesInput ? snapshotFramesInput.value : 40) || 40));
+            if (snapshotFramesInput) snapshotFramesInput.value = String(frameCount);
+            const d = new Date();
+            const defaultName = `snapshot_${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}_${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}.tsv`;
+            const tsv = buildSnapshotTsv(frameCount);
+            if (!tsv) return;
+            try { await saveTsvToServer(tsv, { kind: "snapshot", filename: defaultName }); }
+            catch (e) { alert("No se pudo guardar snapshot: " + (e && e.message ? e.message : String(e))); }
+            saveConfig();
+        });
+    }
+    if (localRecordBtn) {
+        localRecordBtn.addEventListener("click", async () => {
+            if (!isLiveMode()) return;
+            if (isLocalRecording) await stopLocalRecording(true);
+            else startLocalRecording();
+        });
+        updateLocalRecordBtnUi();
+    }
+    if (exportPdfReportBtn) {
+        exportPdfReportBtn.addEventListener("click", async () => {
+            const prevExpanded = new Set(expandedStats);
+            try {
+                for (const n of monitoredOrder) expandedStats.add(n);
+                rebuildMonitorList();
+                updateMonitorValues();
+                const rows = anomalyResults.slice(0, 200).map((a) => {
+                    const rel = offlineDataset ? (a.ts - offlineDataset.minTs) : a.ts;
+                    return `<tr><td>${rel.toFixed(3)}s</td><td>${a.name}</td><td>${a.type}</td><td>${a.detail}</td></tr>`;
+                }).join("");
+                const monitorRows = Array.from(monitorListEl.querySelectorAll(".monitor-item-wrap")).map((w) => {
+                    const nm = w.querySelector(".mon-name")?.textContent?.trim() || "";
+                    const vv = w.querySelector(".mon-value")?.textContent?.trim() || "";
+                    const stats = w.querySelector(".stats-panel")?.innerText?.trim() || "";
+                    return `<tr><td>${nm}</td><td>${vv}</td><td><pre style="margin:0;white-space:pre-wrap">${stats || "-"}</pre></td></tr>`;
+                }).join("");
+                const imgs = [];
+                const plotEls = Array.from(plotArea.querySelectorAll(".js-plotly-plot"));
+                for (const el of plotEls) {
+                    try {
+                        const img = await Plotly.toImage(el, { format: "png", width: 1200, height: 420, scale: 1 });
+                        imgs.push(`<img src="${img}" style="width:100%;max-width:1200px;display:block;margin:8px 0;">`);
+                    } catch (e) {}
+                }
+                const w = window.open("", "_blank");
+                if (!w) return;
+                w.document.write(`<html><head><title>VarMonitor Report</title></head><body><h2>Reporte VarMonitor</h2><h3>Monitor actual</h3><table border="1" cellspacing="0" cellpadding="4"><tr><th>Variable</th><th>Valor</th><th>Detalle</th></tr>${monitorRows}</table><h3>Graficas actuales</h3>${imgs.join("") || "<p>(sin graficas)</p>"}<h3>Anomalias</h3><table border="1" cellspacing="0" cellpadding="4"><tr><th>t</th><th>Var</th><th>Tipo</th><th>Detalle</th></tr>${rows}</table><script>window.print();<\/script></body></html>`);
+                w.document.close();
+            } finally {
+                expandedStats.clear();
+                prevExpanded.forEach((n) => expandedStats.add(n));
+                rebuildMonitorList();
+                updateMonitorValues();
+            }
+        });
+    }
+    if (segStartBtn) {
+        segStartBtn.addEventListener("click", () => {
+            if (!offlineDataset) return;
+            segmentDraft.start = offlinePlayback.currentTs;
+            renderSegmentsUi();
+        });
+    }
+    if (segEndBtn) {
+        segEndBtn.addEventListener("click", () => {
+            if (!offlineDataset) return;
+            segmentDraft.end = offlinePlayback.currentTs;
+            renderSegmentsUi();
+        });
+    }
+    if (segSaveBtn) {
+        segSaveBtn.addEventListener("click", () => {
+            if (!Number.isFinite(segmentDraft.start) || !Number.isFinite(segmentDraft.end)) return;
+            const start = Math.min(segmentDraft.start, segmentDraft.end);
+            const end = Math.max(segmentDraft.start, segmentDraft.end);
+            const name = prompt("Nombre del segmento:", `Seg ${offlineSegments.length + 1}`) || `Seg ${offlineSegments.length + 1}`;
+            offlineSegments.push({ name, start, end });
+            if (offlineSegments.length > 200) offlineSegments = offlineSegments.slice(-200);
+            renderSegmentsUi();
+            saveConfig();
+        });
+    }
+    if (segCutBtn) {
+        segCutBtn.addEventListener("click", async () => {
+            if (!offlineDataset) { alert("No hay dataset offline cargado."); return; }
+            let start = Number.NaN;
+            let end = Number.NaN;
+            if (Number.isFinite(segmentDraft.start) && Number.isFinite(segmentDraft.end)) {
+                start = Math.min(segmentDraft.start, segmentDraft.end);
+                end = Math.max(segmentDraft.start, segmentDraft.end);
+            } else {
+                const idxSel = parseInt(segmentSelectEl?.value || "-1", 10);
+                if (Number.isFinite(idxSel) && idxSel >= 0 && idxSel < offlineSegments.length) {
+                    const seg = offlineSegments[idxSel];
+                    start = Math.min(Number(seg.start), Number(seg.end));
+                    end = Math.max(Number(seg.start), Number(seg.end));
+                }
+            }
+            if (!Number.isFinite(start) || !Number.isFinite(end)) { alert("Marca Inicio y Fin o selecciona un segmento guardado."); return; }
+            const names = Array.isArray(offlineDataset.names) ? offlineDataset.names.slice() : [];
+            if (!names.length || !Array.isArray(offlineDataset.samples) || !offlineDataset.samples.length) { alert("No hay datos para cortar."); return; }
+            let i0 = Math.max(0, Math.min(offlineDataset.samples.length - 1, binarySearchSampleIndex(offlineDataset.samples, start)));
+            let i1 = Math.max(0, Math.min(offlineDataset.samples.length - 1, binarySearchSampleIndex(offlineDataset.samples, end)));
+            if (i0 > i1) { const t = i0; i0 = i1; i1 = t; }
+            while (i0 > 0 && Number(offlineDataset.samples[i0].ts) > start) i0 -= 1;
+            while (i1 < offlineDataset.samples.length - 1 && Number(offlineDataset.samples[i1].ts) < end) i1 += 1;
+            let selected = [];
+            for (let i = i0; i <= i1; i++) {
+                const s = offlineDataset.samples[i];
+                const t = Number(s.ts);
+                if (!Number.isFinite(t)) continue;
+                selected.push(s);
+            }
+            if (selected.length <= 0) {
+                const frameCount = Math.max(2, Math.floor(Number(snapshotFramesInput ? snapshotFramesInput.value : 40) || 40));
+                const centerIdx = Math.max(0, Math.min(offlineDataset.samples.length - 1, binarySearchSampleIndex(offlineDataset.samples, offlinePlayback.currentTs || start)));
+                const from = Math.max(0, centerIdx - Math.floor(frameCount / 2));
+                const to = Math.min(offlineDataset.samples.length - 1, from + frameCount - 1);
+                for (let i = from; i <= to; i++) {
+                    const s = offlineDataset.samples[i];
+                    const t = Number(s.ts);
+                    if (!Number.isFinite(t)) continue;
+                    selected.push(s);
+                }
+            }
+            const tsvOut = buildTsvFromOfflineSamples(selected, names);
+            if (!tsvOut || tsvOut.trim().split("\n").length <= 1) { alert("No hay muestras dentro del rango seleccionado."); return; }
+            const base = offlineRecordingName || (offlineDataset.sourceName || "dataset.tsv");
+            const fname = `segment_${base.replace(/\.tsv$/i, "")}_${Math.max(0, start - offlineDataset.minTs).toFixed(3)}_${Math.max(0, end - offlineDataset.minTs).toFixed(3)}.tsv`.replace(/[^\w.\-]+/g, "_");
+            try {
+                await saveTsvToServer(tsvOut, { kind: "segment", filename: fname });
+                await refreshServerRecordings();
+            } catch (e) {
+                alert("No se pudo cortar segmento: " + (e && e.message ? e.message : String(e)));
+            }
+        });
+    }
+    if (segmentGoBtn) {
+        segmentGoBtn.addEventListener("click", () => {
+            const idx = parseInt(segmentSelectEl?.value || "-1", 10);
+            if (!Number.isFinite(idx) || idx < 0 || idx >= offlineSegments.length) return;
+            applyOfflineTime(offlineSegments[idx].start);
+            schedulePlotRender();
+        });
+    }
+    const handleOfflineArrowSeek = (e) => {
+        if (!isOfflineMode() || !offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length < 2) return;
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        const tag = (document.activeElement && document.activeElement.tagName) ? document.activeElement.tagName.toLowerCase() : "";
+        if (tag === "input" || tag === "textarea" || tag === "select") return;
+        e.preventDefault();
+        const idx = Math.max(0, Math.min(offlineDataset.samples.length - 1, binarySearchSampleIndex(offlineDataset.samples, offlinePlayback.currentTs || offlineDataset.minTs)));
+        const nextIdx = e.key === "ArrowLeft" ? Math.max(0, idx - 1) : Math.min(offlineDataset.samples.length - 1, idx + 1);
+        applyOfflineTime(offlineDataset.samples[nextIdx].ts);
+        schedulePlotRender();
+    };
+    window.addEventListener("keydown", handleOfflineArrowSeek, true);
+    if (downsampleMaxPointsInput) {
+        downsampleMaxPointsInput.addEventListener("change", () => {
+            const v = Number(downsampleMaxPointsInput.value);
+            downsampleMaxPoints = Number.isFinite(v) ? Math.max(200, Math.floor(v)) : 2000;
+            downsampleMaxPointsInput.value = String(downsampleMaxPoints);
+            renderPerfTelemetry();
+            saveConfig();
+            schedulePlotRender();
+        });
+    }
 
     resetConfigBtn.addEventListener("click", resetConfig);
 
@@ -1192,8 +2002,39 @@
         });
     }
     window.addEventListener("resize", () => {
+        applyMonitorPaneWidth();
         if (varDrawer && varDrawer.style.display === "flex") positionVarDrawer();
     });
+
+    if (monitorResizeHandle && colMonitorEl) {
+        let dragState = null;
+        const onMove = (e) => {
+            if (!dragState) return;
+            const dx = e.clientX - dragState.startX;
+            monitorPaneWidthPx = clampMonitorPaneWidth(dragState.startWidth + dx);
+            applyMonitorPaneWidth();
+            positionVarDrawer();
+        };
+        const onUp = () => {
+            if (!dragState) return;
+            dragState = null;
+            monitorResizeHandle.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.removeEventListener("mousemove", onMove);
+            document.removeEventListener("mouseup", onUp);
+            saveConfig();
+        };
+        monitorResizeHandle.addEventListener("mousedown", (e) => {
+            if (window.matchMedia("(max-width: 900px)").matches) return;
+            e.preventDefault();
+            const rect = colMonitorEl.getBoundingClientRect();
+            dragState = { startX: e.clientX, startWidth: rect.width };
+            monitorResizeHandle.classList.add("dragging");
+            document.body.style.cursor = "col-resize";
+            document.addEventListener("mousemove", onMove);
+            document.addEventListener("mouseup", onUp);
+        });
+    }
 
     // --- Panel de ajustes (host/puerto/idioma/tema) ---
 
@@ -1255,6 +2096,92 @@
             saveConfig();
         });
     }
+    if (compactMonitorSlider) {
+        compactMonitorSlider.addEventListener("input", () => {
+            const v = Number(compactMonitorSlider.value);
+            compactMonitorLevel = Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0;
+            updateCompactMonitorUi();
+            saveConfig();
+        });
+    }
+    if (expandAllMonBtn) {
+        expandAllMonBtn.addEventListener("click", () => {
+            for (const n of monitoredOrder) expandedStats.add(n);
+            rebuildMonitorList();
+            updateMonitorValues();
+        });
+    }
+    if (collapseAllMonBtn) {
+        collapseAllMonBtn.addEventListener("click", () => {
+            expandedStats.clear();
+            rebuildMonitorList();
+            updateMonitorValues();
+            monitorListEl.querySelectorAll(".stats-panel").forEach((p) => p.remove());
+            monitorListEl.querySelectorAll(".monitor-item.expanded").forEach((el) => el.classList.remove("expanded"));
+        });
+    }
+    if (adaptiveLoadCheckbox) {
+        adaptiveLoadCheckbox.addEventListener("change", () => {
+            adaptiveLoadEnabled = !!adaptiveLoadCheckbox.checked;
+            renderPerfTelemetry();
+            saveConfig();
+        });
+    }
+    if (layoutUndoBtn) layoutUndoBtn.addEventListener("click", doLayoutUndo);
+    if (layoutRedoBtn) layoutRedoBtn.addEventListener("click", doLayoutRedo);
+
+    async function refreshTemplateUi() {
+        if (!dashboardTemplateSelect) return;
+        let keys = [];
+        try {
+            const r = await fetch("/api/templates");
+            if (r.ok) {
+                const d = await r.json();
+                keys = Array.isArray(d.templates) ? d.templates : [];
+            }
+        } catch (e) {}
+        dashboardTemplateSelect.innerHTML = "";
+        if (keys.length === 0) {
+            const op = document.createElement("option");
+            op.value = "";
+            op.textContent = "(sin plantillas)";
+            dashboardTemplateSelect.appendChild(op);
+            return;
+        }
+        keys.forEach((k) => {
+            const op = document.createElement("option");
+            op.value = k;
+            op.textContent = k;
+            dashboardTemplateSelect.appendChild(op);
+        });
+    }
+    refreshTemplateUi();
+    if (templateSaveBtn) {
+        templateSaveBtn.addEventListener("click", async () => {
+            const name = prompt("Nombre de plantilla:");
+            if (!name) return;
+            const payload = buildFullConfig();
+            const dl = (sendFileOnFinishCheckbox && sendFileOnFinishCheckbox.checked) ? "?download=1" : "";
+            await fetch("/api/templates/" + encodeURIComponent(name) + dl, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ data: payload }),
+            });
+            await refreshTemplateUi();
+            dashboardTemplateSelect.value = name;
+        });
+    }
+    if (templateLoadBtn) {
+        templateLoadBtn.addEventListener("click", async () => {
+            const key = dashboardTemplateSelect ? dashboardTemplateSelect.value : "";
+            if (!key) return;
+            const r = await fetch("/api/templates/" + encodeURIComponent(key));
+            if (!r.ok) return;
+            const d = await r.json();
+            if (!d || typeof d.data !== "object") return;
+            await applyImportedConfig(d.data, { autoLoadOffline: true });
+        });
+    }
 
     if (langSelect) {
         langSelect.addEventListener("change", () => {
@@ -1272,8 +2199,8 @@
 
     // --- Export / Import config to file ---
 
-    function exportConfigToFile() {
-        const cfg = {
+    function buildFullConfig() {
+        return {
             monitored: monitoredOrder.slice(),
             graphs: varGraphAssignment,
             graphList: graphList,
@@ -1290,7 +2217,111 @@
             lang: currentLang,
             theme: currentTheme,
             monitorColumns: monitorColumnsCount,
+            monitorPaneWidth: monitorPaneWidthPx,
+            compactMonitor: compactMonitorLevel,
+            adaptiveLoad: adaptiveLoadEnabled,
+            downsampleMaxPoints: downsampleMaxPoints,
+            notesByTs: notesByTs,
+            offlineSegments: offlineSegments,
+            appMode: appMode,
+            offlineRecordingName: offlineRecordingName || "",
+            snapshotFrames: snapshotFramesInput ? Number(snapshotFramesInput.value || 40) : 40,
+            generators: Object.entries(activeGenerators).map(([name, g]) => ({
+                name,
+                type: g.type,
+                params: { ...(g.params || {}) },
+            })),
         };
+    }
+
+    async function applyImportedConfig(cfg, opts = {}) {
+        monitoredNames.clear();
+        monitoredOrder = [];
+        if (Array.isArray(cfg.monitored)) {
+            monitoredOrder = cfg.monitored.slice();
+            monitoredOrder.forEach(n => monitoredNames.add(n));
+            enforceArincMonitoringDependencies();
+            pruneArincDerivedFromMonitored();
+        }
+        if (cfg.graphs && typeof cfg.graphs === "object") varGraphAssignment = cfg.graphs;
+        if (Array.isArray(cfg.graphList)) graphList = cfg.graphList;
+        if (cfg.timeWindow) timeWindowSelect.value = cfg.timeWindow;
+        if (cfg.historyBuffer) {
+            historyBufferSelect.value = cfg.historyBuffer;
+            localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+        }
+        const smoothSel = document.getElementById("smoothPlotsSelect");
+        if (smoothSel && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
+            const v = String(cfg.smoothPlots);
+            if (["1", "3", "5", "7", "11"].includes(v)) smoothSel.value = v;
+        }
+        if (typeof cfg.hideLevels === "number") {
+            hideLevels = cfg.hideLevels;
+            if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
+        }
+        if (cfg.instance && typeof cfg.instance === "string") {
+            savedInstance = cfg.instance.trim();
+            if (portSelect && Array.from(portSelect.options).some(o => o.value === savedInstance)) portSelect.value = savedInstance;
+        }
+        if (cfg.update_ratio != null) {
+            const r = parseInt(cfg.update_ratio, 10);
+            if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
+        } else if (cfg.interval != null) {
+            const r = parseInt(cfg.interval, 10);
+            if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
+        }
+        if (cfg.alarms && typeof cfg.alarms === "object") alarms = cfg.alarms;
+        stopAllGenerators();
+        pendingGeneratorRestore = [];
+        if (Array.isArray(cfg.generators)) {
+            pendingGeneratorRestore = cfg.generators
+                .filter((g) => g && typeof g.name === "string" && typeof g.type === "string" && g.params && typeof g.params === "object")
+                .map((g) => ({ name: g.name, type: g.type, params: { ...g.params } }));
+        }
+        computedVars = [];
+        computedHistories = {};
+        if (Array.isArray(cfg.computedVars)) {
+            for (const cv of cfg.computedVars) if (cv.name && cv.expr) addComputedVar(cv.name, cv.expr);
+        }
+        if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = normalizeVarFormatConfig(cfg.varFormat);
+        if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
+        if (cfg.lang) currentLang = cfg.lang;
+        if (cfg.theme) currentTheme = cfg.theme;
+        if (typeof cfg.monitorColumns === "number" && cfg.monitorColumns >= 1 && cfg.monitorColumns <= 3) monitorColumnsCount = cfg.monitorColumns;
+        if (typeof cfg.monitorPaneWidth === "number" && Number.isFinite(cfg.monitorPaneWidth) && cfg.monitorPaneWidth > 0) monitorPaneWidthPx = cfg.monitorPaneWidth; else monitorPaneWidthPx = null;
+        if (typeof cfg.compactMonitor === "boolean") compactMonitorLevel = cfg.compactMonitor ? 70 : 0;
+        if (typeof cfg.compactMonitor === "number") compactMonitorLevel = Math.max(0, Math.min(100, cfg.compactMonitor));
+        if (typeof cfg.adaptiveLoad === "boolean") adaptiveLoadEnabled = cfg.adaptiveLoad;
+        if (typeof cfg.downsampleMaxPoints === "number" && Number.isFinite(cfg.downsampleMaxPoints)) downsampleMaxPoints = Math.max(200, Math.floor(cfg.downsampleMaxPoints));
+        if (Array.isArray(cfg.notesByTs)) notesByTs = cfg.notesByTs;
+        if (Array.isArray(cfg.offlineSegments)) offlineSegments = cfg.offlineSegments;
+        if (snapshotFramesInput && Number.isFinite(Number(cfg.snapshotFrames))) snapshotFramesInput.value = String(Math.max(2, Math.floor(Number(cfg.snapshotFrames))));
+        if (cfg.appMode === "offline" || cfg.appMode === "live") setAppMode(cfg.appMode, { keepData: true });
+        const rec = (cfg.offlineRecordingName || "").trim();
+        if (opts.autoLoadOffline && cfg.appMode === "offline" && rec) {
+            try {
+                await loadRecordingFromServer(rec, { preserveLayout: true });
+            } catch (e) {
+                console.warn("No se pudo autocargar TSV de la sesion:", rec, e);
+                alert(`Sesion cargada, pero no se encontro TSV: ${rec}`);
+            }
+        }
+        saveConfig();
+        rebuildKnownVarNamesWithDerived();
+        sendMonitored();
+        sendUpdateRatio();
+        rebuildPlotArea();
+        rebuildMonitorList();
+        renderBrowserList();
+        renderPlots();
+        applyTheme(currentTheme);
+        applyLanguage(currentLang);
+        applyMonitorColumns();
+        restorePendingGeneratorsIfPossible();
+    }
+
+    function exportConfigToFile() {
+        const cfg = buildFullConfig();
         const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
         const d = new Date();
         const pad2 = n => String(n).padStart(2, "0");
@@ -1312,78 +2343,10 @@
             const file = input.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = () => {
+            reader.onload = async () => {
                 try {
                     const cfg = JSON.parse(reader.result);
-                    monitoredNames.clear();
-                    monitoredOrder = [];
-                    if (Array.isArray(cfg.monitored)) {
-                        monitoredOrder = cfg.monitored.slice();
-                        monitoredOrder.forEach(n => monitoredNames.add(n));
-                        enforceArincMonitoringDependencies();
-                        pruneArincDerivedFromMonitored();
-                    }
-                    if (cfg.graphs && typeof cfg.graphs === "object") {
-                        varGraphAssignment = cfg.graphs;
-                    }
-                    if (Array.isArray(cfg.graphList)) {
-                        graphList = cfg.graphList;
-                    }
-                    if (cfg.timeWindow) timeWindowSelect.value = cfg.timeWindow;
-                    if (cfg.historyBuffer) {
-                        historyBufferSelect.value = cfg.historyBuffer;
-                        localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
-                    }
-                    const smoothSel = document.getElementById("smoothPlotsSelect");
-                    if (smoothSel && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
-                        const v = String(cfg.smoothPlots);
-                        if (["1", "3", "5", "7", "11"].includes(v)) smoothSel.value = v;
-                    }
-                    if (typeof cfg.hideLevels === "number") {
-                        hideLevels = cfg.hideLevels;
-                        if (hideLevelsInput) hideLevelsInput.value = String(hideLevels);
-                    }
-                    if (cfg.instance && typeof cfg.instance === "string") {
-                        savedInstance = cfg.instance.trim();
-                        if (portSelect && Array.from(portSelect.options).some(o => o.value === savedInstance)) {
-                            portSelect.value = savedInstance;
-                        }
-                    }
-                    if (cfg.update_ratio != null) {
-                        const r = parseInt(cfg.update_ratio, 10);
-                        if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
-                    } else if (cfg.interval != null) {
-                        const r = parseInt(cfg.interval, 10);
-                        if (r >= 1 && intervalInput) intervalInput.value = Math.min(r, parseInt(intervalInput.max, 10) || 100);
-                    }
-                    if (cfg.alarms && typeof cfg.alarms === "object") {
-                        alarms = cfg.alarms;
-                    }
-                    computedVars = [];
-                    computedHistories = {};
-                    if (Array.isArray(cfg.computedVars)) {
-                        for (const cv of cfg.computedVars) {
-                            if (cv.name && cv.expr) addComputedVar(cv.name, cv.expr);
-                        }
-                    }
-                    if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = normalizeVarFormatConfig(cfg.varFormat);
-                    if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
-                    if (cfg.lang) currentLang = cfg.lang;
-                    if (cfg.theme) currentTheme = cfg.theme;
-                    if (typeof cfg.monitorColumns === "number" && cfg.monitorColumns >= 1 && cfg.monitorColumns <= 3) {
-                        monitorColumnsCount = cfg.monitorColumns;
-                    }
-                    saveConfig();
-                    rebuildKnownVarNamesWithDerived();
-                    sendMonitored();
-                    sendUpdateRatio();
-                    rebuildPlotArea();
-                    rebuildMonitorList();
-                    renderBrowserList();
-                    renderPlots();
-                    applyTheme(currentTheme);
-                    applyLanguage(currentLang);
-                    applyMonitorColumns();
+                    await applyImportedConfig(cfg, { autoLoadOffline: true });
                 } catch (e) {
                     console.error("Error al importar config:", e);
                 }
@@ -1393,8 +2356,143 @@
         input.click();
     }
 
-    document.getElementById("exportConfigBtn").addEventListener("click", exportConfigToFile);
-    document.getElementById("importConfigBtn").addEventListener("click", importConfigFromFile);
+    const exportConfigBtnEl = document.getElementById("exportConfigBtn");
+    const importConfigBtnEl = document.getElementById("importConfigBtn");
+    if (exportConfigBtnEl) exportConfigBtnEl.addEventListener("click", exportConfigToFile);
+    if (importConfigBtnEl) importConfigBtnEl.addEventListener("click", importConfigFromFile);
+    if (plotArea) {
+        plotArea.addEventListener("mousedown", () => {
+            try { plotArea.focus(); } catch (e) {}
+        });
+    }
+    async function refreshAdminStorageUi() {
+        if (!adminRecordingsList || !adminTemplatesList) return;
+        const r = await fetch("/api/admin/storage");
+        if (!r.ok) return;
+        const d = await r.json();
+        if (adminConfigPath) adminConfigPath.value = d?.paths?.config_file || "";
+        if (adminRecordingsPath) adminRecordingsPath.value = d?.paths?.recordings_dir || "";
+        if (adminStatePath) adminStatePath.value = d?.paths?.server_state_dir || "";
+        if (adminBasePortInput) adminBasePortInput.value = String(d?.runtime?.web_port ?? 8080);
+        if (adminPortRangeInput) adminPortRangeInput.value = String(d?.runtime?.web_port_scan_max ?? 10);
+        const fillList = (el, rows, kind) => {
+            el.innerHTML = "";
+            if (!rows || rows.length === 0) {
+                const empty = document.createElement("div");
+                empty.className = "note-item";
+                empty.textContent = "(vacío)";
+                el.appendChild(empty);
+                return;
+            }
+            rows.forEach((row) => {
+                const name = typeof row === "string" ? row : row.name;
+                const extra = typeof row === "string" ? "" : ` [${row.kind || ""}]`;
+                const item = document.createElement("div");
+                item.className = "note-item";
+                const txt = document.createElement("span");
+                txt.textContent = `${name}${extra}`;
+                const del = document.createElement("button");
+                del.className = "btn-small";
+                del.textContent = "Borrar";
+                del.addEventListener("click", async () => {
+                    if (!confirm(`¿Borrar '${name}'?`)) return;
+                    const rr = await fetch("/api/admin/storage/delete", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ kind, name }),
+                    });
+                    if (!rr.ok) {
+                        let msg = "No se pudo borrar";
+                        try { const ej = await rr.json(); if (ej?.error) msg += `: ${ej.error}`; } catch (e) {}
+                        alert(msg);
+                        return;
+                    }
+                    await refreshAdminStorageUi();
+                    await refreshTemplateUi();
+                    await refreshServerRecordings();
+                });
+                item.appendChild(txt);
+                item.appendChild(del);
+                el.appendChild(item);
+            });
+        };
+        fillList(adminRecordingsList, d.recordings || [], "recording");
+        fillList(adminTemplatesList, d.templates || [], "template");
+    }
+    if (adminStorageBtn && adminStorageOverlay) {
+        adminStorageBtn.addEventListener("click", async () => {
+            await refreshAdminStorageUi();
+            adminStorageOverlay.style.display = "flex";
+        });
+    }
+    if (adminStorageCloseBtn && adminStorageOverlay) {
+        adminStorageCloseBtn.addEventListener("click", () => {
+            adminStorageOverlay.style.display = "none";
+        });
+    }
+    if (adminStorageOverlay) {
+        adminStorageOverlay.addEventListener("click", (e) => {
+            if (e.target === adminStorageOverlay) adminStorageOverlay.style.display = "none";
+        });
+    }
+    if (adminApplyRuntimeBtn) {
+        adminApplyRuntimeBtn.addEventListener("click", async () => {
+            const base = Math.max(1, Math.min(65535, Number(adminBasePortInput?.value || 8080)));
+            const rng = Math.max(0, Math.min(100, Number(adminPortRangeInput?.value || 10)));
+            const r = await fetch("/api/admin/runtime_config", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ web_port: Math.floor(base), web_port_scan_max: Math.floor(rng) }),
+            });
+            if (!r.ok) {
+                let msg = "No se pudo aplicar la configuración";
+                try { const e = await r.json(); if (e?.error) msg += `: ${e.error}`; } catch (_) {}
+                alert(msg);
+                return;
+            }
+            await refreshAdminStorageUi();
+            alert("Configuración guardada. El puerto base aplica en el siguiente arranque.");
+        });
+    }
+    if (adminDeleteAllRecordingsBtn) {
+        adminDeleteAllRecordingsBtn.addEventListener("click", async () => {
+            if (!confirm("¿Borrar TODOS los recordings/snapshots/segmentos?")) return;
+            const r = await fetch("/api/admin/storage");
+            if (!r.ok) { alert("No se pudo cargar la lista de recordings."); return; }
+            const d = await r.json();
+            const rows = Array.isArray(d.recordings) ? d.recordings : [];
+            for (const row of rows) {
+                const name = typeof row === "string" ? row : row.name;
+                if (!name) continue;
+                await fetch("/api/admin/storage/delete", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ kind: "recording", name }),
+                });
+            }
+            await refreshAdminStorageUi();
+            await refreshServerRecordings();
+        });
+    }
+    if (adminDeleteAllTemplatesBtn) {
+        adminDeleteAllTemplatesBtn.addEventListener("click", async () => {
+            if (!confirm("¿Borrar TODAS las plantillas?")) return;
+            const r = await fetch("/api/admin/storage");
+            if (!r.ok) { alert("No se pudo cargar la lista de plantillas."); return; }
+            const d = await r.json();
+            const rows = Array.isArray(d.templates) ? d.templates : [];
+            for (const name of rows) {
+                if (!name) continue;
+                await fetch("/api/admin/storage/delete", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ kind: "template", name }),
+                });
+            }
+            await refreshAdminStorageUi();
+            await refreshTemplateUi();
+        });
+    }
 
     // --- Pause/Play ---
 
@@ -1678,6 +2776,8 @@
         arrayElemHistory = {};
         deltaByName = {};
         anomalyResults = [];
+        eventCursorIndex = -1;
+        arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
         plotInstances = {};
         expandedStats.clear();
         prevAlarmState = {};
@@ -1692,6 +2792,7 @@
             plotArea.appendChild(plotEmpty);
         }
         if (anomalyListEl) anomalyListEl.innerHTML = "";
+        renderArincBusHealth();
     }
 
     function clearUserLayout() {
@@ -1720,6 +2821,9 @@
 
     function setModeUi() {
         const offline = isOfflineMode();
+        const portControl = settingsPanel ? settingsPanel.querySelector(".port-control") : null;
+        document.body.classList.toggle("mode-live", !offline);
+        document.body.classList.toggle("mode-analysis", offline);
         if (offlineControls) offlineControls.style.display = offline ? "flex" : "none";
         if (offlinePlaybackControls) offlinePlaybackControls.style.display = offline ? "flex" : "none";
         if (anomalyPanel) anomalyPanel.style.display = offline ? "block" : "none";
@@ -1727,6 +2831,8 @@
         if (recordBtn) recordBtn.style.display = offline ? "none" : "";
         if (refreshNamesBtn) refreshNamesBtn.style.display = offline ? "none" : "";
         if (reconnectBtn) reconnectBtn.style.display = offline ? "none" : "";
+        if (pauseBtn) pauseBtn.style.display = offline ? "none" : "";
+        if (portControl) portControl.style.display = offline ? "none" : "";
         if (resetTimeBtn) resetTimeBtn.style.display = offline ? "none" : "";
         if (sendFileOnFinishCheckbox) {
             sendFileOnFinishCheckbox.disabled = offline;
@@ -1735,6 +2841,9 @@
         if (modeSelect) modeSelect.value = appMode;
         updateOfflineDatasetStatus();
         updateMarkerInfoLabel();
+        renderSegmentsUi();
+        renderNotesList();
+        renderArincBusHealth();
         // Refrescar filas para ocultar/mostrar controles dependientes de modo.
         rebuildMonitorList();
     }
@@ -1746,6 +2855,7 @@
         setModeUi();
         if (changed) {
             stopOfflinePlayback();
+            if (isLocalRecording) stopLocalRecording(false);
             if (appMode === "offline") {
                 if (ws) {
                     try { ws.close(); } catch (e) {}
@@ -2015,6 +3125,51 @@
             renderAnomalyList();
             return;
         }
+        if (window.Worker) {
+            try {
+                const payload = [];
+                for (let i = 0; i < names.length; i++) {
+                    const n = names[i];
+                    const h = isArrayElem(n) ? arrayElemHistory[n] : historyCache[n];
+                    if (!h || !h.timestamps || !h.values) continue;
+                    payload.push({ name: n, timestamps: h.timestamps, values: h.values });
+                }
+                const workerSrc = `
+                    self.onmessage = (ev) => {
+                      const { series, jumpThr, lo, hi } = ev.data;
+                      const out = [];
+                      for (const s of series) {
+                        const xs = s.timestamps || [];
+                        const ys = s.values || [];
+                        for (let i = 1; i < ys.length; i++) {
+                          const d = ys[i] - ys[i - 1];
+                          if (Math.abs(d) >= jumpThr) out.push({ ts: xs[i], name: s.name, type: "jump", detail: "Δ=" + d.toFixed(4) });
+                          if (lo != null && ys[i - 1] > lo && ys[i] <= lo) out.push({ ts: xs[i], name: s.name, type: "lo_cross", detail: "v=" + ys[i].toFixed(4) });
+                          if (hi != null && ys[i - 1] < hi && ys[i] >= hi) out.push({ ts: xs[i], name: s.name, type: "hi_cross", detail: "v=" + ys[i].toFixed(4) });
+                        }
+                      }
+                      out.sort((a,b)=>a.ts-b.ts);
+                      self.postMessage(out);
+                    };`;
+                const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: "application/javascript" })));
+                worker.onmessage = (ev) => {
+                    anomalyResults = Array.isArray(ev.data) ? ev.data : [];
+                    eventCursorIndex = anomalyResults.length > 0 ? 0 : -1;
+                    renderAnomalyList();
+                    renderArincBusHealth();
+                    worker.terminate();
+                };
+                worker.postMessage({
+                    series: payload,
+                    jumpThr: Math.max(0, Number(anomalyJumpInput?.value) || 1.0),
+                    lo: anomalyLoInput && anomalyLoInput.value !== "" ? Number(anomalyLoInput.value) : null,
+                    hi: anomalyHiInput && anomalyHiInput.value !== "" ? Number(anomalyHiInput.value) : null,
+                });
+                return;
+            } catch (e) {
+                // Fallback a ejecución local.
+            }
+        }
         const plottedScalarNames = new Set();
         const plottedArrayElems = [];
         for (let i = 0; i < names.length; i++) {
@@ -2074,7 +3229,9 @@
             }
         }
         anomalyResults.sort((a, b) => a.ts - b.ts);
+        eventCursorIndex = anomalyResults.length > 0 ? 0 : -1;
         renderAnomalyList();
+        renderArincBusHealth();
     }
 
     function startOfflinePlayback() {
@@ -2149,6 +3306,11 @@
             rebuildMonitorList();
         }
         offlineDataset = ds;
+        if (typeof opts.recordingName === "string") {
+            offlineRecordingName = opts.recordingName;
+        } else if (!offlineRecordingName && ds && ds.sourceName && recordingSelect && Array.from(recordingSelect.options).some((o) => o.value === ds.sourceName)) {
+            offlineRecordingName = ds.sourceName;
+        }
         markerA = null;
         markerB = null;
         deltaByName = {};
@@ -2174,6 +3336,8 @@
         if (!preserveLayout) rebuildMonitorList();
         updateOfflineDatasetStatus();
         updateMarkerInfoLabel();
+        renderSegmentsUi();
+        renderNotesList();
         schedulePlotRender();
     }
 
@@ -2183,7 +3347,7 @@
         if (!r.ok) throw new Error("No se pudo descargar la grabación");
         const text = await r.text();
         const ds = parseTsvDataset(text, filename);
-        loadOfflineDataset(ds, opts);
+        loadOfflineDataset(ds, { ...opts, recordingName: filename });
     }
 
     function connect() {
@@ -2215,6 +3379,7 @@
             sendMonitored();
             sendAlarmsToBackend();
             sendSendFileOnFinish();
+            restorePendingGeneratorsIfPossible();
         };
         socket.onclose = () => {
             if (thisId !== connectionId) return;
@@ -2450,6 +3615,12 @@
     function renderBrowserList() {
         const filter = varFilter.value.toLowerCase();
         const filtered = knownVarNames.filter(n => !filter || n.toLowerCase().includes(filter));
+        if (!groupVariables && filtered.length > 350) {
+            renderBrowserListVirtualFlat(filtered);
+            browserVirtualEnabled = true;
+            return;
+        }
+        browserVirtualEnabled = false;
         let tree = buildTree(filtered);
 
         if (groupVariables) {
@@ -2469,6 +3640,78 @@
 
         varBrowserList.innerHTML = "";
         varBrowserList.appendChild(frag);
+        browserListDirty = false;
+    }
+
+    function renderBrowserListVirtualFlat(filtered) {
+        browserVirtualRows = filtered.slice().sort();
+        const rows = browserVirtualRows;
+        const rowH = browserVirtualRowPx;
+        const viewH = Math.max(120, varBrowserList.clientHeight || 420);
+        const scrollTop = varBrowserList.scrollTop || 0;
+        const from = Math.max(0, Math.floor(scrollTop / rowH) - browserVirtualOverscan);
+        const maxCount = Math.ceil(viewH / rowH) + browserVirtualOverscan * 2;
+        const to = Math.min(rows.length, from + maxCount);
+
+        const root = document.createElement("div");
+        root.className = "browser-virtual-window";
+
+        const topSpacer = document.createElement("div");
+        topSpacer.className = "browser-virtual-spacer";
+        topSpacer.style.height = `${from * rowH}px`;
+        root.appendChild(topSpacer);
+
+        for (let i = from; i < to; i++) {
+            const name = rows[i];
+            const inMonitor = monitoredNames.has(name);
+            const selected = browserSelection.has(name);
+            const el = document.createElement("div");
+            el.className = "var-list-item" + (selected ? " selected" : "") + (inMonitor ? " in-monitor" : "");
+            el.style.paddingLeft = "8px";
+            el.style.height = `${rowH}px`;
+            el.style.display = "flex";
+            el.style.alignItems = "center";
+            el.draggable = true;
+            el.addEventListener("dragstart", (e) => {
+                e.dataTransfer.setData("text/plain", name);
+                e.dataTransfer.effectAllowed = "copy";
+            });
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = selected;
+            cb.disabled = inMonitor;
+            const label = document.createElement("span");
+            label.className = "tree-leaf-name";
+            label.textContent = name;
+            label.title = name;
+            el.appendChild(cb);
+            el.appendChild(label);
+            if (!inMonitor) {
+                el.addEventListener("click", (e) => {
+                    if (e.target === cb) {
+                        if (cb.checked) browserSelection.add(name); else browserSelection.delete(name);
+                    } else {
+                        if (browserSelection.has(name)) browserSelection.delete(name); else browserSelection.add(name);
+                    }
+                    renderBrowserListVirtualFlat(filtered);
+                });
+            }
+            root.appendChild(el);
+        }
+
+        const bottomSpacer = document.createElement("div");
+        bottomSpacer.className = "browser-virtual-spacer";
+        bottomSpacer.style.height = `${Math.max(0, (rows.length - to) * rowH)}px`;
+        root.appendChild(bottomSpacer);
+
+        varBrowserList.innerHTML = "";
+        varBrowserList.appendChild(root);
+        if (!varBrowserList._virtualScrollHooked) {
+            varBrowserList._virtualScrollHooked = true;
+            varBrowserList.addEventListener("scroll", () => {
+                if (browserVirtualEnabled) renderBrowserListVirtualFlat(browserVirtualRows);
+            });
+        }
         browserListDirty = false;
     }
 
@@ -2861,6 +4104,7 @@
         }
 
         Object.values(existingMap).forEach(el => el.remove());
+        monitorListEl.classList.toggle("monitor-virtualized", monitoredOrder.length > 300);
         updateMonitorItemStyles();
     }
 
@@ -3484,14 +4728,37 @@
                 schedulePlotRender();
                 updateStatsPanel(wrap, name);
             });
+            const encLbl = document.createElement("span");
+            encLbl.className = "fmt-label";
+            encLbl.textContent = "Enc:";
+            const encSel = document.createElement("select");
+            encSel.className = "fmt-select";
+            encSel.innerHTML = '<option value="">auto</option><option value="bnr">BNR</option><option value="bcd">BCD</option><option value="discrete">DIS</option>';
+            encSel.value = cfg.encodingOverride || "";
+            encSel.addEventListener("click", (e) => e.stopPropagation());
+            encSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                getArincConfig(name).encodingOverride = encSel.value || "";
+                rebuildArincDerivedHistoryForBase(name);
+                if (varsByName[name] && Number.isFinite(Number(varsByName[name].value))) {
+                    const ts = varsByName[name].timestamp || (Date.now() / 1000);
+                    pushArincDerivedSample(name, ts, Number(varsByName[name].value), false);
+                }
+                saveConfig();
+                updateMonitorValues();
+                schedulePlotRender();
+                updateStatsPanel(wrap, name);
+            });
             const info = document.createElement("span");
             info.className = "arinc-info";
             info.textContent = d
-                ? `Label ${d.labelOct} (${d.labelName})`
+                ? `Label ${d.labelOct} (${d.labelName}) | PAR:${d.parityOk ? "OK" : "ERR"} SSM:${d.ssmOk ? "OK" : "WARN"} RNG:${d.rangeOk ? "OK" : "WARN"}`
                 : "ARINC: sin dato numérico";
             arincRow.appendChild(info);
             arincRow.appendChild(lsbLbl);
             arincRow.appendChild(lsbIn);
+            arincRow.appendChild(encLbl);
+            arincRow.appendChild(encSel);
 
             let arincSubvars = panel.querySelector(".arinc-subvars");
             if (!arincSubvars) {
@@ -3574,10 +4841,38 @@
                     schedulePlotRender();
                 });
                 sel.addEventListener("click", (e) => e.stopPropagation());
+                let alarmBtn = null;
+                if (isLiveMode()) {
+                    alarmBtn = document.createElement("span");
+                    alarmBtn.className = "arr-alarm-btn" + (alarms[dName] ? " arr-alarm-active" : "");
+                    if (activeAlarms.has(dName)) alarmBtn.classList.add("alarm-firing");
+                    alarmBtn.textContent = "⚠";
+                    alarmBtn.dataset.elemName = dName;
+                    alarmBtn.title = alarms[dName]
+                        ? `Alarma: Lo:${alarms[dName].lo ?? "-"} Hi:${alarms[dName].hi ?? "-"} (clic para quitar)`
+                        : "Configurar alarma";
+                    alarmBtn.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        if (alarms[dName]) {
+                            delete alarms[dName];
+                            delete prevAlarmState[dName];
+                            alarmBtn.className = "arr-alarm-btn";
+                            alarmBtn.textContent = "⚠";
+                            alarmBtn.title = "Configurar alarma";
+                            saveConfig();
+                            sendAlarmsToBackend();
+                            updateMonitorItemStyles();
+                            refreshAllStats();
+                        } else {
+                            showArrayElemAlarmForm(row, dName, alarmBtn);
+                        }
+                    });
+                }
 
                 row.appendChild(lbl);
                 row.appendChild(val);
                 row.appendChild(sel);
+                if (alarmBtn) row.appendChild(alarmBtn);
                 arincSubvars.appendChild(row);
             }
         } else if (arincRow) {
@@ -3612,6 +4907,8 @@
             let txt = "\u26A0 ";
             if (a.lo !== null) txt += "Lo:" + a.lo + " ";
             if (a.hi !== null) txt += "Hi:" + a.hi;
+            if (a.hys) txt += " Hys:" + a.hys;
+            if (a.delayMs) txt += " Dly:" + a.delayMs + "ms";
             label.textContent = txt;
 
             const removeBtn = document.createElement("button");
@@ -3782,6 +5079,20 @@
         hiInput.className = "alarm-input";
         hiInput.title = "Umbral alto";
 
+        const hysInput = document.createElement("input");
+        hysInput.type = "number";
+        hysInput.step = "any";
+        hysInput.placeholder = "Hys";
+        hysInput.className = "alarm-input";
+        hysInput.title = "Histéresis";
+
+        const delayInput = document.createElement("input");
+        delayInput.type = "number";
+        delayInput.step = "1";
+        delayInput.placeholder = "Delay ms";
+        delayInput.className = "alarm-input";
+        delayInput.title = "Retardo de disparo (ms)";
+
         const okBtn = document.createElement("button");
         okBtn.className = "btn-alarm-ok";
         okBtn.textContent = "\u2713";
@@ -3790,10 +5101,12 @@
             e.stopPropagation();
             const lo = loInput.value.trim() !== "" ? parseFloat(loInput.value) : null;
             const hi = hiInput.value.trim() !== "" ? parseFloat(hiInput.value) : null;
+            const hys = hysInput.value.trim() !== "" ? Math.max(0, parseFloat(hysInput.value)) : 0;
+            const delayMs = delayInput.value.trim() !== "" ? Math.max(0, parseInt(delayInput.value, 10) || 0) : 0;
             if (lo === null && hi === null) {
                 delete alarms[name];
             } else {
-                alarms[name] = { lo, hi };
+                alarms[name] = { lo, hi, hys, delayMs };
             }
             saveConfig();
             sendAlarmsToBackend();
@@ -3813,6 +5126,8 @@
 
         form.appendChild(loInput);
         form.appendChild(hiInput);
+        form.appendChild(hysInput);
+        form.appendChild(delayInput);
         form.appendChild(okBtn);
         form.appendChild(cancelBtn);
         alarmRow.appendChild(form);
@@ -3821,30 +5136,100 @@
     }
 
     function refreshAllStats() {
+        const active = document.activeElement;
         for (const name of expandedStats) {
             const wrap = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
-            if (wrap) updateStatsPanel(wrap, name);
+            if (!wrap) continue;
+            // Evita reconstruir el panel mientras se interactua con sus controles
+            // (selects/inputs ARINC, alarmas, etc.) para que no se cierre el desplegable activo.
+            if (active && wrap.contains(active)) continue;
+            updateStatsPanel(wrap, name);
         }
     }
 
     function checkAlarmEntry(name, value, newActive, triggered) {
         const a = alarms[name];
         if (!a || typeof value !== "number") return;
-        let alarming = false;
-        let reason = "";
-        if (a.hi !== null && value > a.hi) {
-            alarming = true;
-            reason = `${name} = ${value.toFixed(4)} > Hi:${a.hi}`;
-        }
-        if (a.lo !== null && value < a.lo) {
-            alarming = true;
-            reason = `${name} = ${value.toFixed(4)} < Lo:${a.lo}`;
-        }
-        if (alarming) {
-            newActive.add(name);
-            if (!(prevAlarmState[name] || false)) {
-                triggered.push({ name, reason, value });
+        const hys = Number.isFinite(Number(a.hys)) ? Math.max(0, Number(a.hys)) : 0;
+        const delayMs = Number.isFinite(Number(a.delayMs)) ? Math.max(0, Number(a.delayMs)) : 0;
+        const prev = !!prevAlarmState[name];
+        let overHi = (a.hi !== null && value > a.hi);
+        let underLo = (a.lo !== null && value < a.lo);
+        if (prev) {
+            const clearHi = (a.hi === null) || value <= ((a.hi ?? value) - hys);
+            const clearLo = (a.lo === null) || value >= ((a.lo ?? value) + hys);
+            if (clearHi && clearLo) {
+                delete alarmPendingSince[name];
+                return;
             }
+            overHi = a.hi !== null && value > (a.hi - hys);
+            underLo = a.lo !== null && value < (a.lo + hys);
+        }
+        const alarming = overHi || underLo;
+        if (!alarming) {
+            delete alarmPendingSince[name];
+            return;
+        }
+        const nowMs = Date.now();
+        if (!alarmPendingSince[name]) alarmPendingSince[name] = nowMs;
+        const elapsed = nowMs - alarmPendingSince[name];
+        if (elapsed < delayMs) return;
+        let reason = "";
+        if (overHi && a.hi !== null) reason = `${name} = ${value.toFixed(4)} > Hi:${a.hi}`;
+        if (underLo && a.lo !== null) reason = `${name} = ${value.toFixed(4)} < Lo:${a.lo}`;
+        newActive.add(name);
+        if (!prev) triggered.push({ name, reason, value });
+    }
+
+    function getNumericValueForAlarmName(name) {
+        if (!name) return null;
+        if (isArrayElem(name)) {
+            const br = name.lastIndexOf("[");
+            const base = name.substring(0, br);
+            const idx = parseInt(name.substring(br + 1), 10);
+            const vd = varsByName[base];
+            if (!vd || !Array.isArray(vd.value) || !Number.isFinite(idx) || idx < 0 || idx >= vd.value.length) return null;
+            const v = vd.value[idx];
+            return typeof v === "number" ? v : Number(v);
+        }
+        const vd = varsByName[name];
+        if (!vd) return null;
+        if (Array.isArray(vd.value)) return null;
+        return typeof vd.value === "number" ? vd.value : (vd.value === true ? 1 : vd.value === false ? 0 : Number(vd.value));
+    }
+
+    function evaluateLocalAlarmsNow() {
+        if (!isLiveMode()) return;
+        const newActive = new Set();
+        const triggered = [];
+        for (const name of Object.keys(alarms || {})) {
+            // Backend evalua alarmas de variables reales por ciclo.
+            // Frontend solo mantiene temporalmente las virtuales (array elem / ARINC derivadas).
+            if (!isArrayElem(name) && !isArincDerivedName(name)) continue;
+            const val = getNumericValueForAlarmName(name);
+            if (!Number.isFinite(val)) continue;
+            checkAlarmEntry(name, val, newActive, triggered);
+        }
+        // Conserva alarmas activas notificadas por backend y añade las virtuales locales.
+        const merged = new Set(Array.from(activeAlarms).filter((n) => !isArrayElem(n) && !isArincDerivedName(n)));
+        newActive.forEach((n) => merged.add(n));
+        activeAlarms = merged;
+        const nextPrev = {};
+        for (const name of Object.keys(alarms || {})) {
+            if (isArrayElem(name) || isArincDerivedName(name)) nextPrev[name] = newActive.has(name);
+        }
+        // Mantener estado previo de reales controlado por backend.
+        for (const [k, v] of Object.entries(prevAlarmState)) {
+            if (!isArrayElem(k) && !isArincDerivedName(k)) nextPrev[k] = !!v;
+        }
+        prevAlarmState = nextPrev;
+        updateAlarmActiveDOM();
+        if (triggered.length > 0) {
+            const reasons = triggered.map(t => `[LOCAL] ${t.reason}`).join(" | ");
+            sendAlarmNotification(reasons);
+            showAlarmBanner(reasons);
+            plotsPaused = true;
+            updatePauseBtn();
         }
     }
 
@@ -3852,7 +5237,12 @@
         const payload = {};
         for (const [name, cfg] of Object.entries(alarms)) {
             if (cfg && (cfg.lo != null || cfg.hi != null)) {
-                payload[name] = { lo: cfg.lo ?? null, hi: cfg.hi ?? null };
+                payload[name] = {
+                    lo: cfg.lo ?? null,
+                    hi: cfg.hi ?? null,
+                    hys: Number.isFinite(Number(cfg.hys)) ? Number(cfg.hys) : 0,
+                    delayMs: Number.isFinite(Number(cfg.delayMs)) ? Number(cfg.delayMs) : 0,
+                };
             }
         }
         sendWsAction({ action: "set_alarms", alarms: payload });
@@ -3903,7 +5293,10 @@
 
     function onAlarmClearedFromBackend(names) {
         if (!Array.isArray(names)) return;
-        names.forEach(n => activeAlarms.delete(n));
+        names.forEach(n => {
+            activeAlarms.delete(n);
+            delete alarmPendingSince[n];
+        });
         updateAlarmActiveDOM();
     }
 
@@ -4287,7 +5680,8 @@
             row.className = "alarm-list-item";
             const label = document.createElement("span");
             label.className = "alarm-list-name";
-            label.textContent = name;
+            const isLocalVirtual = isArrayElem(name) || isArincDerivedName(name);
+            label.textContent = isLocalVirtual ? `${name} [LOCAL]` : name;
             const btn = document.createElement("button");
             btn.className = "alarm-list-remove";
             btn.textContent = "×";
@@ -4581,6 +5975,11 @@
 
     function schedulePlotRender() {
         if (plotsPaused) return;
+        if (adaptiveLoadEnabled && document.hidden) return;
+        if (adaptiveLoadEnabled) {
+            const now = performance.now();
+            if (now < nextAllowedRenderAt) return;
+        }
         if (!plotRafPending) {
             plotRafPending = true;
             requestAnimationFrame(() => {
@@ -4718,7 +6117,7 @@
 
     function handleNewGraphDrop(name) {
         if (!name) return;
-        if (!monitoredNames.has(name) && !isArrayElem(name)) {
+        if (!monitoredNames.has(name) && !isArrayElem(name) && !isArincDerivedName(name)) {
             ensureArincBaseMonitored(name);
             ensureMonitoredName(name);
             sendMonitored();
@@ -4879,7 +6278,7 @@
                 const name = e.dataTransfer.getData("text/plain");
                 if (!name) return;
                 // Si la variable aun no esta monitorizada, añadirla
-                if (!monitoredNames.has(name) && !isArrayElem(name)) {
+                if (!monitoredNames.has(name) && !isArrayElem(name) && !isArincDerivedName(name)) {
                     ensureArincBaseMonitored(name);
                     ensureMonitoredName(name);
                     sendMonitored();
@@ -4932,6 +6331,24 @@
             out.push(sum / (hi - lo + 1));
         }
         return out;
+    }
+
+    function downsampleSeries(xs, ys, maxPoints) {
+        if (!Array.isArray(xs) || !Array.isArray(ys) || xs.length <= maxPoints) {
+            return { x: xs, y: ys };
+        }
+        const step = Math.max(1, Math.ceil(xs.length / maxPoints));
+        const x = [];
+        const y = [];
+        for (let i = 0; i < xs.length; i += step) {
+            x.push(xs[i]);
+            y.push(ys[i]);
+        }
+        if (x[x.length - 1] !== xs[xs.length - 1]) {
+            x.push(xs[xs.length - 1]);
+            y.push(ys[ys.length - 1]);
+        }
+        return { x, y };
     }
 
     function applySharedZoomToOtherPlots(sourceGid, range, autorange) {
@@ -5004,7 +6421,52 @@
         });
     }
 
+    function removeSeriesAssignmentFromLegend(varName) {
+        if (!varName) return;
+        if (isArrayElem(varName)) {
+            delete arrayElemAssignment[varName];
+            delete arrayElemHistory[varName];
+        } else if (Object.prototype.hasOwnProperty.call(varGraphAssignment, varName)) {
+            if (monitoredNames.has(varName)) varGraphAssignment[varName] = "";
+            else delete varGraphAssignment[varName];
+        }
+        pruneEmptyGraphs();
+        rebuildMonitorList();
+        saveConfig();
+        schedulePlotRender();
+    }
+
+    function attachLegendRemoveHandler(containerEl) {
+        if (!containerEl || containerEl._varmonLegendHooked) return;
+        containerEl._varmonLegendHooked = true;
+        containerEl.on("plotly_legendclick", (evt) => {
+            if (!evt) return false;
+            const idx = Number(evt.curveNumber);
+            const dataArr = evt.data || [];
+            const trace = Number.isFinite(idx) ? dataArr[idx] : null;
+            const varName = trace && trace.meta ? trace.meta.varName : null;
+            if (varName) removeSeriesAssignmentFromLegend(varName);
+            return false; // Evita toggle por defecto; click en leyenda = quitar serie.
+        });
+    }
+
+    function attachOfflineClickSeekHandler(containerEl) {
+        if (!containerEl || containerEl._varmonClickSeekHooked) return;
+        containerEl._varmonClickSeekHooked = true;
+        containerEl.on("plotly_click", (evt) => {
+            if (!isOfflineMode() || !offlineDataset || !evt || !Array.isArray(evt.points) || evt.points.length === 0) return;
+            const p = evt.points[0];
+            const x = Number(p && p.x);
+            if (!Number.isFinite(x)) return;
+            const origin = Number(containerEl._varmonTimeOrigin);
+            const absTs = Number.isFinite(origin) ? (origin + x) : x;
+            applyOfflineTime(absTs);
+            schedulePlotRender();
+        });
+    }
+
     function renderPlots() {
+        const tRender0 = performance.now();
         const windowSec = parseInt(timeWindowSelect.value);
         const activeSlots = [];
         // Origen = mínimo timestamp real en los datos mostrados, para que al recortar el buffer
@@ -5038,6 +6500,7 @@
             const slotEl = document.getElementById("plotSlot_" + gid);
             const containerEl = document.getElementById("plotContainer_" + gid);
             if (!slotEl || !containerEl) continue;
+            containerEl._varmonTimeOrigin = Number(origin != null ? origin : 0);
 
             slotEl.style.display = "flex";
             activeSlots.push(gid);
@@ -5070,13 +6533,16 @@
                 }
                 const t0 = origin != null ? origin : xs[0];
                 const smoothWindow = Math.max(1, parseInt(document.getElementById("smoothPlotsSelect")?.value, 10) || 1);
-                const yPlot = smoothWindow > 1 ? movingAverage(ys, smoothWindow) : ys;
+                const ySmooth = smoothWindow > 1 ? movingAverage(ys, smoothWindow) : ys;
+                const relXs = xs.map(t => t - t0);
+                const ds = downsampleSeries(relXs, ySmooth, downsampleMaxPoints);
                 traces.push({
-                    x: xs.map(t => t - t0),
-                    y: yPlot,
+                    x: ds.x,
+                    y: ds.y,
                     type: "scatter",
                     mode: "lines",
-                    name: name,
+                    name: `${name} ✕`,
+                    meta: { varName: name },
                     line: {
                         color: TRACE_COLORS[idx % TRACE_COLORS.length],
                         width: 1.5,
@@ -5206,13 +6672,40 @@
                 Plotly.newPlot(containerEl, traces, layout, config);
                 plotInstances[gid] = true;
                 attachSharedZoomHandler(containerEl, gid);
+                attachLegendRemoveHandler(containerEl);
+                attachOfflineClickSeekHandler(containerEl);
             } else {
                 Plotly.react(containerEl, traces, layout, config);
                 attachSharedZoomHandler(containerEl, gid);
+                attachLegendRemoveHandler(containerEl);
+                attachOfflineClickSeekHandler(containerEl);
             }
         }
 
         plotEmpty.style.display = graphList.length > 0 ? "none" : "flex";
+        const elapsed = performance.now() - tRender0;
+        const tracesCount = graphList.reduce((acc, gid) => acc + getVarsForGraph(gid).length, 0);
+        let points = 0;
+        for (const h of Object.values(historyCache)) points += (h && h.values ? h.values.length : 0);
+        for (const h of Object.values(arrayElemHistory)) points += (h && h.values ? h.values.length : 0);
+        renderStats.lastMs = elapsed;
+        renderStats.avgMs = renderStats.avgMs <= 0 ? elapsed : (renderStats.avgMs * 0.85 + elapsed * 0.15);
+        renderStats.traces = tracesCount;
+        renderStats.points = points;
+        const now = performance.now();
+        if (renderStats.lastTick > 0) {
+            const dt = (now - renderStats.lastTick) / 1000;
+            if (dt > 0) renderStats.fps = 1 / dt;
+        }
+        renderStats.lastTick = now;
+        renderStats.ticks += 1;
+        if (adaptiveLoadEnabled) {
+            const penalty = Math.min(180, Math.max(0, renderStats.avgMs * 1.25));
+            nextAllowedRenderAt = performance.now() + penalty;
+        } else {
+            nextAllowedRenderAt = 0;
+        }
+        renderPerfTelemetry();
     }
 
     timeWindowSelect.addEventListener("change", () => { saveConfig(); renderPlots(); });
@@ -5292,6 +6785,7 @@
         clearUserLayout();
         clearDataBuffers();
         offlineDataset = null;
+        offlineRecordingName = "";
         markerA = null;
         markerB = null;
         updateOfflineDatasetStatus();
@@ -5484,9 +6978,15 @@
             }
             trimLocalHistory();
         }
+        if (isLocalRecording && isLiveMode()) {
+            localRecordSamples.push(buildLocalFrontendSample(nowTs));
+            if (localRecordSamples.length > 120000) localRecordSamples = localRecordSamples.slice(-120000);
+        }
         schedulePlotRender();
 
         updateMonitorValues();
+        evaluateLocalAlarmsNow();
+        renderArincBusHealth();
     }
 
     // --- Resize ---
@@ -5518,7 +7018,7 @@
     document.addEventListener("keydown", (e) => {
         const tag = (e.target.tagName || "").toLowerCase();
         const isInput = tag === "input" || tag === "textarea" || tag === "select" || e.target.isContentEditable;
-        if (isInput && e.key !== "Escape") return;
+        if (isInput && e.key !== "Escape" && !(e.ctrlKey || e.metaKey)) return;
 
         if (e.key === "Escape") {
             if (helpOverlay.style.display === "flex") { helpOverlay.style.display = "none"; return; }
@@ -5533,6 +7033,16 @@
             return;
         }
         const k = e.key.toLowerCase();
+        if ((e.ctrlKey || e.metaKey) && k === "z" && !e.shiftKey) {
+            e.preventDefault();
+            doLayoutUndo();
+            return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (k === "y" || (k === "z" && e.shiftKey))) {
+            e.preventDefault();
+            doLayoutRedo();
+            return;
+        }
         if (k === "r" && !e.ctrlKey && !e.metaKey) {
             e.preventDefault();
             recordBtn.click();

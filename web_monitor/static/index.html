@@ -49,11 +49,17 @@
                 <span id="advNetMsgS" class="adv-val">msg/s: —</span>
                 <span id="advNetMbS" class="adv-val">MB/s: —</span>
             </div>
+            <div class="adv-block">
+                <span class="adv-label">UI</span>
+                <span id="advUiRenderMs" class="adv-val">render: —</span>
+                <span id="advUiFps" class="adv-val">fps: —</span>
+                <span id="advUiPts" class="adv-val">pts: —</span>
+            </div>
         </div>
         <div class="header-right">
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <div id="offlineControls" class="offline-controls" style="display:none">
-                <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar TSV A</button>
+                <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar</button>
                 <input type="file" id="localTsvInput" accept=".tsv,text/tab-separated-values" style="display:none">
                 <label id="recordingSelectLabel">Run A:
                     <select id="recordingSelectA">
@@ -69,15 +75,16 @@
             <button id="settingsBtn" class="btn-settings" title="Ajustes">&#9881;</button>
             <div id="settingsPanel" class="settings-panel" style="display:none">
                 <div class="settings-group">
+                    <div class="settings-section-title">General</div>
                     <div class="port-control">
                         <label id="instanceLabel">Instancia:
                             <select id="portSelect" class="port-select"></select>
                         </label>
+                        <button id="reconnectBtn" class="btn-small" title="Reconectar con la instancia seleccionada">Conectar</button>
                     </div>
                     <label id="pollLabel">Rel act:
                         <input type="number" id="intervalInput" value="5" min="1" max="100" step="1" title="Actualizar interfaz cada N ciclos (1 = cada ciclo, 5 = por defecto)">
                     </label>
-                    <button id="reconnectBtn" class="btn-small" title="Reconectar con la instancia seleccionada">Conectar</button>
                     <label><span id="langLabel">Idioma:</span>
                         <select id="langSelect">
                             <option value="es">Español</option>
@@ -110,8 +117,27 @@
                             <option value="60">1 min</option>
                         </select>
                     </label>
-                    <button id="exportConfigBtn" class="btn-small" title="Guardar configuración a archivo">&#128190; Guardar</button>
-                    <button id="importConfigBtn" class="btn-small" title="Cargar configuración desde archivo">&#128194; Cargar</button>
+                    <div class="settings-section-title">Layout y rendimiento</div>
+                    <div class="monitor-menu-row">
+                        <button id="layoutUndoBtn" class="btn-small" title="Deshacer cambios de layout">↶ Undo</button>
+                        <button id="layoutRedoBtn" class="btn-small" title="Rehacer cambios de layout">↷ Redo</button>
+                    </div>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="adaptiveLoadCheckbox" checked>
+                        <span>Carga adaptativa</span>
+                    </label>
+                    <label class="settings-adv-checkbox">Snapshot frames:
+                        <input type="number" id="snapshotFramesInput" min="2" step="1" value="40">
+                    </label>
+                    <div class="settings-section-title">Persistencia servidor</div>
+                    <div class="monitor-menu-row template-row">
+                        <span class="settings-inline-label">Plantillas (estado completo):</span>
+                        <select id="dashboardTemplateSelect" title="Plantillas dashboard"></select>
+                        <button id="templateSaveBtn" class="btn-small" title="Guardar layout actual como plantilla">💾 Guardar</button>
+                        <button id="templateLoadBtn" class="btn-small" title="Cargar plantilla seleccionada">📂 Cargar</button>
+                    </div>
+                    <button id="adminStorageBtn" class="btn-small" title="Abrir gestión avanzada de archivos y puertos">Gestión avanzada…</button>
+                    <div class="settings-section-title">Opciones UI / descarga</div>
                     <label class="settings-adv-checkbox">
                         <input type="checkbox" id="sendFileOnFinishCheckbox" title="Al terminar grabación o alarma, enviar fichero al navegador para descarga">
                         <span id="sendFileOnFinishLabel">Enviar fichero al terminar</span>
@@ -128,7 +154,47 @@
     <div id="recordPathToast" class="record-path-toast" style="display:none" role="status">
         <span id="recordPathLabel">Guardado en:</span>
         <code id="recordPathText"></code>
-        <button id="recordPathAnalyzeBtn" class="btn-small record-path-analyze-btn" style="display:none">Entrar a análisis</button>
+        <button id="recordPathAnalyzeBtn" class="btn-small record-path-analyze-btn" style="display:none" title="Abrir este archivo en modo análisis manteniendo el layout">Analizar este archivo</button>
+    </div>
+    <div id="adminStorageOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal" style="max-width:920px; width:min(92vw,920px)">
+            <h3>Gestión avanzada de archivos</h3>
+            <div class="help-body">
+                <div class="settings-group" style="grid-template-columns: 1fr 1fr;">
+                    <label class="admin-full-row">Config:
+                        <input id="adminConfigPath" type="text" readonly>
+                    </label>
+                    <label class="admin-full-row">Recordings:
+                        <input id="adminRecordingsPath" type="text" readonly>
+                    </label>
+                    <label class="admin-full-row">Estado servidor:
+                        <input id="adminStatePath" type="text" readonly>
+                    </label>
+                    <div class="admin-runtime-row">
+                        <label>Puerto base Python:
+                            <input id="adminBasePortInput" type="number" min="1" max="65535" step="1" value="8080">
+                        </label>
+                        <label>Incremento puertos:
+                            <input id="adminPortRangeInput" type="number" min="0" max="100" step="1" value="10">
+                        </label>
+                        <button id="adminApplyRuntimeBtn" class="btn-small" title="Guardar cambios de configuración avanzada">Guardar cambios</button>
+                    </div>
+                </div>
+                <h4>Recordings / Snapshots / Segmentos</h4>
+                <div class="monitor-menu-row">
+                    <button id="adminDeleteAllRecordingsBtn" class="btn-small" title="Borrar todos los recordings/snapshots/segmentos">🗑 Borrar todos (recordings)</button>
+                </div>
+                <div id="adminRecordingsList" class="notes-list"></div>
+                <h4>Plantillas</h4>
+                <div class="monitor-menu-row">
+                    <button id="adminDeleteAllTemplatesBtn" class="btn-small" title="Borrar todas las plantillas">🗑 Borrar todas (plantillas)</button>
+                </div>
+                <div id="adminTemplatesList" class="notes-list"></div>
+            </div>
+            <div class="help-actions">
+                <button id="adminStorageCloseBtn" class="btn-small">Cerrar</button>
+            </div>
+        </div>
     </div>
 
     <div id="multiInstanceWarning" class="warning-banner" style="display:none" role="alert">
@@ -157,7 +223,7 @@
                 <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
                 <button id="selectAll" class="btn-small">Sel. todo</button>
                 <button id="selectNone" class="btn-small">Ninguno</button>
-                <button id="addToMonitor" class="btn-primary">Monitorizar &rarr;</button>
+                <button id="addToMonitor" class="btn-primary">+ Monitorizar</button>
             </div>
             <div id="varBrowserList" class="var-list"></div>
         </div>
@@ -310,13 +376,22 @@ web_port = 8080          # Puerto de esta web (solo Python)
             <div class="col-header col-monitor-header">
                 <h2 id="colMonitorTitle">Monitorizando</h2>
                 <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
-                <button id="browserToggleBtn" class="btn-small" title="Variables disponibles">&#128269;</button>
+                <button id="snapshotBtn" class="btn-small btn-snapshot" title="Crear snapshot TSV (usa el valor de 'Snapshot frames' en Ajustes)">&#128247;</button>
+                <button id="browserToggleBtn" class="btn-small" title="Añadir variables a monitorizar">+</button>
                 <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
                 <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
                 <div id="monitorMenuPanel" class="monitor-menu-panel" style="display:none">
                     <div class="monitor-menu-row">
                         <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
+                        <button id="localRecordBtn" class="btn-small" title="Grabar en local desde frontend (incluye virtuales)">● Rec local</button>
                         <button id="resetConfigBtn" class="btn-small" title="Eliminar toda la configuración">Reset</button>
+                    </div>
+                    <label class="settings-adv-checkbox">Compactado monitor:
+                        <input type="range" id="compactMonitorSlider" min="0" max="100" step="1" value="0" title="Más a la derecha = monitor más compacto">
+                    </label>
+                    <div class="monitor-menu-row">
+                        <button id="expandAllMonBtn" class="btn-small" title="Desplegar paneles de todas las variables monitorizadas">Desplegar todo</button>
+                        <button id="collapseAllMonBtn" class="btn-small" title="Colapsar paneles de todas las variables monitorizadas">Colapsar todo</button>
                     </div>
                     <label id="hideLevelsLabel">Niveles:
                         <select id="hideLevelsInput">
@@ -336,6 +411,7 @@ web_port = 8080          # Puerto de esta web (solo Python)
             </div>
             <div id="monitorList" class="monitor-list"></div>
         </section>
+        <div id="monitorResizeHandle" class="monitor-resize-handle" role="separator" aria-orientation="vertical" title="Redimensionar panel de monitorización"></div>
 
         <section class="col col-plot">
             <div class="col-header">
@@ -374,7 +450,7 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
                 </div>
             </div>
-            <div id="plotArea" class="plot-area">
+            <div id="plotArea" class="plot-area" tabindex="0">
                 <div id="plotEmpty" class="plot-empty">Selecciona variables y asígnalas a un gráfico</div>
             </div>
             <div id="anomalyPanel" class="anomaly-panel" style="display:none">
@@ -388,10 +464,29 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     <label>Hi:
                         <input id="anomalyHiInput" type="number" step="any" value="">
                     </label>
+                    <label>Max pts:
+                        <input id="downsampleMaxPointsInput" type="number" min="200" step="100" value="2000">
+                    </label>
                     <button id="runAnomalyScanBtn" class="btn-small">Analizar anomalías</button>
                     <button id="clearAnomalyScanBtn" class="btn-small">Limpiar</button>
+                    <button id="prevEventBtn" class="btn-small">◀ Evento</button>
+                    <button id="nextEventBtn" class="btn-small">Evento ▶</button>
+                    <button id="addNoteBtn" class="btn-small" title="Añadir nota en el tiempo actual (se elimina con ✕)">+ Nota</button>
+                    <button id="exportPdfReportBtn" class="btn-small">PDF</button>
                 </div>
                 <div id="anomalyList" class="anomaly-list"></div>
+                <div id="notesList" class="notes-list"></div>
+                <div class="segment-controls">
+                    <button id="segStartBtn" class="btn-small" title="Marcar inicio del segmento en el tiempo actual">Inicio seg</button>
+                    <button id="segEndBtn" class="btn-small" title="Marcar fin del segmento en el tiempo actual">Fin seg</button>
+                    <span id="segStartLabel" class="offline-time-label">S: --</span>
+                    <span id="segEndLabel" class="offline-time-label">E: --</span>
+                    <button id="segSaveBtn" class="btn-small" title="Guardar solo la marca del segmento para reutilizarla">Guardar seg</button>
+                    <button id="segCutBtn" class="btn-small" title="Generar TSV recortado entre Inicio/Fin y mostrar opción de analizar">Cortar + descargar</button>
+                    <select id="segmentSelect"></select>
+                    <button id="segmentGoBtn" class="btn-small" title="Ir al tiempo inicial del segmento seleccionado">Ir</button>
+                </div>
+                <div id="arincBusHealthPanel" class="arinc-bus-health-panel"></div>
             </div>
         </section>
     </main>
