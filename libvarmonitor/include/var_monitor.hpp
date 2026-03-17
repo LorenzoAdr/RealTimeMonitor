@@ -69,6 +69,7 @@ public:
     bool start(int sample_interval_ms = 100);
     void stop();
     bool is_running() const { return running_.load(); }
+    int sample_interval_ms() const { return sample_interval_ms_; }
 
     struct VarSnapshot {
         std::string name;

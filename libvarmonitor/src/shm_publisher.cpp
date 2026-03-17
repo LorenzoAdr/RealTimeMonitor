@@ -25,7 +25,7 @@ static constexpr uint32_t VERSION = 1u;
 static constexpr size_t NAME_MAX_LEN = 128u;
 static constexpr size_t MAX_VARS = 512u;
 static constexpr size_t ENTRY_SIZE = NAME_MAX_LEN + 1 + 8; /* name + type + value (double) */
-static constexpr size_t HEADER_SIZE = 4 + 4 + 8 + 4 + 8;   /* magic, version, seq, count, timestamp */
+static constexpr size_t HEADER_SIZE = 4 + 4 + 8 + 4 + 4 + 8;   /* magic, version, seq, count, padding, timestamp (32 bytes) */
 static constexpr size_t SEGMENT_SIZE = HEADER_SIZE + MAX_VARS * ENTRY_SIZE;
 
 static int g_shm_fd = -1;

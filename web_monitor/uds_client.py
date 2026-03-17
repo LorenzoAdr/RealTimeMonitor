@@ -102,36 +102,6 @@ class UdsBridge:
         })
         return resp.get("ok", False)
 
-    def get_history(self, name: str) -> dict | None:
-        resp = self._request({"cmd": "get_history", "name": name})
-        return resp.get("data")
-
-    def get_histories(self, names: list[str]) -> list[dict]:
-        try:
-            resp = self._request({"cmd": "get_histories", "names": names})
-            data = resp.get("data")
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
-        result = []
-        for name in names:
-            try:
-                h = self.get_history(name)
-                if h:
-                    result.append(h)
-            except Exception:
-                pass
-        return result
-
-    def get_histories_since(self, names: list[str], since_seq: int) -> dict:
-        resp = self._request({
-            "cmd": "get_histories_since",
-            "names": names,
-            "since_seq": since_seq,
-        })
-        return {"seq": resp.get("seq", 0), "data": resp.get("data", [])}
-
     def set_shm_subscription(self, names: list[str]) -> bool:
         try:
             resp = self._request({"cmd": "set_shm_subscription", "names": names})

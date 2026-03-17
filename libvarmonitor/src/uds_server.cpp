@@ -281,6 +281,7 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             std::ostringstream ss;
             ss << std::fixed << std::setprecision(3);
             ss << "{\"type\":\"server_info\",\"uptime_seconds\":" << sec;
+            ss << ",\"sample_interval_ms\":" << mon->sample_interval_ms();
             if (varmon::shm_publisher::is_active()) {
                 ss << ",\"shm_name\":\"" << json_escape(varmon::shm_publisher::get_shm_name()) << "\"";
                 ss << ",\"sem_name\":\"" << json_escape(varmon::shm_publisher::get_sem_name()) << "\"";

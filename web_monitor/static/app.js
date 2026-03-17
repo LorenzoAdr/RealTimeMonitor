@@ -11,6 +11,10 @@
         "#e879f9", "#22d3ee", "#facc15", "#818cf8", "#fb7185",
     ];
     const MAX_GRAPHS = 8;
+    const DEFAULT_OFFLINE_FULL_LOAD_MAX_MB = 40;
+    const DEFAULT_OFFLINE_PREVIEW_MB = 2;
+    const DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_ROWS = 10000;
+    const DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_SPAN_SEC = 45;
 
     let ws = null;
     let appMode = "live"; // live | offline
@@ -42,6 +46,9 @@
     let recordColumns = [];
     let recordStartTime = null;
     let recordTimerInterval = null;
+    let recordSizeBytes = 0;
+    let isRecordingStopping = false;
+    let pendingRecordingRestart = false;
 
     let savedInstance = ""; // instancia UDS preferida (guardada/cargada en config)
     const statusEl = document.getElementById("connectionStatus");
@@ -140,6 +147,11 @@
     const templateSaveBtn = document.getElementById("templateSaveBtn");
     const templateLoadBtn = document.getElementById("templateLoadBtn");
     const snapshotFramesInput = document.getElementById("snapshotFramesInput");
+    const offlineFullLoadMaxMbInput = document.getElementById("offlineFullLoadMaxMbInput");
+    const offlinePreviewMbInput = document.getElementById("offlinePreviewMbInput");
+    const offlinePreviewRowsInput = document.getElementById("offlinePreviewRowsInput");
+    const offlinePreviewSpanSecInput = document.getElementById("offlinePreviewSpanSecInput");
+    const offlineAllowForceFullLoadCheckbox = document.getElementById("offlineAllowForceFullLoadCheckbox");
     const snapshotBtn = document.getElementById("snapshotBtn");
     const adminStorageBtn = document.getElementById("adminStorageBtn");
     const adminStorageOverlay = document.getElementById("adminStorageOverlay");
@@ -156,11 +168,17 @@
     const adminTemplatesList = document.getElementById("adminTemplatesList");
     const expandAllMonBtn = document.getElementById("expandAllMonBtn");
     const collapseAllMonBtn = document.getElementById("collapseAllMonBtn");
+    const monitorLoadingIndicator = document.getElementById("monitorLoadingIndicator");
+    const offlineWindowSpanInput = document.getElementById("offlineWindowSpanInput");
+    const offlineSafeModeBadge = document.getElementById("offlineSafeModeBadge");
+    const defaultTimeWindowInput = document.getElementById("defaultTimeWindowInput");
+    const defaultHistoryBufferInput = document.getElementById("defaultHistoryBufferInput");
     const segStartLabel = document.getElementById("segStartLabel");
     const segEndLabel = document.getElementById("segEndLabel");
     const advUiRenderMs = document.getElementById("advUiRenderMs");
     const advUiFps = document.getElementById("advUiFps");
     const advUiPts = document.getElementById("advUiPts");
+    const advShmCycle = document.getElementById("advShmCycle");
 
     const ADV_INFO_STORAGE_KEY = "varmon_adv_info";
     const SEND_FILE_ON_FINISH_KEY = "varmon_send_file_on_finish";
@@ -169,6 +187,95 @@
     const wsMessageBuffer = [];
 
     let lastConnectionError = null;
+
+    if (offlineWindowSpanInput) {
+        offlineWindowSpanInput.addEventListener("change", () => {
+            const v = Number(offlineWindowSpanInput.value);
+            if (!Number.isFinite(v) || v <= 0) return;
+            WINDOW_SPAN_SEC = Math.max(1, Math.min(20, v));
+        });
+    }
+
+    if (defaultTimeWindowInput && timeWindowSelect) {
+        defaultTimeWindowInput.addEventListener("change", () => {
+            const v = Number(defaultTimeWindowInput.value);
+            if (!Number.isFinite(v) || v <= 0) return;
+            // Ajustar select de ventana al valor más cercano.
+            let closest = timeWindowSelect.options[0]?.value || "10";
+            let bestDiff = Infinity;
+            for (let i = 0; i < timeWindowSelect.options.length; i++) {
+                const opt = timeWindowSelect.options[i];
+                const val = Number(opt.value);
+                if (!Number.isFinite(val) || val <= 0) continue;
+                const d = Math.abs(val - v);
+                if (d < bestDiff) {
+                    bestDiff = d;
+                    closest = opt.value;
+                }
+            }
+            timeWindowSelect.value = closest;
+            saveConfig();
+        });
+    }
+
+    if (defaultHistoryBufferInput && historyBufferSelect) {
+        defaultHistoryBufferInput.addEventListener("change", () => {
+            const v = Number(defaultHistoryBufferInput.value);
+            if (!Number.isFinite(v) || v <= 0) return;
+            let closest = historyBufferSelect.options[0]?.value || "10";
+            let bestDiff = Infinity;
+            for (let i = 0; i < historyBufferSelect.options.length; i++) {
+                const opt = historyBufferSelect.options[i];
+                const val = Number(opt.value);
+                if (!Number.isFinite(val) || val <= 0) continue;
+                const d = Math.abs(val - v);
+                if (d < bestDiff) {
+                    bestDiff = d;
+                    closest = opt.value;
+                }
+            }
+            historyBufferSelect.value = closest;
+            saveConfig();
+        });
+    }
+
+    if (offlineSafeModeBadge) {
+        offlineSafeModeBadge.addEventListener("click", async () => {
+            if (!offlineRecordingName || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+            const ok = window.confirm("Salir de modo seguro y cargar el archivo completo (también se descargará localmente)?");
+            if (!ok) return;
+            try {
+                const filename = offlineRecordingName;
+                const url = "/api/recordings/" + encodeURIComponent(filename);
+                const resp = await fetch(url);
+                if (!resp.ok) {
+                    alert("No se pudo descargar la grabación completa.");
+                    return;
+                }
+                const text = await resp.text();
+                // Disparar descarga local del TSV completo.
+                try {
+                    const blob = new Blob([text], { type: "text/tab-separated-values" });
+                    const dlUrl = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = dlUrl;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(dlUrl);
+                } catch (e) {
+                    console.warn("No se pudo iniciar descarga automática del TSV:", e);
+                }
+                // Entrar en análisis normal con el archivo completo (sin modo seguro).
+                const dsFull = parseTsvDataset(text, filename);
+                await loadOfflineDataset(dsFull, { recordingName: filename, safeInfo: null, preserveLayout: true });
+            } catch (e) {
+                console.error("Error saliendo de modo seguro:", e);
+                alert("Error al salir de modo seguro y cargar el archivo completo.");
+            }
+        });
+    }
 
     let browserSelection = new Set();
     let browserListDirty = true;
@@ -201,6 +308,14 @@
     let sharedZoomSyncTimer = null;
     let offlineDataset = null; // Run A
     let offlineRecordingName = "";
+    // Referencia global de tiempo para la grabación offline actual (no se resetea por tramo).
+    let offlineRecordingGlobalMinTs = null;
+    let offlineRecordingGlobalMaxTs = null;
+    // Offset acumulado (en segundos) aplicado a los tramos sucesivos de una misma
+    // grabación grande en modo seguro (Fase 1). Cada tramo nuevo se desplaza en
+    // tiempo para que el eje X sea continuo (0..N) aunque solo tengamos un
+    // segmento cargado en memoria.
+    let offlineSegmentOffsetSec = 0;
     let markerA = null;
     let markerB = null;
     let deltaByName = {};
@@ -223,8 +338,149 @@
     let browserVirtualOverscan = 10;
     let browserVirtualRows = [];
     let arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
+    let offlineSafetyInfo = null;
+    let recordingsMetaByName = new Map();
+    // Historial completo por variable en análisis offline; se mantiene al cambiar de tramo
+    // dentro de la misma grabación.
+    let fullHistoryByName = {};
+    let offlineFullLoadMaxMb = DEFAULT_OFFLINE_FULL_LOAD_MAX_MB;
+    let offlinePreviewMb = DEFAULT_OFFLINE_PREVIEW_MB;
+    let offlineSafePreviewMaxRows = DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_ROWS;
+    let offlineSafePreviewMaxSpanSec = DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_SPAN_SEC;
+    let offlineAllowForceFullLoad = false;
 
     const ARINC_SUFFIXES = ["label", "sdi", "data", "ssm", "parity", "value"];
+
+    // Historial completo por variable (modo análisis offline).
+    const fullHistoryPending = new Set();
+
+    async function fetchFullHistoryIfNeeded(varName) {
+        if (!isOfflineMode()) return;
+        if (!offlineRecordingName) return;
+        const key = String(varName || "");
+        if (!key) return;
+        if (fullHistoryPending.has(key)) return;
+        fullHistoryPending.add(key);
+        try {
+            const resp = await fetch(
+                `/api/recordings/${encodeURIComponent(offlineRecordingName)}/history?` +
+                new URLSearchParams({ var: key }).toString()
+            );
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const ts = Array.isArray(data.timestamps) ? data.timestamps : [];
+            const vals = Array.isArray(data.values) ? data.values : [];
+            if (ts.length === 0 || vals.length === 0 || ts.length !== vals.length) return;
+            const hist = { timestamps: ts, values: vals };
+            historyCache[key] = hist;
+            fullHistoryByName[key] = hist;
+            schedulePlotRender();
+        } catch (e) {
+            // Silencioso: si falla, seguimos con el tramo actual.
+        } finally {
+            fullHistoryPending.delete(key);
+        }
+    }
+
+    function restoreFullHistoriesForPlottedVars() {
+        if (!isOfflineMode()) return;
+        if (!fullHistoryByName || typeof fullHistoryByName !== "object") return;
+        if (!Array.isArray(graphList) || graphList.length === 0) return;
+        for (const gid of graphList) {
+            const varsInGraph = getVarsForGraph(gid);
+            for (const name of varsInGraph) {
+                if (!name || isArrayElem(name)) continue;
+                const full = fullHistoryByName[name];
+                if (full && Array.isArray(full.timestamps) && Array.isArray(full.values) && full.timestamps.length > 1 && full.values.length === full.timestamps.length) {
+                    historyCache[name] = full;
+                }
+            }
+        }
+    }
+
+    async function fetchWindowHistoryBatch(names, centerTs) {
+        if (!isOfflineMode() || !offlineRecordingName) return;
+        const cleanNames = (names || []).map((n) => String(n || "")).filter((n) => n);
+        if (cleanNames.length === 0) return;
+        const span = WINDOW_SPAN_SEC;
+        cleanNames.forEach((key) => {
+            const meta = windowMetaByName[key] || {};
+            windowMetaByName[key] = { center: centerTs, span: meta.span || span };
+        });
+        try {
+            windowFetchInFlight++;
+            windowFetchLastStart = performance.now();
+            const params = new URLSearchParams({
+                vars: cleanNames.join(","),
+                t_center: String(centerTs),
+                t_span: String(span),
+            });
+            const resp = await fetch(
+                `/api/recordings/${encodeURIComponent(offlineRecordingName)}/window_batch?` + params.toString()
+            );
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const series = Array.isArray(data.series) ? data.series : [];
+            for (let i = 0; i < series.length; i++) {
+                const s = series[i];
+                const name = String(s.name || "");
+                if (!name) continue;
+                const ts = Array.isArray(s.timestamps) ? s.timestamps : [];
+                const vals = Array.isArray(s.values) ? s.values : [];
+                if (ts.length === 0 || vals.length === 0 || ts.length !== vals.length) continue;
+                historyCache[name] = { timestamps: ts, values: vals };
+            }
+            if (series.length > 0) {
+                schedulePlotRender();
+            }
+        } catch (e) {
+            // Silencioso
+        } finally {
+            windowFetchInFlight = Math.max(0, windowFetchInFlight - 1);
+        }
+    }
+
+    function scheduleWindowFetchAroundTime(centerTs) {
+        // Ventanas cortas solo tienen sentido en modo seguro (grabaciones grandes).
+        if (!isOfflineMode() || !offlineDataset || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+        if (!Number.isFinite(centerTs)) return;
+
+        const runFetch = () => {
+            const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : centerTs;
+            const batchNames = [];
+            for (const name of monitoredNames) {
+                if (isArrayElem(name)) continue;
+                // Si la variable está ploteada y ya tiene histórico completo, no pedimos ventana corta.
+                const assigned = varGraphAssignment[name] || "";
+                if (assigned && fullHistoryByName[name]) continue;
+                const meta = windowMetaByName[name];
+                const span = (meta && meta.span) || WINDOW_SPAN_SEC;
+                const lastCenter = meta && Number.isFinite(meta.center) ? meta.center : null;
+                if (lastCenter !== null) {
+                    const threshold = span * WINDOW_REQUERY_FRACTION;
+                    if (Math.abs(tNow - lastCenter) < threshold) continue;
+                }
+                batchNames.push(name);
+            }
+            if (batchNames.length > 0) fetchWindowHistoryBatch(batchNames, tNow);
+        };
+
+        // Si estamos en Play, no usamos debounce: las ventanas deben seguir al tiempo en movimiento.
+        if (offlinePlayback.isPlaying) {
+            runFetch();
+            return;
+        }
+
+        // Movimiento manual (scrubber / click): usar debounce para no spamear.
+        if (windowFetchDebounceTimer) {
+            clearTimeout(windowFetchDebounceTimer);
+            windowFetchDebounceTimer = null;
+        }
+        windowFetchDebounceTimer = setTimeout(() => {
+            windowFetchDebounceTimer = null;
+            runFetch();
+        }, 250);
+    }
     const ARINC_LABEL_DEFS = {
         // Ejemplos demo para validar rápidamente la interpretación ARINC en UI.
         "203": { name: "PITCH_ANGLE_DEMO", encoding: "bnr", signed: true, bits: 19, scale: 1, units: "deg", min: -90, max: 90, ssmAllowed: [0, 3] },
@@ -240,6 +496,15 @@
         currentIndex: 0,
         lastTickMs: 0,
     };
+
+    // Gestión de ventanas cortas por variable monitorizada (solo monitorización, no ploteadas).
+    let WINDOW_SPAN_SEC = 3.0;
+    const WINDOW_REQUERY_FRACTION = 0.5;
+    const windowMetaByName = {}; // name -> { center: number, span: number }
+    let windowFetchDebounceTimer = null;
+    let windowFetchInFlight = 0;
+    let windowFetchLastStart = 0;
+    let windowFetchSlow = false;
 
     const GEN_TYPES = {
         sine:     { label: "Seno",       fields: [{k:"amp",l:"A",d:1},{k:"freq",l:"Hz",d:1},{k:"offset",l:"Off",d:0},{k:"phase",l:"Fase\u00B0",d:0}] },
@@ -749,6 +1014,7 @@
             offlineNoRecordings: "(sin grabaciones)",
             offlineDatasetNone: "Sin archivo cargado",
             offlineDatasetLoaded: "Cargado:",
+            offlineDatasetSafeMode: "Modo seguro",
             analyzePromptBtn: "Analizar este archivo",
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
@@ -826,6 +1092,7 @@
             offlineNoRecordings: "(no recordings)",
             offlineDatasetNone: "No file loaded",
             offlineDatasetLoaded: "Loaded:",
+            offlineDatasetSafeMode: "Safe mode",
             analyzePromptBtn: "Analyze this file",
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
@@ -897,11 +1164,11 @@
             modeSelect.options[0].textContent = tr.modeLive || "Live";
             modeSelect.options[1].textContent = tr.modeOffline || "Análisis";
         }
-        if (loadLocalTsvBtn) loadLocalTsvBtn.textContent = tr.offlineLoadLocalA || "Cargar TSV A";
-        if (loadServerRecordingBtn) loadServerRecordingBtn.textContent = tr.offlineLoadServerA || "Cargar";
+        if (loadLocalTsvBtn) loadLocalTsvBtn.textContent = tr.offlineLoadLocal || "Cargar TSV local";
+        if (loadServerRecordingBtn) loadServerRecordingBtn.textContent = tr.offlineLoadServer || "Cargar";
         const recordingSelectLabelEl = document.getElementById("recordingSelectLabel");
         if (recordingSelectLabelEl && recordingSelectLabelEl.firstChild && recordingSelectLabelEl.firstChild.nodeType === Node.TEXT_NODE) {
-            recordingSelectLabelEl.firstChild.nodeValue = (tr.offlineRecordingLabelA || "Run A:") + " ";
+            recordingSelectLabelEl.firstChild.nodeValue = (tr.offlineRecordingLabel || "Grabación:") + " ";
         }
         updateOfflineDatasetStatus();
         updateMarkerInfoLabel();
@@ -1226,6 +1493,11 @@
                 notesByTs: notesByTs,
                 offlineSegments: offlineSegments,
                 snapshotFrames: snapshotFramesInput ? Number(snapshotFramesInput.value || 40) : 40,
+                offlineFullLoadMaxMb: offlineFullLoadMaxMb,
+                offlinePreviewMb: offlinePreviewMb,
+                offlineSafePreviewMaxRows: offlineSafePreviewMaxRows,
+                offlineSafePreviewMaxSpanSec: offlineSafePreviewMaxSpanSec,
+                offlineAllowForceFullLoad: !!offlineAllowForceFullLoad,
             }));
             maybePushLayoutHistory();
         } catch (e) { /* quota exceeded or private mode */ }
@@ -1313,6 +1585,26 @@
             if (snapshotFramesInput && Number.isFinite(Number(cfg.snapshotFrames))) {
                 snapshotFramesInput.value = String(Math.max(2, Math.floor(Number(cfg.snapshotFrames))));
             }
+            if (Number.isFinite(Number(cfg.offlineFullLoadMaxMb))) {
+                offlineFullLoadMaxMb = Math.max(5, Math.floor(Number(cfg.offlineFullLoadMaxMb)));
+            }
+            if (Number.isFinite(Number(cfg.offlinePreviewMb))) {
+                offlinePreviewMb = Math.max(1, Math.min(8, Math.floor(Number(cfg.offlinePreviewMb))));
+            }
+            if (Number.isFinite(Number(cfg.offlineSafePreviewMaxRows))) {
+                offlineSafePreviewMaxRows = Math.max(500, Math.floor(Number(cfg.offlineSafePreviewMaxRows)));
+            }
+            if (Number.isFinite(Number(cfg.offlineSafePreviewMaxSpanSec))) {
+                offlineSafePreviewMaxSpanSec = Math.max(5, Math.floor(Number(cfg.offlineSafePreviewMaxSpanSec)));
+            }
+            if (typeof cfg.offlineAllowForceFullLoad === "boolean") {
+                offlineAllowForceFullLoad = cfg.offlineAllowForceFullLoad;
+            }
+            if (offlineFullLoadMaxMbInput) offlineFullLoadMaxMbInput.value = String(offlineFullLoadMaxMb);
+            if (offlinePreviewMbInput) offlinePreviewMbInput.value = String(offlinePreviewMb);
+            if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
+            if (offlinePreviewSpanSecInput) offlinePreviewSpanSecInput.value = String(offlineSafePreviewMaxSpanSec);
+            if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
         } catch (e) { /* corrupt data */ }
     }
 
@@ -1336,12 +1628,22 @@
         compactMonitorLevel = 0;
         adaptiveLoadEnabled = true;
         downsampleMaxPoints = 2000;
+        offlineFullLoadMaxMb = DEFAULT_OFFLINE_FULL_LOAD_MAX_MB;
+        offlinePreviewMb = DEFAULT_OFFLINE_PREVIEW_MB;
+        offlineSafePreviewMaxRows = DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_ROWS;
+        offlineSafePreviewMaxSpanSec = DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_SPAN_SEC;
+        offlineAllowForceFullLoad = false;
         arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
         layoutHistoryPast = [];
         layoutHistoryFuture = [];
         updateCompactMonitorUi();
         if (adaptiveLoadCheckbox) adaptiveLoadCheckbox.checked = true;
         if (downsampleMaxPointsInput) downsampleMaxPointsInput.value = "2000";
+        if (offlineFullLoadMaxMbInput) offlineFullLoadMaxMbInput.value = String(offlineFullLoadMaxMb);
+        if (offlinePreviewMbInput) offlinePreviewMbInput.value = String(offlinePreviewMb);
+        if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
+        if (offlinePreviewSpanSecInput) offlinePreviewSpanSecInput.value = String(offlineSafePreviewMaxSpanSec);
+        if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
         renderNotesList();
         renderSegmentsUi();
         renderArincBusHealth();
@@ -1418,10 +1720,28 @@
             const f = localTsvInput.files && localTsvInput.files[0];
             if (!f) return;
             try {
-                const text = await f.text();
-                const ds = parseTsvDataset(text, f.name);
+                let ds;
+                let safeInfo = null;
+                if (shouldUseSafeOfflineLoad(f.size)) {
+                    const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+                    const previewRaw = await f.slice(0, previewBytes).text();
+                    const previewText = trimTextToFullLines(previewRaw);
+                    const risk = estimateTsvLoadRisk(previewText, Number(f.size) || 0);
+                    const forceFull = shouldForceFullLoadWithConfirmation(f.name, Number(f.size) || 0, risk.estRamBytes);
+                    if (forceFull) {
+                        const text = await f.text();
+                        ds = parseTsvDataset(text, f.name);
+                    } else {
+                        const safe = await loadLargeLocalFileInSafeMode(f);
+                        ds = safe.ds;
+                        safeInfo = safe.safeInfo;
+                    }
+                } else {
+                    const text = await f.text();
+                    ds = parseTsvDataset(text, f.name);
+                }
                 if (!isOfflineMode()) setAppMode("offline", { keepData: true });
-                loadOfflineDataset(ds, { target: "A", recordingName: "" });
+                loadOfflineDataset(ds, { target: "A", recordingName: "", safeInfo });
             } catch (e) {
                 alert("Error cargando TSV: " + (e && e.message ? e.message : String(e)));
             } finally {
@@ -1441,6 +1761,24 @@
             }
         });
     }
+    const offlineChunkPrevBtn = document.getElementById("offlineChunkPrevBtn");
+    const offlineChunkNextBtn = document.getElementById("offlineChunkNextBtn");
+    if (offlineChunkPrevBtn) {
+        offlineChunkPrevBtn.addEventListener("click", () => {
+            if (!offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+            const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+            const nextOffset = Math.max(0, (offlineSafetyInfo.segmentStartByte || 0) - previewBytes);
+            loadRecordingChunkAtOffset(nextOffset);
+        });
+    }
+    if (offlineChunkNextBtn) {
+        offlineChunkNextBtn.addEventListener("click", () => {
+            if (!offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+            const nextOffset = offlineSafetyInfo.segmentEndByte || 0;
+            if (nextOffset >= (offlineSafetyInfo.totalBytes || 0)) return;
+            loadRecordingChunkAtOffset(nextOffset);
+        });
+    }
     if (offlineSpeedSelect) {
         offlineSpeedSelect.addEventListener("change", () => {
             const v = Number(offlineSpeedSelect.value);
@@ -1452,7 +1790,14 @@
         offlineScrubber.addEventListener("input", () => {
             if (!offlineDataset) return;
             const ratio = (parseInt(offlineScrubber.value, 10) || 0) / 1000;
-            const ts = offlineDataset.minTs + (offlineDataset.maxTs - offlineDataset.minTs) * ratio;
+            const minTs = Number.isFinite(offlineRecordingGlobalMinTs)
+                ? offlineRecordingGlobalMinTs
+                : offlineDataset.minTs;
+            const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs)
+                ? offlineRecordingGlobalMaxTs
+                : offlineDataset.maxTs;
+            const span = Math.max(1e-9, maxTs - minTs);
+            const ts = minTs + span * ratio;
             applyOfflineTime(ts);
         });
     }
@@ -1573,6 +1918,7 @@
         const safeSamples = Array.isArray(samples) ? samples : [];
         if (!safeSamples.length || !Array.isArray(names) || !names.length) return null;
         const specs = buildColumnsSpecFromOfflineSamples(safeSamples, names);
+        const t0 = Number(safeSamples[0] && safeSamples[0].ts);
         const header = ["time_s"];
         specs.forEach((sp) => {
             if (sp.type === "array") {
@@ -1585,7 +1931,8 @@
         for (const s of safeSamples) {
             const ts = Number(s && s.ts);
             if (!Number.isFinite(ts)) continue;
-            const row = [ts.toFixed(6)];
+            const rel = Number.isFinite(t0) ? Math.max(0, ts - t0) : ts;
+            const row = [rel.toFixed(6)];
             for (const sp of specs) {
                 if (sp.type === "array") {
                     const arrEntry = (s.data || []).find((e) => e && e.name === sp.name && Array.isArray(e.value));
@@ -1641,9 +1988,11 @@
         if (!refTs || refTs.length === 0) return lines.join("\n") + "\n";
 
         const start = Math.max(0, refTs.length - Math.max(2, frameCount));
+        const t0 = Number(refTs[start]);
         for (let i = start; i < refTs.length; i++) {
             const ts = Number(refTs[i]);
-            const row = [Number.isFinite(ts) ? ts.toFixed(6) : ""];
+            const rel = (Number.isFinite(ts) && Number.isFinite(t0)) ? Math.max(0, ts - t0) : ts;
+            const row = [Number.isFinite(rel) ? rel.toFixed(6) : ""];
             for (const n of scalarNames) {
                 const h = historyCache[n];
                 const v = (h && Array.isArray(h.values) && i < h.values.length) ? h.values[i] : "";
@@ -2226,6 +2575,11 @@
             appMode: appMode,
             offlineRecordingName: offlineRecordingName || "",
             snapshotFrames: snapshotFramesInput ? Number(snapshotFramesInput.value || 40) : 40,
+            offlineFullLoadMaxMb: offlineFullLoadMaxMb,
+            offlinePreviewMb: offlinePreviewMb,
+            offlineSafePreviewMaxRows: offlineSafePreviewMaxRows,
+            offlineSafePreviewMaxSpanSec: offlineSafePreviewMaxSpanSec,
+            offlineAllowForceFullLoad: !!offlineAllowForceFullLoad,
             generators: Object.entries(activeGenerators).map(([name, g]) => ({
                 name,
                 type: g.type,
@@ -2296,6 +2650,16 @@
         if (Array.isArray(cfg.notesByTs)) notesByTs = cfg.notesByTs;
         if (Array.isArray(cfg.offlineSegments)) offlineSegments = cfg.offlineSegments;
         if (snapshotFramesInput && Number.isFinite(Number(cfg.snapshotFrames))) snapshotFramesInput.value = String(Math.max(2, Math.floor(Number(cfg.snapshotFrames))));
+        if (Number.isFinite(Number(cfg.offlineFullLoadMaxMb))) offlineFullLoadMaxMb = Math.max(5, Math.floor(Number(cfg.offlineFullLoadMaxMb)));
+        if (Number.isFinite(Number(cfg.offlinePreviewMb))) offlinePreviewMb = Math.max(1, Math.min(8, Math.floor(Number(cfg.offlinePreviewMb))));
+        if (Number.isFinite(Number(cfg.offlineSafePreviewMaxRows))) offlineSafePreviewMaxRows = Math.max(500, Math.floor(Number(cfg.offlineSafePreviewMaxRows)));
+        if (Number.isFinite(Number(cfg.offlineSafePreviewMaxSpanSec))) offlineSafePreviewMaxSpanSec = Math.max(5, Math.floor(Number(cfg.offlineSafePreviewMaxSpanSec)));
+        if (typeof cfg.offlineAllowForceFullLoad === "boolean") offlineAllowForceFullLoad = cfg.offlineAllowForceFullLoad;
+        if (offlineFullLoadMaxMbInput) offlineFullLoadMaxMbInput.value = String(offlineFullLoadMaxMb);
+        if (offlinePreviewMbInput) offlinePreviewMbInput.value = String(offlinePreviewMb);
+        if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
+        if (offlinePreviewSpanSecInput) offlinePreviewSpanSecInput.value = String(offlineSafePreviewMaxSpanSec);
+        if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
         if (cfg.appMode === "offline" || cfg.appMode === "live") setAppMode(cfg.appMode, { keepData: true });
         const rec = (cfg.offlineRecordingName || "").trim();
         if (opts.autoLoadOffline && cfg.appMode === "offline" && rec) {
@@ -2683,12 +3047,17 @@
                     advCpuCpp.textContent = (d.cpp_cpu_percent != null && !isNaN(d.cpp_cpu_percent))
                         ? "C++: " + formatAdvNum(d.cpp_cpu_percent) + "%"
                         : "C++: —";
+                if (advShmCycle)
+                    advShmCycle.textContent = (d.shm_cycle_ms != null && !isNaN(d.shm_cycle_ms))
+                        ? "shm: " + formatAdvNum(d.shm_cycle_ms) + " ms"
+                        : "shm: —";
             }
         } catch (e) {
             if (advRamPython) advRamPython.textContent = "Py: —";
             if (advRamCpp) advRamCpp.textContent = "C++: —";
             if (advCpuPython) advCpuPython.textContent = "Py: —";
             if (advCpuCpp) advCpuCpp.textContent = "C++: —";
+            if (advShmCycle) advShmCycle.textContent = "shm: —";
         }
         const now = Date.now();
         const cutoff = now - WS_BUFFER_MAX_AGE_MS;
@@ -2744,13 +3113,22 @@
         if (!offlineDatasetStatus) return;
         const tr = I18N[currentLang] || I18N.es;
         if (offlineDataset && offlineDataset.sourceName) {
-            offlineDatasetStatus.textContent = `${tr.offlineDatasetLoaded || "Cargado:"} A: ${offlineDataset.sourceName}`;
+            const safeSuffix = (offlineSafetyInfo && offlineSafetyInfo.safeMode)
+                ? ` | ${tr.offlineDatasetSafeMode || "Modo seguro"}`
+                : "";
+            const loadingSuffix = windowFetchSlow ? ` | ${tr.offlineDatasetLoading || "Cargando datos..."}` : "";
+            offlineDatasetStatus.textContent = `${tr.offlineDatasetLoaded || "Cargado:"} A: ${offlineDataset.sourceName}${safeSuffix}${loadingSuffix}`;
             offlineDatasetStatus.classList.remove("offline-empty");
             offlineDatasetStatus.classList.add("offline-loaded");
+            offlineDatasetStatus.classList.toggle("offline-safe", !!(offlineSafetyInfo && offlineSafetyInfo.safeMode));
         } else {
             offlineDatasetStatus.textContent = tr.offlineDatasetNone || "Sin archivo cargado";
             offlineDatasetStatus.classList.remove("offline-loaded");
+            offlineDatasetStatus.classList.remove("offline-safe");
             offlineDatasetStatus.classList.add("offline-empty");
+        }
+        if (offlineSafeModeBadge) {
+            offlineSafeModeBadge.style.display = (offlineSafetyInfo && offlineSafetyInfo.safeMode) ? "inline-flex" : "none";
         }
     }
 
@@ -2770,6 +3148,9 @@
         varsByName = {};
         baseKnownVarNames = [];
         knownVarNames = [];
+        offlineSafetyInfo = null;
+        offlineRecordingGlobalMinTs = null;
+        offlineSegmentOffsetSec = 0;
         sessionStartTime = null;
         sharedZoomXRange = null;
         historyCache = {};
@@ -2828,6 +3209,8 @@
         if (offlinePlaybackControls) offlinePlaybackControls.style.display = offline ? "flex" : "none";
         if (anomalyPanel) anomalyPanel.style.display = offline ? "block" : "none";
         if (alarmPanel) alarmPanel.style.display = offline ? "none" : "";
+        const spanLabel = document.getElementById("offlineWindowSpanLabel");
+        if (spanLabel) spanLabel.style.display = offline ? "flex" : "none";
         if (recordBtn) recordBtn.style.display = offline ? "none" : "";
         if (refreshNamesBtn) refreshNamesBtn.style.display = offline ? "none" : "";
         if (reconnectBtn) reconnectBtn.style.display = offline ? "none" : "";
@@ -2871,6 +3254,40 @@
         saveConfig();
     }
 
+    function formatBytes(n) {
+        const v = Number(n);
+        if (!Number.isFinite(v) || v <= 0) return "0 B";
+        const units = ["B", "KB", "MB", "GB"];
+        let val = v;
+        let ui = 0;
+        while (val >= 1024 && ui < units.length - 1) {
+            val /= 1024;
+            ui += 1;
+        }
+        return `${val.toFixed(ui === 0 ? 0 : 1)} ${units[ui]}`;
+    }
+
+    function trimTextToFullLines(text) {
+        const src = String(text || "");
+        const idx = src.lastIndexOf("\n");
+        if (idx < 0) return src;
+        return src.slice(0, idx + 1);
+    }
+
+    function estimateTsvLoadRisk(textSample, rawBytes) {
+        const lines = String(textSample || "").split(/\r?\n/).filter((ln) => ln.length > 0);
+        const header = lines.length ? lines[0].split("\t") : [];
+        const columns = Math.max(1, header.length);
+        const sampledRows = Math.max(1, lines.length - 1);
+        const sampleBytes = Math.max(1, new Blob([textSample || ""]).size);
+        const rowBytesAvg = Math.max(8, sampleBytes / sampledRows);
+        const estRows = Math.max(1, Math.floor((Number(rawBytes) || sampleBytes) / rowBytesAvg));
+        const estValues = estRows * columns;
+        // Heurística conservadora para objetos JS + arrays + historial.
+        const estRamBytes = estValues * 48;
+        return { columns, estRows, estValues, estRamBytes };
+    }
+
     function parseCell(raw) {
         const t = String(raw ?? "").trim();
         if (!t) return null;
@@ -2885,11 +3302,13 @@
         return t;
     }
 
-    function parseTsvDataset(text, sourceName) {
+    function parseTsvDataset(text, sourceName, opts = {}) {
         const lines = String(text || "").split(/\r?\n/).filter((ln) => ln.length > 0);
         if (lines.length < 2) throw new Error("TSV vacío o incompleto");
         const header = lines[0].split("\t");
         if (header[0] !== "time_s") throw new Error("Cabecera inválida: primera columna debe ser time_s");
+        const maxRows = Number.isFinite(opts.maxRows) && opts.maxRows > 0 ? Math.floor(opts.maxRows) : 0;
+        const maxSpanSec = Number.isFinite(opts.maxSpanSec) && opts.maxSpanSec > 0 ? Number(opts.maxSpanSec) : 0;
 
         const scalarCols = [];
         const arrayCols = new Map(); // base -> [{idx, col}]
@@ -2908,10 +3327,13 @@
         for (const v of arrayCols.values()) v.sort((a, b) => a.idx - b.idx);
 
         const samples = [];
+        let firstTs = null;
+        let stoppedEarly = false;
         for (let r = 1; r < lines.length; r++) {
             const parts = lines[r].split("\t");
             const ts = Number(parts[0]);
             if (!Number.isFinite(ts)) continue;
+            if (!Number.isFinite(firstTs)) firstTs = ts;
             const data = [];
             for (const s of scalarCols) {
                 const val = parseCell(parts[s.col] ?? "");
@@ -2936,6 +3358,14 @@
                 }
             }
             samples.push({ ts, data });
+            if (maxRows > 0 && samples.length >= maxRows) {
+                stoppedEarly = true;
+                break;
+            }
+            if (maxSpanSec > 0 && Number.isFinite(firstTs) && (ts - firstTs) >= maxSpanSec) {
+                stoppedEarly = true;
+                break;
+            }
         }
         if (samples.length === 0) throw new Error("No hay filas válidas en el TSV");
         samples.sort((a, b) => a.ts - b.ts);
@@ -2951,6 +3381,8 @@
             minTs,
             maxTs,
             isEpoch: minTs > 1e9,
+            isPreview: !!opts.isPreview,
+            truncated: !!opts.isPreview && (stoppedEarly || lines.length > samples.length + 1),
         };
     }
 
@@ -2998,7 +3430,10 @@
         const built = buildHistoriesFromDataset(ds);
         historyCache = built.historyCache;
         arrayElemHistory = built.arrayElemHistory;
-        rebuildAllArincDerivedHistories();
+        // Fase 0: en modo seguro no construir autoderivados ARINC al inicio; se construyen on-demand al activar ARINC en una variable.
+        if (!offlineSafetyInfo || !offlineSafetyInfo.safeMode) {
+            rebuildAllArincDerivedHistories();
+        }
     }
 
     function buildInitialOfflineSnapshot(ds) {
@@ -3018,27 +3453,41 @@
 
     function updateOfflineTimeLabel(ts) {
         if (!offlineTimeLabel || !offlineDataset) return;
-        const rel = Math.max(0, ts - offlineDataset.minTs);
+        // Si tenemos referencia global de grabación, usarla para que los tramos
+        // sucesivos no vuelvan a 0s.
+        const base = Number.isFinite(offlineRecordingGlobalMinTs)
+            ? offlineRecordingGlobalMinTs
+            : offlineDataset.minTs;
+        const rel = Math.max(0, ts - base);
         offlineTimeLabel.textContent = "t=" + rel.toFixed(3) + "s";
     }
 
     function updateOfflineScrubberFromTs(ts) {
         if (!offlineScrubber || !offlineDataset) return;
-        const span = Math.max(1e-9, offlineDataset.maxTs - offlineDataset.minTs);
-        const ratio = (ts - offlineDataset.minTs) / span;
+        const minTs = Number.isFinite(offlineRecordingGlobalMinTs) ? offlineRecordingGlobalMinTs : offlineDataset.minTs;
+        const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
+        const span = Math.max(1e-9, maxTs - minTs);
+        const ratio = (ts - minTs) / span;
         offlineScrubber.value = String(Math.max(0, Math.min(1000, Math.round(ratio * 1000))));
     }
 
     function applyOfflineTime(ts) {
         if (!offlineDataset || offlineDataset.samples.length === 0) return;
-        const clamped = Math.max(offlineDataset.minTs, Math.min(offlineDataset.maxTs, ts));
+        const minTs = Number.isFinite(offlineRecordingGlobalMinTs) ? offlineRecordingGlobalMinTs : offlineDataset.minTs;
+        const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
+        const clamped = Math.max(minTs, Math.min(maxTs, ts));
         offlinePlayback.currentTs = clamped;
+        // Mientras solo tengamos cargado un tramo, el índice se limita al rango
+        // disponible en offlineDataset; las ventanas cortas e históricos completos
+        // se encargan de mostrar datos fuera de este tramo si existen.
         const idx = binarySearchSampleIndex(offlineDataset.samples, clamped);
         offlinePlayback.currentIndex = idx;
         const sample = offlineDataset.samples[idx];
         onVarsUpdate(sample.data, { timestamp: sample.ts, appendHistory: false });
         updateOfflineScrubberFromTs(clamped);
         updateOfflineTimeLabel(clamped);
+        // Pedir ventanas cortas para variables solo monitorizadas alrededor del nuevo tiempo.
+        scheduleWindowFetchAroundTime(clamped);
     }
 
     function getValueAtTs(hist, ts) {
@@ -3237,9 +3686,14 @@
     function startOfflinePlayback() {
         if (!offlineDataset || offlineDataset.samples.length === 0 || !isOfflineMode()) return;
         if (offlinePlayback.isPlaying) return;
-        // Si estamos al final, reiniciar al inicio para permitir reproducir de nuevo.
-        if (offlinePlayback.currentTs >= (offlineDataset.maxTs - 1e-9)) {
-            applyOfflineTime(offlineDataset.minTs);
+        // Si estamos al final del tramo actual, solo entonces reiniciamos al inicio
+        // de este tramo. Si no, respetamos la posición actual (por ejemplo, al
+        // cambiar de tramo en análisis de grabaciones grandes).
+        const minTs = Number.isFinite(offlineRecordingGlobalMinTs) ? offlineRecordingGlobalMinTs : offlineDataset.minTs;
+        const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
+        if (!Number.isFinite(offlinePlayback.currentTs) ||
+            offlinePlayback.currentTs >= (maxTs - 1e-9)) {
+            applyOfflineTime(minTs);
         }
         offlinePlayback.isPlaying = true;
         offlinePlayback.lastTickMs = Date.now();
@@ -3251,15 +3705,156 @@
             const dt = (now - offlinePlayback.lastTickMs) / 1000;
             offlinePlayback.lastTickMs = now;
             const nextTs = offlinePlayback.currentTs + dt * (offlinePlayback.speed || 1);
-            if (nextTs >= offlineDataset.maxTs) {
-                applyOfflineTime(offlineDataset.maxTs);
+            const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
+            if (nextTs >= maxTs) {
+                applyOfflineTime(maxTs);
                 stopOfflinePlayback();
-                // Al terminar, volver automáticamente al inicio.
-                applyOfflineTime(offlineDataset.minTs);
+                // Al terminar no forzamos volver al inicio automáticamente, para
+                // que el usuario pueda seguir navegando entre tramos sin que el
+                // eje X se reseteé.
                 return;
             }
             applyOfflineTime(nextTs);
         }, 40);
+    }
+
+    function shouldUseSafeOfflineLoad(sizeBytes) {
+        const mb = Number(sizeBytes) / (1024 * 1024);
+        return Number.isFinite(mb) && mb > offlineFullLoadMaxMb;
+    }
+
+    function shouldForceFullLoadWithConfirmation(label, sizeBytes, estRamBytes) {
+        if (!offlineAllowForceFullLoad) return false;
+        const tr = I18N[currentLang] || I18N.es;
+        return window.confirm(
+            `${tr.offlineDatasetSafeMode || "Modo seguro"} recomendado para ${label}.\n` +
+            `Tamaño archivo: ${formatBytes(sizeBytes)}\n` +
+            `RAM estimada en carga completa: ~${formatBytes(estRamBytes)}\n\n` +
+            `¿Forzar carga completa igualmente?`
+        );
+    }
+
+    async function loadLargeLocalFileInSafeMode(file) {
+        const tr = I18N[currentLang] || I18N.es;
+        const sizeBytes = Number(file && file.size) || 0;
+        const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+        const previewRaw = await file.slice(0, previewBytes).text();
+        const previewText = trimTextToFullLines(previewRaw);
+        const risk = estimateTsvLoadRisk(previewText, sizeBytes);
+        const ds = parseTsvDataset(previewText, file.name, {
+            isPreview: true,
+            maxRows: offlineSafePreviewMaxRows,
+            maxSpanSec: offlineSafePreviewMaxSpanSec,
+        });
+        const safeInfo = {
+            safeMode: true,
+            totalBytes: sizeBytes,
+            estRamBytes: risk.estRamBytes,
+            columns: risk.columns,
+            estRows: risk.estRows,
+            reason: "size",
+        };
+        alert(
+            `${tr.offlineDatasetSafeMode || "Modo seguro"}: ${file.name}\n` +
+            `Tamaño: ${formatBytes(sizeBytes)}\n` +
+            `Estimación RAM carga completa: ~${formatBytes(risk.estRamBytes)}\n` +
+            `Se carga solo un tramo inicial (${offlineSafePreviewMaxRows} filas máx / ${offlineSafePreviewMaxSpanSec}s).`
+        );
+        return { ds, safeInfo };
+    }
+
+    async function loadLargeServerFileInSafeMode(filename, sizeBytes, byteOffset = 0) {
+        const tr = I18N[currentLang] || I18N.es;
+        const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+        const url = byteOffset > 0
+            ? `/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}&offset=${byteOffset}`
+            : `/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`;
+        const r = await fetch(url);
+        if (!r.ok) throw new Error("No se pudo descargar preview de la grabación");
+        const payload = await r.json();
+        const previewText = trimTextToFullLines(payload && payload.preview ? payload.preview : "");
+        const totalBytes = Number(sizeBytes) || Number(payload && payload.size) || 0;
+        const risk = estimateTsvLoadRisk(previewText, totalBytes);
+        const ds = parseTsvDataset(previewText, filename, {
+            isPreview: true,
+            maxRows: offlineSafePreviewMaxRows,
+            maxSpanSec: offlineSafePreviewMaxSpanSec,
+        });
+        const segmentStart = Number(payload.segment_start) || 0;
+        const segmentEnd = segmentStart + (Number(payload.preview_bytes) || 0);
+        const segmentSpanSec = Math.max(0, ds.maxTs - ds.minTs);
+        const safeInfo = {
+            safeMode: true,
+            totalBytes,
+            segmentStartByte: segmentStart,
+            segmentEndByte: segmentEnd,
+            segmentSpanSec,
+            estRamBytes: risk.estRamBytes,
+            columns: risk.columns,
+            estRows: risk.estRows,
+            reason: "size",
+        };
+        if (byteOffset === 0) {
+            // Nuevo ciclo de análisis seguro para esta grabación: reiniciar offset acumulado.
+            offlineSegmentOffsetSec = 0;
+            alert(
+                `${tr.offlineDatasetSafeMode || "Modo seguro"}: ${filename}\n` +
+                `Tamaño: ${formatBytes(safeInfo.totalBytes)}\n` +
+                `Estimación RAM carga completa: ~${formatBytes(risk.estRamBytes)}\n` +
+                `Se carga solo un tramo inicial (${offlineSafePreviewMaxRows} filas máx / ${offlineSafePreviewMaxSpanSec}s).`
+            );
+        }
+        return { ds, safeInfo };
+    }
+
+    /** Fase 1: cargar otro tramo de la misma grabación (solo servidor, modo seguro). */
+    async function loadRecordingChunkAtOffset(byteOffset) {
+        const filename = (offlineRecordingName || "").trim();
+        if (!filename || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+        const totalBytes = offlineSafetyInfo.totalBytes || 0;
+        if (byteOffset < 0 || byteOffset >= totalBytes) return;
+        try {
+            // Cargar el tramo tal cual viene en el TSV: la columna time_s ya es
+            // tiempo absoluto desde 0, no hay que aplicar offsets adicionales.
+            // Solo usamos offlineRecordingGlobalMinTs como referencia de origen.
+            const globalBaseTs = Number.isFinite(offlineRecordingGlobalMinTs)
+                ? offlineRecordingGlobalMinTs
+                : null;
+
+            const safe = await loadLargeServerFileInSafeMode(filename, totalBytes, byteOffset);
+            loadOfflineDataset(safe.ds, { recordingName: filename, safeInfo: safe.safeInfo, preserveLayout: true });
+
+            // Mantener la referencia global del primer tramo (suele ser 0s).
+            if (globalBaseTs !== null && Number.isFinite(globalBaseTs)) {
+                offlineRecordingGlobalMinTs = globalBaseTs;
+            }
+
+            // Seguimos actualizando la info de tramos solo para UI de botones,
+            // pero sin tocar los timestamps reales.
+            if (safe.safeInfo && Number.isFinite(safe.safeInfo.segmentSpanSec)) {
+                const baseOffset = Number.isFinite(offlineSegmentOffsetSec) ? offlineSegmentOffsetSec : 0;
+                offlineSegmentOffsetSec = baseOffset + safe.safeInfo.segmentSpanSec;
+            }
+            updateOfflineChunkButtons();
+        } catch (e) {
+            alert("Error cargando tramo: " + (e && e.message ? e.message : String(e)));
+        }
+    }
+
+    function updateOfflineChunkButtons() {
+        const prevBtn = document.getElementById("offlineChunkPrevBtn");
+        const nextBtn = document.getElementById("offlineChunkNextBtn");
+        if (!prevBtn || !nextBtn) return;
+        const canChunk = !!(offlineSafetyInfo && offlineSafetyInfo.safeMode && offlineRecordingName);
+        prevBtn.style.display = canChunk ? "" : "none";
+        nextBtn.style.display = canChunk ? "" : "none";
+        if (!canChunk) return;
+        const start = offlineSafetyInfo.segmentStartByte || 0;
+        const end = offlineSafetyInfo.segmentEndByte || 0;
+        const total = offlineSafetyInfo.totalBytes || 0;
+        const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+        prevBtn.disabled = start <= 0;
+        nextBtn.disabled = end >= total;
     }
 
     async function refreshServerRecordings() {
@@ -3270,6 +3865,7 @@
             const data = await resp.json();
             const tr = I18N[currentLang] || I18N.es;
             recordingSelect.innerHTML = "";
+            recordingsMetaByName = new Map();
             const rows = Array.isArray(data.recordings) ? data.recordings : [];
             if (rows.length === 0) {
                 const op = document.createElement("option");
@@ -3284,9 +3880,11 @@
                 op.value = r.filename;
                 op.textContent = r.filename;
                 recordingSelect.appendChild(op);
+                recordingsMetaByName.set(r.filename, r);
             }
         } catch (e) {
             recordingSelect.innerHTML = "";
+            recordingsMetaByName = new Map();
             const op = document.createElement("option");
             op.value = "";
             op.textContent = "(error cargando lista)";
@@ -3294,11 +3892,16 @@
         }
     }
 
-    function loadOfflineDataset(ds, opts = {}) {
+    async function loadOfflineDataset(ds, opts = {}) {
         const preserveLayout = !!opts.preserveLayout;
         stopOfflinePlayback();
+        const prevRecording = offlineRecordingName || "";
         if (!preserveLayout) clearUserLayout();
         clearDataBuffers();
+        // Si cambiamos de grabación, el historial completo por variable ya no es válido.
+        if (opts.recordingName && opts.recordingName !== prevRecording) {
+            fullHistoryByName = {};
+        }
         // Si conservamos layout (monitorizadas + asignación de gráficos),
         // hay que reconstruir los slots visuales tras limpiar buffers/DOM.
         if (preserveLayout) {
@@ -3306,10 +3909,36 @@
             rebuildMonitorList();
         }
         offlineDataset = ds;
+        // Mantener una referencia global de tiempo por grabación para que
+        // los tramos sucesivos no reinicien el eje temporal a 0. Solo se
+        // inicializa una vez (aunque ds.minTs pueda ser 0, que es válido).
+        if (ds && Number.isFinite(ds.minTs) && !Number.isFinite(offlineRecordingGlobalMinTs)) {
+            offlineRecordingGlobalMinTs = ds.minTs;
+        }
+        offlineSafetyInfo = opts.safeInfo && opts.safeInfo.safeMode ? { ...opts.safeInfo } : null;
         if (typeof opts.recordingName === "string") {
             offlineRecordingName = opts.recordingName;
         } else if (!offlineRecordingName && ds && ds.sourceName && recordingSelect && Array.from(recordingSelect.options).some((o) => o.value === ds.sourceName)) {
             offlineRecordingName = ds.sourceName;
+        }
+        // Si conocemos el nombre de la grabación y aún no tenemos maxTs global,
+        // pedirlo al backend para que el scrubber y el playback trabajen sobre
+        // el tiempo completo en lugar de solo el primer tramo.
+        if (offlineRecordingName && !Number.isFinite(offlineRecordingGlobalMaxTs)) {
+            try {
+                const resp = await fetch(
+                    `/api/recordings/${encodeURIComponent(offlineRecordingName)}/bounds`
+                );
+                if (resp.ok) {
+                    const bd = await resp.json();
+                    const minB = Number(bd.minTs);
+                    const maxB = Number(bd.maxTs);
+                    if (Number.isFinite(minB)) offlineRecordingGlobalMinTs = minB;
+                    if (Number.isFinite(maxB)) offlineRecordingGlobalMaxTs = maxB;
+                }
+            } catch (e) {
+                // Si falla, seguimos usando los min/max del tramo actual.
+            }
         }
         markerA = null;
         markerB = null;
@@ -3317,6 +3946,10 @@
         if (timeWindowSelect) timeWindowSelect.value = "0"; // Mostrar todo el registro en modo análisis
         onVarNames(ds.names);
         rebuildHistoriesFromOffline(ds);
+        // Si ya teníamos históricos completos de variables (cargados bajo demanda),
+        // reinyectarlos tras cambiar de tramo para que los gráficos sigan usando
+        // el espectro total de tiempo.
+        restoreFullHistoriesForPlottedVars();
         // Inicializar valores visibles con el primer valor disponible de cada variable.
         const initialSnapshot = buildInitialOfflineSnapshot(ds);
         if (initialSnapshot.length > 0) {
@@ -3336,6 +3969,7 @@
         if (!preserveLayout) rebuildMonitorList();
         updateOfflineDatasetStatus();
         updateMarkerInfoLabel();
+        updateOfflineChunkButtons();
         renderSegmentsUi();
         renderNotesList();
         schedulePlotRender();
@@ -3343,11 +3977,45 @@
 
     async function loadRecordingFromServer(filename, opts = {}) {
         if (!filename) return;
+        const meta = recordingsMetaByName.get(filename) || null;
+        const sizeBytes = Number(meta && meta.size);
+        if (shouldUseSafeOfflineLoad(sizeBytes)) {
+            let forceFull = false;
+            try {
+                const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+                const rMeta = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`);
+                if (rMeta.ok) {
+                    const p = await rMeta.json();
+                    const previewText = trimTextToFullLines(p && p.preview ? p.preview : "");
+                    const risk = estimateTsvLoadRisk(previewText, sizeBytes || Number(p && p.size) || 0);
+                    forceFull = shouldForceFullLoadWithConfirmation(filename, sizeBytes || Number(p && p.size) || 0, risk.estRamBytes);
+                }
+            } catch (e) { /* si falla, seguimos en modo seguro */ }
+            if (forceFull) {
+                const rFull = await fetch("/api/recordings/" + encodeURIComponent(filename));
+                if (!rFull.ok) throw new Error("No se pudo descargar la grabación");
+                const textFull = await rFull.text();
+                const dsFull = parseTsvDataset(textFull, filename);
+                loadOfflineDataset(dsFull, { ...opts, recordingName: filename, safeInfo: null });
+                return;
+            }
+            const safe = await loadLargeServerFileInSafeMode(filename, sizeBytes);
+            // Primer tramo en modo seguro: timestamps tal cual (offset 0). Después
+            // de cargarlo, guardamos cuánto dura para poder desplazar los tramos
+            // siguientes y que el tiempo sea continuo.
+            loadOfflineDataset(safe.ds, { ...opts, recordingName: filename, safeInfo: safe.safeInfo });
+            if (safe.safeInfo && Number.isFinite(safe.safeInfo.segmentSpanSec)) {
+                offlineSegmentOffsetSec = safe.safeInfo.segmentSpanSec;
+                // La referencia global arranca en el primer timestamp real de la grabación.
+                offlineRecordingGlobalMinTs = safe.ds.minTs;
+            }
+            return;
+        }
         const r = await fetch("/api/recordings/" + encodeURIComponent(filename));
         if (!r.ok) throw new Error("No se pudo descargar la grabación");
         const text = await r.text();
         const ds = parseTsvDataset(text, filename);
-        loadOfflineDataset(ds, { ...opts, recordingName: filename });
+        loadOfflineDataset(ds, { ...opts, recordingName: filename, safeInfo: null });
     }
 
     function connect() {
@@ -3387,6 +4055,17 @@
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusDisconnected;
             statusEl.className = "status disconnected";
             statusEl.title = lastConnectionError || "";
+            isRecording = false;
+            isRecordingStopping = false;
+            pendingRecordingRestart = false;
+            if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
+            if (recordBtn) {
+                recordBtn.disabled = false;
+                recordBtn.textContent = "\u25CF REC";
+                recordBtn.classList.remove("recording");
+            }
+            if (recordTimerEl) recordTimerEl.style.display = "none";
+            recordSizeBytes = 0;
         };
         socket.onerror = () => socket.close();
         socket.onmessage = (e) => {
@@ -3412,6 +4091,7 @@
             else if (msg.type === "set_result") onSetResult(msg);
             else if (msg.type === "alarm_triggered") onAlarmTriggeredFromBackend(msg.triggered);
             else if (msg.type === "alarm_cleared") onAlarmClearedFromBackend(msg.names);
+            else if (msg.type === "recording_progress") onRecordingProgress(msg);
             else if (msg.type === "record_finished") onRecordFinished(msg);
             else if (msg.type === "alarm_recording_ready") onAlarmRecordingReady(msg);
         };
@@ -3932,6 +4612,11 @@
                 } else {
                     varGraphAssignment[varName] = sel.value;
                     pruneEmptyGraphs();
+                }
+                // En modo análisis offline, al asignar por primera vez una variable
+                // a una gráfica, pedimos su histórico completo desde el TSV.
+                if (isOfflineMode() && sel.value && sel.value !== "__new__") {
+                    fetchFullHistoryIfNeeded(varName);
                 }
                 updateSelectStyle(sel);
                 updateMonitorItemStyles();
@@ -4836,6 +5521,9 @@
                         varGraphAssignment[dName] = sel.value || "";
                         pruneEmptyGraphs();
                     }
+                    if (isOfflineMode() && sel.value && sel.value !== "__new__") {
+                        fetchFullHistoryIfNeeded(dName);
+                    }
                     updateSelectStyle(sel);
                     saveConfig();
                     schedulePlotRender();
@@ -5363,12 +6051,19 @@
                 URL.revokeObjectURL(a.href);
             } catch (e) { /* ignore */ }
         }
-        if (isRecording) {
-            isRecording = false;
-            if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
-            recordBtn.textContent = "\u25CF REC";
-            recordBtn.classList.remove("recording");
-            if (recordTimerEl) recordTimerEl.style.display = "none";
+        isRecording = false;
+        isRecordingStopping = false;
+        if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
+        recordBtn.disabled = false;
+        recordBtn.textContent = "\u25CF REC";
+        recordBtn.classList.remove("recording");
+        if (recordTimerEl) recordTimerEl.style.display = "none";
+        recordSizeBytes = 0;
+        if (pendingRecordingRestart && isLiveMode()) {
+            pendingRecordingRestart = false;
+            startRecording();
+        } else {
+            pendingRecordingRestart = false;
         }
     }
 
@@ -5576,10 +6271,24 @@
             const el = items[i];
             if (el.dataset.name === editingName) continue;
             const name = el.dataset.name;
-            const vd = varsByName[el.dataset.name];
-            if (vd) {
-                const monVal = el.querySelector(".mon-value");
-                if (monVal) monVal.textContent = formatValue(vd.value, vd.type, el.dataset.name);
+            const monVal = el.querySelector(".mon-value");
+            const vd = varsByName[name];
+            let usedHistory = false;
+            // En modo análisis offline, si tenemos historial (completo o ventana)
+            // para esta variable, usar el valor interpolado en el tiempo actual.
+            if (isOfflineMode() && offlineRecordingName && monVal) {
+                const hist = historyCache[name];
+                const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
+                if (hist && tNow != null) {
+                    const vHist = getValueAtTs(hist, tNow);
+                    if (vHist != null) {
+                        monVal.textContent = formatValue(vHist, "double", name);
+                        usedHistory = true;
+                    }
+                }
+            }
+            if (vd && monVal && !usedHistory) {
+                monVal.textContent = formatValue(vd.value, vd.type, name);
                 const arrBadge = el.querySelector(".array-badge");
                 if (arrBadge && Array.isArray(vd.value)) {
                     arrBadge.textContent = "[" + vd.value.length + "]";
@@ -5604,6 +6313,40 @@
         sendAlarmsToBackend();
         refreshAllStats();
     }
+
+    // Vigilar peticiones de ventanas cortas lentas y activar modo \"pensativo\".
+    const WINDOW_SLOW_THRESHOLD_MS = 1200;
+    setInterval(() => {
+        // Solo considerar modo pensativo en análisis + modo seguro.
+        if (!isOfflineMode() || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) {
+            if (windowFetchSlow) {
+                windowFetchSlow = false;
+                if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "none";
+                updateOfflineDatasetStatus();
+            }
+            return;
+        }
+        const now = performance.now();
+        // Si hay una petición de ventana en curso desde hace demasiado tiempo.
+        if (windowFetchInFlight > 0 && (now - windowFetchLastStart) >= WINDOW_SLOW_THRESHOLD_MS) {
+            if (!windowFetchSlow) {
+                windowFetchSlow = true;
+                // Pausar automáticamente la reproducción para no seguir avanzando
+                // mientras el backend está cargando datos.
+                if (offlinePlayback.isPlaying) {
+                    stopOfflinePlayback();
+                }
+                if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "inline-flex";
+                updateOfflineDatasetStatus();
+            }
+        } else {
+            if (windowFetchSlow && windowFetchInFlight === 0) {
+                windowFetchSlow = false;
+                if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "none";
+                updateOfflineDatasetStatus();
+            }
+        }
+    }, 500);
 
     function getGraphAccent(gid) {
         const idx = graphList.indexOf(gid);
@@ -5768,6 +6511,7 @@
     // ===== RECORD =====
 
     recordBtn.addEventListener("click", () => {
+        if (isRecordingStopping) return;
         if (isRecording) {
             stopRecording(true);
         } else {
@@ -5789,40 +6533,65 @@
         return cols;
     }
 
+    function formatRecordingSize(bytes) {
+        const mb = (Math.max(0, Number(bytes) || 0) / (1024 * 1024));
+        return `${mb.toFixed(2)} MB`;
+    }
+
+    function updateRecordTimerDisplay() {
+        if (!recordTimerEl) return;
+        const elapsed = Math.max(0, Math.floor((Date.now() - recordStartTime) / 1000));
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
+        const ss = String(elapsed % 60).padStart(2, "0");
+        recordTimerEl.textContent = `${mm}:${ss} | ${formatRecordingSize(recordSizeBytes)}`;
+    }
+
+    function onRecordingProgress(msg) {
+        if (!isRecording) return;
+        if (msg && Number.isFinite(Number(msg.bytes))) {
+            recordSizeBytes = Math.max(0, Number(msg.bytes));
+            updateRecordTimerDisplay();
+        }
+    }
+
     function startRecording() {
+        if (isRecordingStopping) return;
         if (monitoredNames.size === 0 || !isLiveMode()) return;
         sendWsAction({ action: "start_recording" });
         isRecording = true;
         recordColumns = buildRecordColumns();
         recordBuffer = [];
         recordStartTime = Date.now();
+        recordSizeBytes = 0;
 
         recordBtn.textContent = "\u25A0 STOP";
         recordBtn.classList.add("recording");
         recordTimerEl.style.display = "inline";
-        recordTimerEl.textContent = "00:00";
+        updateRecordTimerDisplay();
 
         recordTimerInterval = setInterval(() => {
             const elapsed = Math.floor((Date.now() - recordStartTime) / 1000);
-            const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
-            const ss = String(elapsed % 60).padStart(2, "0");
-            recordTimerEl.textContent = mm + ":" + ss;
+            updateRecordTimerDisplay();
 
             if (elapsed >= MAX_RECORD_SEC) {
-                stopRecording(false);
-                startRecording();
+                stopRecording(false, { autoRestart: true });
             }
         }, 500);
     }
 
-    function stopRecording(download) {
+    function stopRecording(download, opts = {}) {
+        if (isRecordingStopping) return;
+        pendingRecordingRestart = !!opts.autoRestart;
         if (isLiveMode()) sendWsAction({ action: "stop_recording" });
         isRecording = false;
+        isRecordingStopping = true;
         if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
 
-        recordBtn.textContent = "\u25CF REC";
-        recordBtn.classList.remove("recording");
-        recordTimerEl.style.display = "none";
+        recordBtn.disabled = true;
+        recordBtn.textContent = "...";
+        recordBtn.classList.add("recording");
+        recordTimerEl.style.display = "inline";
+        recordTimerEl.textContent = "Procesando grabacion...";
         recordBuffer = [];
     }
 
@@ -6129,6 +6898,11 @@
             arrayElemAssignment[name] = newGid;
         } else {
             varGraphAssignment[name] = newGid;
+            // En análisis offline, al asignar una variable a un nuevo gráfico
+            // vía drag & drop, solicitar siempre su historial completo.
+            if (isOfflineMode()) {
+                fetchFullHistoryIfNeeded(name);
+            }
         }
         browserSelection.delete(name);
         pruneEmptyGraphs();
@@ -6288,6 +7062,11 @@
                     arrayElemAssignment[name] = gid;
                 } else {
                     varGraphAssignment[name] = gid;
+                    // En análisis offline, al soltar una variable en un gráfico
+                    // existente, solicitar siempre su histórico completo.
+                    if (isOfflineMode()) {
+                        fetchFullHistoryIfNeeded(name);
+                    }
                 }
                 // Sincronizar estado visual del navegador de variables
                 browserSelection.delete(name);
@@ -6458,8 +7237,9 @@
             const p = evt.points[0];
             const x = Number(p && p.x);
             if (!Number.isFinite(x)) return;
-            const origin = Number(containerEl._varmonTimeOrigin);
-            const absTs = Number.isFinite(origin) ? (origin + x) : x;
+            // En modo análisis las X ya están en tiempo real (segundos desde el
+            // inicio de la grabación), así que no sumamos ningún origen extra.
+            const absTs = x;
             applyOfflineTime(absTs);
             schedulePlotRender();
         });
@@ -6472,7 +7252,7 @@
         // Origen = mínimo timestamp real en los datos mostrados, para que al recortar el buffer
         // el eje X no salte (siempre 0 = borde izquierdo de lo que hay).
         let dataOrigin = null;
-        let globalXMax = null;
+        let globalTMax = null;
         for (const gid of graphList) {
             const varsInGraph = getVarsForGraph(gid);
             for (const name of varsInGraph) {
@@ -6483,14 +7263,26 @@
                 const tMax = xs[xs.length - 1];
                 const tMin = windowSec > 0 ? Math.max(xs[0], tMax - windowSec) : xs[0];
                 if (dataOrigin === null || tMin < dataOrigin) dataOrigin = tMin;
-                const relMax = tMax - tMin;
-                if (globalXMax === null || relMax > globalXMax) globalXMax = relMax;
+                if (globalTMax === null || tMax > globalTMax) globalTMax = tMax;
             }
         }
-        const origin = dataOrigin != null ? dataOrigin : sessionStartTime;
-        if (globalXMax === null) globalXMax = windowSec > 0 ? windowSec : 60;
         const win = windowSec > 0 ? windowSec : 60;
-        const defaultXRange = [0, Math.min(Math.max(globalXMax, 0.1), win)];
+        let defaultXRange;
+        if (isOfflineMode()) {
+            // En análisis offline NO forzamos origen a 0: usamos tiempos absolutos
+            // tal y como vienen de la grabación (time_s). El rango se ajusta
+            // simplemente al tramo visible y a la ventana seleccionada.
+            const endAbs = globalTMax != null ? globalTMax : (dataOrigin != null ? dataOrigin + win : win);
+            const startAbs = (windowSec > 0 && dataOrigin != null)
+                ? Math.max(dataOrigin, endAbs - win)
+                : (dataOrigin != null ? dataOrigin : Math.max(0, endAbs - win));
+            defaultXRange = [startAbs, Math.max(startAbs + 0.1, endAbs)];
+        } else {
+            // En live mantenemos ventana deslizante clásica relativa al origen:
+            // el eje X siempre va de 0 a ventana (segundos relativos desde que
+            // se empezó a recibir datos).
+            defaultXRange = [0, win];
+        }
         const sharedXRange = (Array.isArray(sharedZoomXRange) && sharedZoomXRange.length === 2)
             ? sharedZoomXRange
             : defaultXRange;
@@ -6500,7 +7292,6 @@
             const slotEl = document.getElementById("plotSlot_" + gid);
             const containerEl = document.getElementById("plotContainer_" + gid);
             if (!slotEl || !containerEl) continue;
-            containerEl._varmonTimeOrigin = Number(origin != null ? origin : 0);
 
             slotEl.style.display = "flex";
             activeSlots.push(gid);
@@ -6515,7 +7306,13 @@
             varsInGraph.forEach((name, idx) => {
                 const isArrElem = name.includes("[") && name.endsWith("]");
                 const hist = isArrElem ? arrayElemHistory[name] : historyCache[name];
-                if (!hist || !hist.timestamps || hist.timestamps.length === 0) return;
+                if (!hist || !hist.timestamps || hist.timestamps.length === 0) {
+                    // En análisis offline, si falta historial, pedirlo bajo demanda.
+                    if (isOfflineMode()) {
+                        fetchFullHistoryIfNeeded(name);
+                    }
+                    return;
+                }
                 let xs = hist.timestamps;
                 let ys = hist.values;
                 const tMax = xs[xs.length - 1];
@@ -6531,11 +7328,14 @@
                         ys = ys.slice(lo);
                     }
                 }
-                const t0 = origin != null ? origin : xs[0];
                 const smoothWindow = Math.max(1, parseInt(document.getElementById("smoothPlotsSelect")?.value, 10) || 1);
                 const ySmooth = smoothWindow > 1 ? movingAverage(ys, smoothWindow) : ys;
-                const relXs = xs.map(t => t - t0);
-                const ds = downsampleSeries(relXs, ySmooth, downsampleMaxPoints);
+
+                let xForPlot;
+                // En análisis: X en tiempo absoluto; en live ya están en relativo.
+                xForPlot = xs;
+
+                const ds = downsampleSeries(xForPlot, ySmooth, downsampleMaxPoints);
                 traces.push({
                     x: ds.x,
                     y: ds.y,
@@ -6715,6 +7515,45 @@
         saveConfig();
     });
 
+    if (offlineFullLoadMaxMbInput) {
+        offlineFullLoadMaxMbInput.addEventListener("change", () => {
+            const v = Math.max(5, Math.floor(Number(offlineFullLoadMaxMbInput.value) || DEFAULT_OFFLINE_FULL_LOAD_MAX_MB));
+            offlineFullLoadMaxMb = v;
+            offlineFullLoadMaxMbInput.value = String(v);
+            saveConfig();
+        });
+    }
+    if (offlinePreviewMbInput) {
+        offlinePreviewMbInput.addEventListener("change", () => {
+            const v = Math.max(1, Math.min(8, Math.floor(Number(offlinePreviewMbInput.value) || DEFAULT_OFFLINE_PREVIEW_MB)));
+            offlinePreviewMb = v;
+            offlinePreviewMbInput.value = String(v);
+            saveConfig();
+        });
+    }
+    if (offlinePreviewRowsInput) {
+        offlinePreviewRowsInput.addEventListener("change", () => {
+            const v = Math.max(500, Math.floor(Number(offlinePreviewRowsInput.value) || DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_ROWS));
+            offlineSafePreviewMaxRows = v;
+            offlinePreviewRowsInput.value = String(v);
+            saveConfig();
+        });
+    }
+    if (offlinePreviewSpanSecInput) {
+        offlinePreviewSpanSecInput.addEventListener("change", () => {
+            const v = Math.max(5, Math.floor(Number(offlinePreviewSpanSecInput.value) || DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_SPAN_SEC));
+            offlineSafePreviewMaxSpanSec = v;
+            offlinePreviewSpanSecInput.value = String(v);
+            saveConfig();
+        });
+    }
+    if (offlineAllowForceFullLoadCheckbox) {
+        offlineAllowForceFullLoadCheckbox.addEventListener("change", () => {
+            offlineAllowForceFullLoad = !!offlineAllowForceFullLoadCheckbox.checked;
+            saveConfig();
+        });
+    }
+
     function markReconnectPending() {
         if (!reconnectBtn.classList.contains("btn-pending")) {
             reconnectBtn.classList.add("btn-pending");
@@ -6794,13 +7633,17 @@
 
         // Parar grabacion si estaba activa
         isRecording = false;
+        isRecordingStopping = false;
+        pendingRecordingRestart = false;
         recordBuffer = [];
         recordColumns = [];
+        recordSizeBytes = 0;
         recordStartTime = null;
         if (recordTimerInterval) {
             clearInterval(recordTimerInterval);
             recordTimerInterval = null;
         }
+        recordBtn.disabled = false;
         recordTimerEl.style.display = "none";
         recordBtn.classList.remove("btn-record-active");
     }

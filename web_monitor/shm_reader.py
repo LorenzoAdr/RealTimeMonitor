@@ -6,12 +6,12 @@ import struct
 import threading
 from queue import Queue, Empty
 
-# Layout C++: HEADER 28 bytes (magic, version, seq, count, timestamp), ENTRY 137 (name[128], type, double)
+# Layout C++: HEADER 32 bytes (magic, version, seq, count, padding, timestamp), ENTRY 137 (name[128], type, double)
 MAGIC = 0x4D524156  # VARM little-endian
-HEADER_SIZE = 4 + 4 + 8 + 4 + 8  # magic, version, seq, count, timestamp
+HEADER_SIZE = 4 + 4 + 8 + 4 + 4 + 8  # magic, version, seq, count, padding, timestamp = 32
 NAME_MAX_LEN = 128
 ENTRY_SIZE = NAME_MAX_LEN + 1 + 8  # name + type_byte + value double
-# C++ escribe: 0 magic, 4 version, 8 seq, 16 count, 24 timestamp (28 total)
+# C++ escribe: 0 magic, 4 version, 8 seq, 16 count, 20-23 padding, 24 timestamp (32 total)
 HEADER_FMT = "<IIQI"   # 0-20: magic, version, seq, count
 TIMESTAMP_OFF = 24     # timestamp 8 bytes en 24
 
@@ -33,32 +33,40 @@ def _open_shm(shm_name: str):
         return None, None
 
 
-def _open_sem(sem_name: str):
-    """Abre semáforo POSIX existente. Devuelve handle (ctypes) o None."""
+def _open_sem(sem_name: str) -> tuple[object | None, str | None]:
+    """Abre semáforo POSIX existente. Devuelve (handle, None) o (None, mensaje_errno)."""
     try:
         import ctypes
-        libc = ctypes.CDLL("libc.so.6")
-        # En 64 bits el puntero debe ser c_void_p; si restype es int se trunca y sem_wait segfaulta
+        # use_errno=True para que ctypes.get_errno() refleje el errno de sem_open
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.sem_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
         libc.sem_open.restype = ctypes.c_void_p
         libc.sem_wait.argtypes = [ctypes.c_void_p]
         libc.sem_close.argtypes = [ctypes.c_void_p]
-        SEM_O = 0
-        sem = libc.sem_open(sem_name.encode(), SEM_O)
-        # SEM_FAILED = (void*)-1; c_void_p(-1).value es 2^64-1 en 64 bits
-        if sem is None:
-            return None
-        v = getattr(sem, "value", None)
-        if v is None or v == ctypes.c_void_p(-1).value:
-            return None
-        return (libc, sem)
-    except Exception:
-        return None
+        # O_RDWR = 2: necesario en muchos sistemas para abrir un semáforo existente
+        O_RDWR = 2
+        SEM_FAILED_VAL = ctypes.c_void_p(-1).value
+        name_bytes = sem_name.encode("utf-8")
+        sem = libc.sem_open(name_bytes, O_RDWR)
+        errno_val = ctypes.get_errno()
+        if sem is None or getattr(sem, "value", sem) == SEM_FAILED_VAL:
+            errno_names = {
+                2: "ENOENT — no existe /dev/shm/sem.<nombre> (compruebe 'ls /dev/shm/sem.*')",
+                13: "EACCES — permiso denegado (mismo usuario que el proceso C++)",
+                20: "ENOTDIR",
+                24: "EMFILE (demasiados descriptores abiertos)",
+            }
+            err_str = errno_names.get(errno_val, f"errno={errno_val}")
+            return (None, err_str)
+        return ((libc, sem), None)
+    except Exception as e:
+        return (None, str(e))
 
 
 def _sem_wait(libc, sem, timeout_sec: float | None = None):
     """Espera al semáforo. Si timeout_sec es None, espera indefinidamente. True si se obtuvo, False si timeout."""
     import ctypes
+    import time
     sem_ptr = sem if isinstance(sem, ctypes.c_void_p) else ctypes.c_void_p(sem)
     if timeout_sec is None:
         libc.sem_wait(sem_ptr)
@@ -66,7 +74,11 @@ def _sem_wait(libc, sem, timeout_sec: float | None = None):
     class timespec(ctypes.Structure):
         _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
     libc.sem_timedwait.argtypes = [ctypes.c_void_p, ctypes.POINTER(timespec)]
-    ts = timespec(int(timeout_sec), int((timeout_sec % 1) * 1_000_000_000))
+    # sem_timedwait espera tiempo ABSOLUTO (CLOCK_REALTIME), no relativo.
+    deadline = time.time() + max(0.0, float(timeout_sec))
+    tv_sec = int(deadline)
+    tv_nsec = int((deadline - tv_sec) * 1_000_000_000)
+    ts = timespec(tv_sec, tv_nsec)
     ret = libc.sem_timedwait(sem_ptr, ctypes.byref(ts))
     return ret == 0
 
@@ -77,8 +89,11 @@ def _sem_close(libc, sem):
     libc.sem_close(sem_ptr)
 
 
-def read_snapshot(buf: mmap.mmap) -> list[dict] | None:
-    """Lee header + entradas del buffer SHM. Devuelve lista de dicts {name, type, value} o None si magic inválido."""
+def read_snapshot(buf: mmap.mmap) -> dict | None:
+    """Lee header + entradas del buffer SHM.
+
+    Devuelve {"timestamp": <sec>, "data": [vars...]} o None si magic inválido.
+    """
     if buf.size() < HEADER_SIZE:
         return None
     raw = buf.read(HEADER_SIZE)
@@ -115,11 +130,11 @@ def read_snapshot(buf: mmap.mmap) -> list[dict] | None:
         else:
             val_out = value
         result.append({"name": name, "type": type_str, "value": val_out})
-    return result
+    return {"timestamp": float(timestamp), "data": result, "seq": seq}
 
 
 class ShmReader:
-    """Lee SHM en un hilo: sem_wait -> lee snapshot -> pone en queue. Para cuando el proceso C++ cierra SHM."""
+    """Lee SHM en un hilo: sem_wait (o polling si el semáforo no abre) -> lee snapshot -> pone en queue."""
 
     def __init__(self, shm_name: str, sem_name: str, queue: Queue, poll_interval: float = 0.5):
         self.shm_name = shm_name
@@ -131,23 +146,32 @@ class ShmReader:
         self._fd = None
         self._buf: mmap.mmap | None = None
         self._sem_handle = None
+        self._last_error: str | None = None
+        self._polling_only: bool = False
 
     def start(self) -> bool:
-        """Abre SHM y sem, arranca hilo. False si no se pudo abrir."""
+        """Abre SHM (y sem si es posible), arranca hilo. False solo si SHM no se pudo abrir. Ver last_error."""
+        self._last_error = None
         fd, buf = _open_shm(self.shm_name)
         if fd is None or buf is None:
-            return False
-        sem_handle = _open_sem(self.sem_name)
-        if sem_handle is None:
+            path = f"/dev/shm/{self.shm_name}"
             try:
-                buf.close()
-                os.close(fd)
+                exists = os.path.exists(path)
             except Exception:
-                pass
+                exists = False
+            if not exists:
+                self._last_error = f"segmento SHM no existe: {path} (¿proceso C++ con SHM iniciado y mismo usuario?)"
+            else:
+                self._last_error = f"no se pudo abrir o mapear {path} (tamaño o permisos)"
             return False
+        sem_handle, sem_err = _open_sem(self.sem_name)
+        if sem_handle is None:
+            self._polling_only = True
+            self._last_error = f"semáforo no disponible ({sem_err or 'desconocido'}), usando modo polling"
+        else:
+            self._sem_handle = sem_handle
         self._fd = fd
         self._buf = buf
-        self._sem_handle = sem_handle
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -176,18 +200,39 @@ class ShmReader:
             self._sem_handle = None
 
     def _run(self):
-        libc, sem = self._sem_handle
+        import time
         buf = self._buf
-        while not self._stop.is_set():
-            got = _sem_wait(libc, sem, timeout_sec=self.poll_interval)
-            if self._stop.is_set():
-                break
-            if not got:
-                continue
-            try:
-                buf.seek(0)
-                snapshot = read_snapshot(buf)
-                if snapshot is not None:
-                    self.queue.put(snapshot)
-            except Exception:
-                pass
+        if self._sem_handle is not None:
+            libc, sem = self._sem_handle
+            while not self._stop.is_set():
+                got = _sem_wait(libc, sem, timeout_sec=self.poll_interval)
+                if self._stop.is_set():
+                    break
+                if not got:
+                    continue
+                try:
+                    buf.seek(0)
+                    snapshot = read_snapshot(buf)
+                    if snapshot is not None:
+                        self.queue.put(snapshot)
+                except Exception:
+                    pass
+        else:
+            last_seq: int | None = None
+            poll_s = max(0.001, min(0.5, self.poll_interval))
+            if poll_s > 0.01:
+                poll_s = 0.005
+            while not self._stop.is_set():
+                time.sleep(poll_s)
+                if self._stop.is_set():
+                    break
+                try:
+                    buf.seek(0)
+                    snapshot = read_snapshot(buf)
+                    if snapshot is not None:
+                        seq = snapshot.get("seq")
+                        if seq is not None and seq != last_seq:
+                            last_seq = seq
+                            self.queue.put(snapshot)
+                except Exception:
+                    pass

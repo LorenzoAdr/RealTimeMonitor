@@ -424,6 +424,25 @@ body.theme-light.mode-analysis {
     background: rgba(74, 222, 128, 0.12);
 }
 
+.offline-dataset-status.offline-safe {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.55);
+    background: rgba(245, 158, 11, 0.14);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.25) inset;
+    font-weight: 600;
+}
+
+.offline-safe-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #3b82f6;
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px solid #3b82f6;
+    background: rgba(59, 130, 246, 0.16);
+    margin-left: 4px;
+}
+
 .port-control {
     display: flex;
     align-items: center;
@@ -568,6 +587,16 @@ main {
     position: relative;
     flex-wrap: wrap;
     gap: 8px;
+}
+
+.monitor-loading-indicator {
+    font-size: 11px;
+    font-weight: 600;
+    color: #f97373;
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px solid #f97373;
+    background: rgba(249, 115, 115, 0.16);
 }
 
 .btn-monitor-menu {

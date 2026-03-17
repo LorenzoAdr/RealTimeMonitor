@@ -9,6 +9,8 @@ import resource
 import socket
 import time
 import urllib.request
+import math
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
@@ -16,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
+import threading
 from queue import Empty, Queue
 
 from uds_client import UdsBridge
@@ -212,6 +215,8 @@ def _get_suggested_web_port(
 async def lifespan(app: FastAPI):
     if not hasattr(app.state, "startup_time"):
         app.state.startup_time = time.monotonic()
+    if not hasattr(app.state, "shm_cycle_ms"):
+        app.state.shm_cycle_ms = None
     asyncio.create_task(_watchdog_no_cpp())
     yield
 
@@ -268,17 +273,11 @@ async def api_set_var(name: str, value: float = Query(...), var_type: str = Quer
 
 @app.get("/api/history/{name:path}")
 async def api_get_history(name: str):
-    try:
-        b = await asyncio.to_thread(_first_uds_bridge)
-        if b is None:
-            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
-        result = await asyncio.to_thread(b.get_history, name)
-        b.disconnect()
-        if result is None:
-            return JSONResponse({"error": "Variable no encontrada"}, status_code=404)
-        return JSONResponse(result)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    """Ruta legacy eliminada: el historial se construye solo desde SHM/TSV."""
+    return JSONResponse(
+        {"error": "Historial en vivo no disponible; use grabaciones TSV."},
+        status_code=410,
+    )
 
 
 def _list_uds_instances(user_filter: str | None) -> list[dict]:
@@ -335,6 +334,10 @@ STATE_ROOT_DIR = (_config.get("server_state_dir") or "").strip() or os.path.join
 TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
 SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
 ALARM_BUFFER_SEC = 11.0  # 10 s + 1 s para registro en alarma
+
+# Índice ligero de tiempos por grabación TSV: path -> [(time_s, byte_offset), ...]
+_TIME_INDEX: dict[str, list[tuple[float, int]]] = {}
+_TIME_INDEX_LOCK = threading.Lock()
 
 
 def _ensure_recordings_dir():
@@ -412,6 +415,7 @@ def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]
     """Escribe snapshots a TSV (tabuladores). Arrays expandidos en columnas: name_0, name_1, ..."""
     if not snapshots:
         return
+    t0 = float(snapshots[0][0])
     if var_names is None:
         names_set = set()
         for _, data in snapshots:
@@ -442,7 +446,8 @@ def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]
         f.write("\t".join(header_parts) + "\n")
         for t, data in snapshots:
             name_to_val = {e["name"]: e.get("value", "") for e in data}
-            row_parts = [f"{t:.6f}"]
+            t_rel = max(0.0, float(t) - t0)
+            row_parts = [f"{t_rel:.6f}"]
             for name, size in col_spec:
                 v = name_to_val.get(name, "")
                 if size <= 1:
@@ -454,6 +459,164 @@ def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]
                     else:
                         row_parts.extend([str(v)] + [""] * (size - 1))
             f.write("\t".join(row_parts) + "\n")
+
+
+def _estimate_record_header_bytes(var_names: list[str], snapshot: list[dict] | None = None) -> int:
+    """Estimación de bytes de cabecera TSV para progreso de grabación."""
+    snap_map = {e.get("name"): e.get("value") for e in (snapshot or []) if isinstance(e, dict)}
+    parts = ["time_s"]
+    for name in var_names:
+        v = snap_map.get(name)
+        if isinstance(v, (list, tuple)) and len(v) > 1:
+            parts.extend(f"{name}_{i}" for i in range(len(v)))
+        else:
+            parts.append(name)
+    return len(("\t".join(parts) + "\n").encode("utf-8", errors="ignore"))
+
+
+def _estimate_record_row_bytes(t_snap: float, snapshot: list[dict], var_names: list[str]) -> int:
+    """Estimación de bytes de una fila TSV (aprox) para mostrar tamaño en vivo."""
+    name_to_val = {e.get("name"): e.get("value", "") for e in snapshot if isinstance(e, dict)}
+    row_parts = [f"{t_snap:.6f}"]
+    for name in var_names:
+        v = name_to_val.get(name, "")
+        if isinstance(v, (list, tuple)):
+            if len(v) <= 1:
+                row_parts.append(str(v[0]) if len(v) == 1 else "")
+            else:
+                for item in v:
+                    row_parts.append(str(item))
+        else:
+            row_parts.append(str(v))
+    return len(("\t".join(row_parts) + "\n").encode("utf-8", errors="ignore"))
+
+
+def _flush_record_buffer_to_tsv(
+    record_buffer: list[tuple[float, list[dict]]],
+    recording_var_names: list[str] | None,
+) -> tuple[str, str, int]:
+    """Vuelca el buffer de grabación a TSV y devuelve (path, filename, size_bytes)."""
+    if not record_buffer:
+        return "", "", 0
+    _ensure_recordings_dir()
+    from datetime import datetime
+    fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+    path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
+    var_names = recording_var_names or sorted(set(e["name"] for _, data in record_buffer for e in data))
+    _write_snapshots_tsv(path_saved, record_buffer, var_names)
+    try:
+        size_bytes = int(os.path.getsize(path_saved))
+    except Exception:
+        size_bytes = 0
+    return path_saved, fn_saved, size_bytes
+
+
+def _build_record_col_spec(var_names: list[str], snapshot: list[dict]) -> list[tuple[str, int]]:
+    """Construye especificación de columnas para grabación incremental."""
+    snap_map = {e.get("name"): e.get("value") for e in snapshot if isinstance(e, dict)}
+    spec: list[tuple[str, int]] = []
+    for name in var_names:
+        v = snap_map.get(name)
+        if isinstance(v, (list, tuple)) and len(v) > 1:
+            spec.append((name, len(v)))
+        else:
+            spec.append((name, 1))
+    return spec
+
+
+def _write_record_header_stream(f, col_spec: list[tuple[str, int]]) -> int:
+    parts = ["time_s"]
+    for name, size in col_spec:
+        if size <= 1:
+            parts.append(name)
+        else:
+            parts.extend(f"{name}_{i}" for i in range(size))
+    line = "\t".join(parts) + "\n"
+    f.write(line)
+    return len(line.encode("utf-8", errors="ignore"))
+
+
+def _write_record_row_stream(
+    f,
+    t_snap: float,
+    snapshot: list[dict],
+    col_spec: list[tuple[str, int]],
+) -> int:
+    name_to_val = {e.get("name"): e.get("value", "") for e in snapshot if isinstance(e, dict)}
+    row_parts = [f"{t_snap:.6f}"]
+    for name, size in col_spec:
+        v = name_to_val.get(name, "")
+        if size <= 1:
+            if isinstance(v, (list, tuple)):
+                row_parts.append(str(v[0]) if len(v) >= 1 else "")
+            else:
+                row_parts.append(str(v))
+        else:
+            if isinstance(v, (list, tuple)):
+                for i in range(size):
+                    row_parts.append(str(v[i]) if i < len(v) else "")
+            else:
+                row_parts.extend([str(v)] + [""] * (size - 1))
+    line = "\t".join(row_parts) + "\n"
+    f.write(line)
+    return len(line.encode("utf-8", errors="ignore"))
+
+
+def _recording_writer_thread(
+    queue: Queue,
+    path: str,
+    var_names: list[str] | None,
+    rows_written_ref: list[int],
+) -> None:
+    """Hilo que escribe (t_rel, snapshot) a disco; no depende del event loop."""
+    _ensure_recordings_dir()
+    f = None
+    col_spec: list[tuple[str, int]] | None = None
+    try:
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+            t_rel, snapshot = item
+            if not snapshot:
+                continue
+            if col_spec is None:
+                names = var_names or sorted(set(e.get("name") for e in snapshot if isinstance(e, dict)))
+                col_spec = _build_record_col_spec(names, snapshot)
+                f = open(path, "w")
+                _write_record_header_stream(f, col_spec)
+            _write_record_row_stream(f, t_rel, snapshot, col_spec)
+            rows_written_ref[0] += 1
+    finally:
+        if f is not None:
+            try:
+                f.flush()
+                f.close()
+            except Exception:
+                pass
+
+
+def _finalize_recording_temp_file(temp_path: str | None, rows_written: int) -> tuple[str, str, int]:
+    """Cierra grabación incremental: renombra temporal a record_*.tsv."""
+    if not temp_path:
+        return "", "", 0
+    try:
+        if rows_written <= 0:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+            return "", "", 0
+        _ensure_recordings_dir()
+        from datetime import datetime
+        fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+        path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
+        os.replace(temp_path, path_saved)
+        try:
+            size_saved = int(os.path.getsize(path_saved))
+        except Exception:
+            size_saved = 0
+        return path_saved, fn_saved, size_saved
+    except Exception:
+        return "", "", 0
 
 
 def _evaluate_alarms(
@@ -560,8 +723,17 @@ async def api_recordings():
 
 
 @app.get("/api/recordings/{filename}")
-async def api_recording_download(filename: str):
-    """Descarga segura de una grabación dentro de recordings/."""
+async def api_recording_download(
+    filename: str,
+    preview_bytes: int = Query(0),
+    offset: int = Query(0),
+):
+    """Descarga segura de una grabación dentro de recordings/.
+
+    Si preview_bytes > 0, devuelve un preview de texto parcial para análisis seguro
+    sin transferir el TSV completo. offset (bytes) permite pedir un tramo posterior
+    (Fase 1: navegación por tramos en archivos grandes).
+    """
     _ensure_recordings_dir()
     safe_name = os.path.basename(filename or "")
     if not safe_name or safe_name != filename:
@@ -572,7 +744,419 @@ async def api_recording_download(filename: str):
         return JSONResponse({"error": "Ruta inválida"}, status_code=400)
     if not os.path.isfile(path):
         return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    if int(preview_bytes or 0) > 0:
+        try:
+            max_bytes = max(1024, min(int(preview_bytes), 8 * 1024 * 1024))
+            seek_offset = max(0, int(offset or 0))
+            segment_start = 0
+            header_raw: bytes
+            body_raw: bytes
+            with open(path, "rb") as f:
+                # Leer siempre la cabecera completa (primera línea) para poder
+                # reconstruir un TSV válido en cualquier tramo.
+                header_raw = f.readline()
+                header_text = header_raw.decode("utf-8", errors="ignore")
+                header_len = len(header_raw)
+                if seek_offset > 0:
+                    # Buscar un inicio de línea cercano al offset solicitado.
+                    f.seek(seek_offset)
+                    back = min(seek_offset, 8192)
+                    f.seek(max(0, seek_offset - back))
+                    chunk = f.read(back)
+                    last_nl = chunk.rfind(b"\n")
+                    segment_start = seek_offset - back + last_nl + 1 if last_nl >= 0 else seek_offset
+                    f.seek(segment_start)
+                else:
+                    # Primer tramo: empezar justo después de la cabecera.
+                    segment_start = header_len
+                    f.seek(segment_start)
+                body_raw = f.read(max_bytes)
+            # Siempre devolvemos cabecera + tramo para que el cliente pueda parsear el TSV.
+            body_text = body_raw.decode("utf-8", errors="ignore")
+            text = header_text + body_text
+            st = os.stat(path)
+            return {
+                "filename": safe_name,
+                "size": int(st.st_size),
+                "offset": seek_offset,
+                "segment_start": segment_start,
+                # Solo contabilizamos los bytes de cuerpo para el control de tramos.
+                "preview_bytes": len(body_raw),
+                "truncated": int(st.st_size) > (segment_start + len(body_raw)),
+                "preview": text,
+            }
+        except Exception as e:
+            return JSONResponse({"error": f"No se pudo leer preview: {e}"}, status_code=500)
     return FileResponse(path, media_type="text/tab-separated-values", filename=safe_name)
+
+
+def _read_single_var_history_tsv(path: str, var_name: str, max_points: int = 20000) -> dict:
+    """Lee time_s y una variable concreta de un TSV grande, con downsampling simple."""
+    import math
+
+    ts_list: list[float] = []
+    val_list: list[float] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        header = f.readline()
+        if not header:
+            raise ValueError("TSV vacío")
+        cols = header.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        try:
+            idx_var = cols.index(var_name)
+        except ValueError:
+            raise KeyError(f"Variable '{var_name}' no encontrada en TSV")
+        # Primera pasada: recoger todos los puntos (solo dos columnas)
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) <= idx_var:
+                continue
+            try:
+                t = float(parts[0])
+            except ValueError:
+                continue
+            raw = parts[idx_var].strip()
+            if raw == "":
+                continue
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            ts_list.append(t)
+            val_list.append(v)
+    n = len(ts_list)
+    if n == 0:
+        return {"name": var_name, "timestamps": [], "values": []}
+    if n <= max_points:
+        return {"name": var_name, "timestamps": ts_list, "values": val_list}
+    # Downsampling uniforme: step = ceil(n / max_points)
+    step = max(1, math.ceil(n / max_points))
+    ds_ts = ts_list[0:n:step]
+    ds_vals = val_list[0:n:step]
+    if ds_ts[-1] != ts_list[-1]:
+        ds_ts.append(ts_list[-1])
+        ds_vals.append(val_list[-1])
+    return {"name": var_name, "timestamps": ds_ts, "values": ds_vals}
+
+
+def _read_var_window_tsv(
+    path: str,
+    var_name: str,
+    t_center: float,
+    t_span: float,
+    max_points: int = 5000,
+) -> dict:
+    """Lee una ventana temporal [t_start, t_end] de time_s + variable concreta, con downsampling.
+
+    Usa un índice ligero de tiempo si está disponible para evitar escanear todo el fichero.
+    """
+    import math
+
+    if not math.isfinite(t_center) or t_span <= 0:
+        raise ValueError("Parámetros de tiempo inválidos")
+    half = t_span / 2.0
+    t_start = t_center - half
+    t_end = t_center + half
+    if t_end < t_start:
+        t_start, t_end = t_end, t_start
+
+    ts_list: list[float] = []
+    val_list: list[float] = []
+
+    # Intentar usar índice de tiempos si existe.
+    with _TIME_INDEX_LOCK:
+        idx = _TIME_INDEX.get(path)
+
+    start_offset: int | None = None
+    if idx:
+        # Buscar el primer punto del índice con tiempo >= t_start
+        lo, hi = 0, len(idx) - 1
+        pos = len(idx) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            tm, off = idx[mid]
+            if tm >= t_start:
+                pos = mid
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        start_offset = idx[pos][1]
+
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        header = f.readline()
+        if not header:
+            raise ValueError("TSV vacío")
+        cols = header.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        try:
+            idx_var = cols.index(var_name)
+        except ValueError:
+            raise KeyError(f"Variable '{var_name}' no encontrada en TSV")
+
+        # Si tenemos offset, saltar directamente allí; si no, escanear completo.
+        if start_offset is not None:
+            f.seek(start_offset)
+
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) <= idx_var:
+                continue
+            try:
+                t = float(parts[0])
+            except ValueError:
+                continue
+            if t < t_start:
+                continue
+            if t > t_end:
+                break
+            raw = parts[idx_var].strip()
+            if raw == "":
+                continue
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            ts_list.append(t)
+            val_list.append(v)
+    n = len(ts_list)
+    if n == 0:
+        return {"name": var_name, "timestamps": [], "values": []}
+    if n <= max_points:
+        return {"name": var_name, "timestamps": ts_list, "values": val_list}
+    step = max(1, math.ceil(n / max_points))
+    ds_ts = ts_list[0:n:step]
+    ds_vals = val_list[0:n:step]
+    if ds_ts[-1] != ts_list[-1]:
+        ds_ts.append(ts_list[-1])
+        ds_vals.append(val_list[-1])
+    return {"name": var_name, "timestamps": ds_ts, "values": ds_vals}
+
+
+def _build_time_index_and_bounds(path: str, min_step_sec: float = 1.0) -> dict:
+    """Construye un índice ligero de tiempos (time_s -> offset) y devuelve bounds."""
+    min_ts: float | None = None
+    max_ts: float | None = None
+    index: list[tuple[float, int]] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        header = f.readline()
+        if not header:
+            raise ValueError("TSV vacío")
+        cols = header.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        while True:
+            offset = f.tell()
+            line = f.readline()
+            if not line:
+                break
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if not parts:
+                continue
+            try:
+                t = float(parts[0])
+            except ValueError:
+                continue
+            if not math.isfinite(t):
+                continue
+            if min_ts is None or t < min_ts:
+                min_ts = t
+            if max_ts is None or t > max_ts:
+                max_ts = t
+            # Guardar un punto de índice cada min_step_sec aprox.
+            if not index or (t - index[-1][0]) >= min_step_sec:
+                index.append((t, offset))
+    if min_ts is None or max_ts is None:
+        raise ValueError("No se encontraron tiempos válidos en el TSV")
+    with _TIME_INDEX_LOCK:
+        _TIME_INDEX[path] = index
+    return {"minTs": float(min_ts), "maxTs": float(max_ts)}
+
+
+def _read_time_bounds_tsv(path: str) -> dict:
+    """Devuelve bounds de tiempo, construyendo el índice si es necesario."""
+    with _TIME_INDEX_LOCK:
+        idx = _TIME_INDEX.get(path)
+    if idx:
+        # Si ya hay índice, usar sus extremos como bounds aproximados.
+        return {"minTs": float(idx[0][0]), "maxTs": float(idx[-1][0])}
+    return _build_time_index_and_bounds(path)
+
+
+@app.get("/api/recordings/{filename}/history")
+async def api_recording_var_history(filename: str, var: str = Query(...), max_points: int = Query(20000)):
+    """Histórico completo de una variable concreta desde el TSV (modo análisis offline).
+
+    - Lee solo time_s y la columna de la variable.
+    - Aplica downsampling uniforme si el número de puntos supera max_points.
+    """
+    _ensure_recordings_dir()
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+    root = os.path.abspath(RECORDINGS_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    var_name = (var or "").strip()
+    if not var_name:
+        return JSONResponse({"error": "Nombre de variable vacío"}, status_code=400)
+    try:
+        mp = max(1000, min(int(max_points or 0), 100000))
+    except Exception:
+        mp = 20000
+    try:
+        data = await asyncio.to_thread(_read_single_var_history_tsv, path, var_name, mp)
+        return JSONResponse(data)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudo leer historial: {e}"}, status_code=500)
+
+
+@app.get("/api/recordings/{filename}/window")
+async def api_recording_var_window(
+    filename: str,
+    var: str = Query(...),
+    t_center: float = Query(...),
+    t_span: float = Query(20.0),
+    max_points: int = Query(5000),
+):
+    """Ventana corta de una variable concreta desde el TSV (modo análisis offline).
+
+    - Filtra por rango temporal [t_center - t_span/2, t_center + t_span/2].
+    - Aplica downsampling uniforme si el número de puntos supera max_points.
+    """
+    _ensure_recordings_dir()
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+    root = os.path.abspath(RECORDINGS_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    var_name = (var or "").strip()
+    if not var_name:
+        return JSONResponse({"error": "Nombre de variable vacío"}, status_code=400)
+    try:
+        mp = max(500, min(int(max_points or 0), 50000))
+    except Exception:
+        mp = 5000
+    try:
+        data = await asyncio.to_thread(
+            _read_var_window_tsv,
+            path,
+            var_name,
+            float(t_center),
+            float(t_span),
+            mp,
+        )
+        return JSONResponse(data)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudo leer ventana: {e}"}, status_code=500)
+
+
+@app.get("/api/recordings/{filename}/window_batch")
+async def api_recording_var_window_batch(
+    filename: str,
+    vars: str = Query(..., description="Lista separada por comas de nombres de variables"),
+    t_center: float = Query(...),
+    t_span: float = Query(20.0),
+    max_points: int = Query(5000),
+):
+    """Ventanas cortas para varias variables en una sola pasada (modo análisis offline).
+
+    Devuelve un array de series [{name, timestamps, values}, ...].
+    """
+    _ensure_recordings_dir()
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+    root = os.path.abspath(RECORDINGS_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    raw_vars = (vars or "").split(",")
+    names = [v.strip() for v in raw_vars if v and v.strip()]
+    if not names:
+        return JSONResponse({"error": "Sin variables válidas en 'vars'"}, status_code=400)
+    try:
+        mp = max(500, min(int(max_points or 0), 50000))
+    except Exception:
+        mp = 5000
+
+    async def _read_one(name: str) -> dict:
+        return await asyncio.to_thread(
+            _read_var_window_tsv,
+            path,
+            name,
+            float(t_center),
+            float(t_span),
+            mp,
+        )
+
+    series: list[dict] = []
+    for name in names:
+        try:
+            data = await _read_one(name)
+            series.append(data)
+        except KeyError:
+            # Variable no encontrada: se omite en el resultado
+            continue
+        except Exception:
+            continue
+    return JSONResponse({
+        "t_center": float(t_center),
+        "span": float(t_span),
+        "series": series,
+    })
+
+
+@app.get("/api/recordings/{filename}/bounds")
+async def api_recording_time_bounds(filename: str):
+    """Devuelve minTs y maxTs (en segundos) de toda la grabación TSV."""
+    _ensure_recordings_dir()
+    safe_name = os.path.basename(filename or "")
+    if not safe_name or safe_name != filename:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+    root = os.path.abspath(RECORDINGS_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    try:
+        data = await asyncio.to_thread(_read_time_bounds_tsv, path)
+        return JSONResponse(data)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudieron leer bounds: {e}"}, status_code=500)
 
 
 @app.post("/api/save_tsv")
@@ -879,16 +1463,16 @@ def _get_python_cpu_percent(state) -> float | None:
     return None
 
 
-def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | None]:
-    """Conecta al C++ por UDS, pide server_info; devuelve (ram_mb, cpu_percent). (None, None) si falla."""
+def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | None, float | None, bool]:
+    """Conecta al C++ por UDS y devuelve (ram_mb, cpu_percent, shm_cycle_hint_ms, shm_active)."""
     try:
         b = _first_uds_bridge()
         if b is None:
-            return (None, None)
+            return (None, None, None, False)
         info = b.get_server_info()
         b.disconnect()
         if info is None:
-            return (None, None)
+            return (None, None, None, False)
         ram_mb = None
         rss_kb = info.get("memory_rss_kb")
         if rss_kb is not None and rss_kb >= 0:
@@ -898,10 +1482,16 @@ def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | N
             cpu_percent = float(cpu_percent)
         else:
             cpu_percent = None
-        return (ram_mb, cpu_percent)
+        shm_active = bool(info.get("shm_name") and info.get("sem_name"))
+        shm_hint = info.get("sample_interval_ms")
+        if isinstance(shm_hint, (int, float)):
+            shm_hint = float(shm_hint)
+        else:
+            shm_hint = None
+        return (ram_mb, cpu_percent, shm_hint, shm_active)
     except Exception:
         pass
-    return (None, None)
+    return (None, None, None, False)
 
 
 @app.get("/api/advanced_stats")
@@ -910,12 +1500,22 @@ async def api_advanced_stats(request: Request):
     state = request.app.state
     python_ram_mb = _get_process_ram_mb()
     python_cpu_percent = _get_python_cpu_percent(state)
-    cpp_ram_mb, cpp_cpu_percent = await asyncio.to_thread(_fetch_cpp_stats_sync)
+    cpp_ram_mb, cpp_cpu_percent, shm_cycle_hint_ms, shm_active = await asyncio.to_thread(_fetch_cpp_stats_sync)
+    shm_cycle_ms = getattr(state, "shm_cycle_ms", None)
+    if shm_cycle_ms is None and isinstance(shm_cycle_hint_ms, (int, float)):
+        shm_cycle_ms = float(shm_cycle_hint_ms)
+    # Fallback: si SHM está activo pero aún no tenemos medida EMA, mostrar ciclo configurado.
+    if shm_cycle_ms is None and shm_active:
+        try:
+            shm_cycle_ms = float(_config.get("cycle_interval_ms", 100))
+        except Exception:
+            shm_cycle_ms = None
     return {
         "python_ram_mb": python_ram_mb,
         "python_cpu_percent": python_cpu_percent,
         "cpp_ram_mb": cpp_ram_mb,
         "cpp_cpu_percent": cpp_cpu_percent,
+        "shm_cycle_ms": shm_cycle_ms,
     }
 
 
@@ -1017,11 +1617,25 @@ async def websocket_endpoint(ws: WebSocket):
     prev_alarm_state: dict = {}
     alarm_pending_since_ms: dict = {}
     recording = False
-    record_buffer: list[tuple[float, list[dict]]] = []
+    record_buffer: list[tuple[float, list[dict]]] = []  # fallback (legacy)
     alarm_buffer: list[tuple[float, list[dict]]] = []  # ventana rodante ALARM_BUFFER_SEC
     latest_snapshot: list[dict] | None = None
     send_file_on_finish = False  # por defecto no enviar fichero al navegador
     recording_var_names: list[str] | None = None  # columnas para CSV (monitored al start)
+    recording_size_est_bytes = 0
+    recording_header_estimated = False
+    last_record_progress_send_at = 0.0
+    recording_tmp_path: str | None = None
+    recording_tmp_fp = None
+    recording_col_spec: list[tuple[str, int]] | None = None
+    recording_rows_written = 0
+    recording_t0: float | None = None
+    shm_last_snap_ts: float | None = None
+    shm_cycle_ema_ms: float | None = None
+    ws.app.state.shm_cycle_ms = None
+    recording_write_queue: Queue | None = None
+    recording_writer_thread: threading.Thread | None = None
+    recording_rows_written_ref: list[int] | None = None
 
     # Conexión solo por UDS
     query_uds = ws.query_params.get("uds_path")
@@ -1053,13 +1667,138 @@ async def websocket_endpoint(ws: WebSocket):
             info["shm_name"], info["sem_name"], shm_queue, poll_interval=0.5
         )
         if shm_reader.start():
-            print(f"[VarMonitor Web] SHM activo: {info['shm_name']} (vars_update por SHM)", flush=True)
+            if getattr(shm_reader, "_polling_only", False):
+                print(f"[VarMonitor Web] SHM activo (modo polling): {info['shm_name']} — {shm_reader._last_error or ''}", flush=True)
+            else:
+                print(f"[VarMonitor Web] SHM activo: {info['shm_name']} (grabación a tasa real del SHM)", flush=True)
         else:
+            reason = getattr(shm_reader, "_last_error", None) or "desconocido"
+            print(f"[VarMonitor Web] SHM no disponible: {reason}", flush=True)
             shm_reader = None
             shm_queue = None
+    elif info:
+        print("[VarMonitor Web] SHM no disponible: el proceso C++ no envió shm_name/sem_name (¿SHM inicializado con monitor.start()?)", flush=True)
 
     print(f"[VarMonitor Web] WebSocket conectado a C++ {connection_label}", flush=True)
     await ws.send_json({"type": "vars_names", "data": []})
+
+    shm_drain_task: asyncio.Task | None = None
+
+    async def _shm_drain_loop():
+        """Task que drena la cola SHM a la frecuencia real (no ligada a receive_text)."""
+        nonlocal latest_snapshot, shm_last_snap_ts, shm_cycle_ema_ms
+        nonlocal alarm_buffer, prev_alarm_state, alarm_pending_since_ms
+        nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_t0
+        nonlocal recording_header_estimated, recording_rows_written, recording_size_est_bytes, last_record_progress_send_at
+        while True:
+            try:
+                snapshot_item = shm_queue.get_nowait()
+            except Empty:
+                await asyncio.sleep(0.001)
+                continue
+            if isinstance(snapshot_item, dict):
+                snapshot = snapshot_item.get("data")
+                t_snap = float(snapshot_item.get("timestamp") or time.time())
+            else:
+                snapshot = snapshot_item
+                t_snap = time.time()
+            if shm_last_snap_ts is not None:
+                dt_ms = max(0.0, (t_snap - shm_last_snap_ts) * 1000.0)
+                shm_cycle_ema_ms = dt_ms if shm_cycle_ema_ms is None else (shm_cycle_ema_ms * 0.85 + dt_ms * 0.15)
+                ws.app.state.shm_cycle_ms = round(shm_cycle_ema_ms, 3)
+            shm_last_snap_ts = t_snap
+            if not snapshot:
+                continue
+            latest_snapshot = snapshot
+            if alarms_config:
+                alarm_buffer.append((t_snap, snapshot))
+                cutoff = t_snap - ALARM_BUFFER_SEC
+                while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                    alarm_buffer.pop(0)
+            if alarms_config:
+                prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                    snapshot, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                )
+                if cleared:
+                    try:
+                        await ws.send_json({"type": "alarm_cleared", "names": cleared})
+                    except Exception:
+                        pass
+                if triggered:
+                    await ws.send_json({
+                        "type": "alarm_triggered",
+                        "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
+                    })
+                    async def _send_alarm_file_later():
+                        await asyncio.sleep(1.0)
+                        buf_now = list(alarm_buffer)
+                        if not buf_now:
+                            return
+                        _ensure_recordings_dir()
+                        from datetime import datetime
+                        fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+                        path = os.path.join(RECORDINGS_DIR, fn)
+                        var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
+                        if not var_names:
+                            var_names = ["time_s"]
+                        _write_snapshots_tsv(path, buf_now, var_names)
+                        msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
+                        if send_file_on_finish:
+                            try:
+                                with open(path, "rb") as f:
+                                    import base64
+                                    msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+                            except Exception:
+                                pass
+                        try:
+                            await ws.send_json(msg)
+                        except Exception:
+                            pass
+                    asyncio.create_task(_send_alarm_file_later())
+            if recording:
+                if recording_t0 is None:
+                    recording_t0 = t_snap
+                t_rel = 0.0 if (recording_rows_written_ref and recording_rows_written_ref[0] == 0) else max(0.0, t_snap - float(recording_t0))
+                if recording_write_queue is not None:
+                    recording_write_queue.put((t_rel, snapshot))
+                    if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
+                        last_record_progress_send_at = t_snap
+                        try:
+                            await ws.send_json({
+                                "type": "recording_progress",
+                                "bytes": 0,
+                                "samples": recording_rows_written_ref[0],
+                            })
+                        except Exception:
+                            pass
+                else:
+                    if recording_tmp_fp is None:
+                        _ensure_recordings_dir()
+                        recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                        recording_tmp_fp = open(recording_tmp_path, "w")
+                    if recording_col_spec is None:
+                        names = recording_var_names or sorted(set(e["name"] for e in snapshot))
+                        recording_col_spec = _build_record_col_spec(names, snapshot)
+                    if not recording_header_estimated and recording_col_spec:
+                        recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
+                        recording_header_estimated = True
+                    if recording_col_spec:
+                        t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
+                        recording_size_est_bytes += _write_record_row_stream(recording_tmp_fp, t_rel_local, snapshot, recording_col_spec)
+                        recording_rows_written += 1
+                    if (t_snap - last_record_progress_send_at) >= 0.5:
+                        last_record_progress_send_at = t_snap
+                        try:
+                            await ws.send_json({
+                                "type": "recording_progress",
+                                "bytes": int(max(0, recording_size_est_bytes)),
+                                "samples": recording_rows_written,
+                            })
+                        except Exception:
+                            pass
+
+    if shm_reader and shm_queue is not None:
+        shm_drain_task = asyncio.create_task(_shm_drain_loop())
 
     try:
         while True:
@@ -1074,69 +1813,8 @@ async def websocket_endpoint(ws: WebSocket):
                     last_names_send = now
                     names_sent_once = True
 
-                # Procesar cada snapshot de la cola (alarmas + buffers); envío visual a tasa baja
                 if shm_reader and shm_queue is not None:
-                    while True:
-                        try:
-                            snapshot = shm_queue.get_nowait()
-                        except Empty:
-                            break
-                        if not snapshot:
-                            continue
-                        t_snap = time.time()
-                        latest_snapshot = snapshot
-                        # Buffer de alarma (ventana rodante 10s+1)
-                        if alarms_config:
-                            alarm_buffer.append((t_snap, snapshot))
-                            cutoff = t_snap - ALARM_BUFFER_SEC
-                            while alarm_buffer and alarm_buffer[0][0] < cutoff:
-                                alarm_buffer.pop(0)
-                        # Evaluar alarmas
-                        if alarms_config:
-                            prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
-                                snapshot, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
-                            )
-                            if cleared:
-                                try:
-                                    await ws.send_json({"type": "alarm_cleared", "names": cleared})
-                                except Exception:
-                                    pass
-                            if triggered:
-                                await ws.send_json({
-                                    "type": "alarm_triggered",
-                                    "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
-                                })
-                                # Programar escritura y notificación del fichero de alarma 1 s después (10s antes + 1s después)
-                                async def send_alarm_file_later():
-                                    await asyncio.sleep(1.0)
-                                    buf_now = list(alarm_buffer)
-                                    if not buf_now:
-                                        return
-                                    _ensure_recordings_dir()
-                                    from datetime import datetime
-                                    fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
-                                    path = os.path.join(RECORDINGS_DIR, fn)
-                                    var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
-                                    if not var_names:
-                                        var_names = ["time_s"]
-                                    _write_snapshots_tsv(path, buf_now, var_names)
-                                    msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
-                                    if send_file_on_finish:
-                                        try:
-                                            with open(path, "rb") as f:
-                                                import base64
-                                                msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
-                                        except Exception:
-                                            pass
-                                    try:
-                                        await ws.send_json(msg)
-                                    except Exception:
-                                        pass
-                                asyncio.create_task(send_alarm_file_later())
-                        # Buffer de grabación manual
-                        if recording:
-                            record_buffer.append((t_snap, snapshot))
-                    # Envío visual a tasa baja (throttle)
+                    # Cola SHM la drena _shm_drain_loop en segundo plano. Aquí solo envío visual a tasa baja.
                     interval_between_updates = update_ratio * cycle_interval_sec
                     if monitored_names and latest_snapshot is not None and (now - last_vars_update_at >= interval_between_updates):
                         last_vars_update_at = now
@@ -1200,7 +1878,33 @@ async def websocket_endpoint(ws: WebSocket):
                                             pass
                                     asyncio.create_task(send_alarm_file_later_fallback())
                             if recording:
-                                record_buffer.append((t_snap, snapshot_now))
+                                if recording_tmp_fp is None:
+                                    _ensure_recordings_dir()
+                                    recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                                    recording_tmp_fp = open(recording_tmp_path, "w")
+                                if recording_col_spec is None:
+                                    names = recording_var_names or sorted(set(e["name"] for e in snapshot_now))
+                                    recording_col_spec = _build_record_col_spec(names, snapshot_now)
+                                if recording_t0 is None:
+                                    recording_t0 = t_snap
+                                if not recording_header_estimated and recording_col_spec:
+                                    recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
+                                    recording_header_estimated = True
+                                if recording_col_spec:
+                                    # Tiempo relativo: primera fila siempre 0.0
+                                    t_rel = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
+                                    recording_size_est_bytes += _write_record_row_stream(recording_tmp_fp, t_rel, snapshot_now, recording_col_spec)
+                                    recording_rows_written += 1
+                                if (t_snap - last_record_progress_send_at) >= 0.5:
+                                    last_record_progress_send_at = t_snap
+                                    try:
+                                        await ws.send_json({
+                                            "type": "recording_progress",
+                                            "bytes": int(max(0, recording_size_est_bytes)),
+                                            "samples": len(record_buffer),
+                                        })
+                                    except Exception:
+                                        pass
                     # Envío visual a tasa reducida.
                     interval_between_updates = update_ratio * cycle_interval_sec
                     if monitored_names and latest_snapshot is not None and (now - last_vars_update_at >= interval_between_updates):
@@ -1208,17 +1912,32 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "vars_update", "data": latest_snapshot})
 
             except Exception as e:
+                msg_err = str(e)
+                ws_already_closed = (
+                    isinstance(e, WebSocketDisconnect)
+                    or (isinstance(e, RuntimeError) and (
+                        "close message has been sent" in msg_err
+                        or "WebSocket is not connected" in msg_err
+                    ))
+                )
+                if ws_already_closed:
+                    print(f"[VarMonitor Web] WebSocket cerrado mientras se enviaban datos (C++ {connection_label}).", flush=True)
+                    break
                 print(f"[VarMonitor Web] WebSocket error (C++ {connection_label}): {e}", flush=True)
                 import traceback
                 traceback.print_exc()
                 try:
-                    await ws.send_json({"type": "error", "message": str(e)})
+                    await ws.send_json({"type": "error", "message": msg_err})
                 except Exception as send_err:
                     print(f"[VarMonitor Web] No se pudo enviar error al cliente: {send_err}", flush=True)
-                    # No hacer break: mantener conexión viva por si el cliente sigue ahí
 
             try:
-                msg = await asyncio.wait_for(ws.receive_text(), timeout=cycle_interval_sec)
+                # Al grabar con SHM, usar timeout corto para drenar la cola a la frecuencia real del SHM
+                # (no a la del envío al frontend). Así cada muestra del SHM se escribe en el TSV.
+                recv_timeout = cycle_interval_sec
+                if recording and shm_reader and shm_queue is not None:
+                    recv_timeout = min(cycle_interval_sec, 0.005)  # 5 ms
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=recv_timeout)
                 cmd = json.loads(msg)
                 action = cmd.get("action")
 
@@ -1233,19 +1952,7 @@ async def websocket_endpoint(ws: WebSocket):
                         await asyncio.to_thread(bridge.set_shm_subscription, list(monitored_names))
                     except Exception:
                         pass
-                elif action == "get_history":
-                    hist = await asyncio.to_thread(bridge.get_history, cmd["name"])
-                    await ws.send_json({"type": "history", "data": hist})
-                elif action == "get_histories":
-                    since_seq = cmd.get("since_seq")
-                    if since_seq is not None:
-                        result = await asyncio.to_thread(
-                            bridge.get_histories_since, cmd.get("names", []), int(since_seq)
-                        )
-                        await ws.send_json({"type": "histories", "seq": result["seq"], "data": result["data"]})
-                    else:
-                        hists = await asyncio.to_thread(bridge.get_histories, cmd.get("names", []))
-                        await ws.send_json({"type": "histories", "data": hists})
+                # Historial en vivo eliminado: se mantiene solo vía SHM y grabaciones TSV.
                 elif action == "set_var":
                     ok = await asyncio.to_thread(
                         bridge.set_var, cmd["name"], cmd["value"], cmd.get("var_type", "double")
@@ -1282,18 +1989,73 @@ async def websocket_endpoint(ws: WebSocket):
                     recording = True
                     record_buffer.clear()
                     recording_var_names = list(monitored_names) if monitored_names else None
+                    recording_size_est_bytes = 0
+                    recording_header_estimated = False
+                    last_record_progress_send_at = 0.0
+                    recording_col_spec = None
+                    recording_rows_written = 0
+                    recording_t0 = None
+                    if recording_writer_thread is not None:
+                        if recording_write_queue:
+                            recording_write_queue.put(None)
+                        recording_writer_thread.join(timeout=2.0)
+                        recording_writer_thread = None
+                    recording_write_queue = None
+                    recording_rows_written_ref = None
+                    if recording_tmp_fp is not None:
+                        try:
+                            recording_tmp_fp.close()
+                        except Exception:
+                            pass
+                    recording_tmp_fp = None
+                    if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                        try:
+                            os.remove(recording_tmp_path)
+                        except Exception:
+                            pass
+                    recording_tmp_path = None
+                    if shm_reader and shm_queue is not None:
+                        _ensure_recordings_dir()
+                        recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                        recording_write_queue = Queue()
+                        recording_rows_written_ref = [0]
+                        recording_writer_thread = threading.Thread(
+                            target=_recording_writer_thread,
+                            args=(recording_write_queue, recording_tmp_path, recording_var_names, recording_rows_written_ref),
+                            daemon=True,
+                        )
+                        recording_writer_thread.start()
+                    try:
+                        await ws.send_json({"type": "recording_progress", "bytes": 0, "samples": 0})
+                    except Exception:
+                        pass
                 elif action == "stop_recording":
                     recording = False
-                    path_saved = None
-                    fn_saved = None
-                    if record_buffer:
-                        _ensure_recordings_dir()
-                        from datetime import datetime
-                        fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
-                        path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
-                        var_names = recording_var_names or sorted(set(e["name"] for _, data in record_buffer for e in data))
-                        _write_snapshots_tsv(path_saved, record_buffer, var_names)
+                    if recording_write_queue is not None and recording_writer_thread is not None:
+                        recording_write_queue.put(None)
+                        recording_writer_thread.join(timeout=5.0)
+                        recording_writer_thread = None
+                        if recording_rows_written_ref:
+                            recording_rows_written = recording_rows_written_ref[0]
+                        recording_write_queue = None
+                        recording_rows_written_ref = None
+                    if recording_tmp_fp is not None:
+                        try:
+                            recording_tmp_fp.flush()
+                        except Exception:
+                            pass
+                        try:
+                            recording_tmp_fp.close()
+                        except Exception:
+                            pass
+                    recording_tmp_fp = None
+                    path_saved, fn_saved, size_saved = _finalize_recording_temp_file(recording_tmp_path, recording_rows_written)
+                    if not path_saved and record_buffer:
+                        path_saved, fn_saved, size_saved = _flush_record_buffer_to_tsv(record_buffer, recording_var_names)
+                    recording_tmp_path = None
                     msg = {"type": "record_finished", "path": path_saved or "", "filename": fn_saved or ""}
+                    if path_saved:
+                        msg["size_bytes"] = int(size_saved if size_saved > 0 else max(0, recording_size_est_bytes))
                     if path_saved and send_file_on_finish:
                         try:
                             with open(path_saved, "rb") as f:
@@ -1309,11 +2071,64 @@ async def websocket_endpoint(ws: WebSocket):
                         pass
                     record_buffer.clear()
                     recording_var_names = None
+                    recording_size_est_bytes = 0
+                    recording_header_estimated = False
+                    last_record_progress_send_at = 0.0
+                    recording_col_spec = None
+                    recording_rows_written = 0
+                    recording_t0 = None
             except asyncio.TimeoutError:
                 pass
+            except WebSocketDisconnect:
+                print(f"[VarMonitor Web] WebSocket desconectado por el cliente durante receive (C++ {connection_label})", flush=True)
+                break
+            except RuntimeError as e:
+                if "WebSocket is not connected" in str(e):
+                    print(f"[VarMonitor Web] WebSocket no conectado durante receive (C++ {connection_label})", flush=True)
+                    break
+                raise
     except WebSocketDisconnect:
         print(f"[VarMonitor Web] WebSocket desconectado por el cliente (C++ {connection_label})", flush=True)
     finally:
+        if shm_drain_task is not None:
+            shm_drain_task.cancel()
+            try:
+                await shm_drain_task
+            except asyncio.CancelledError:
+                pass
+        if recording_write_queue is not None and recording_writer_thread is not None:
+            try:
+                recording_write_queue.put(None)
+                recording_writer_thread.join(timeout=5.0)
+            except Exception:
+                pass
+            if recording_rows_written_ref:
+                recording_rows_written = recording_rows_written_ref[0]
+            recording_write_queue = None
+            recording_writer_thread = None
+            recording_rows_written_ref = None
+        if recording and (record_buffer or recording_rows_written > 0 or recording_tmp_path):
+            try:
+                if recording_tmp_fp is not None:
+                    try:
+                        recording_tmp_fp.flush()
+                    except Exception:
+                        pass
+                    try:
+                        recording_tmp_fp.close()
+                    except Exception:
+                        pass
+                    recording_tmp_fp = None
+                path_saved, fn_saved, size_saved = _finalize_recording_temp_file(recording_tmp_path, recording_rows_written)
+                if not path_saved:
+                    path_saved, fn_saved, size_saved = _flush_record_buffer_to_tsv(record_buffer, recording_var_names)
+                print(
+                    f"[VarMonitor Web] REC salvado por cierre de WS: {fn_saved} "
+                    f"({size_saved} bytes) en {path_saved}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[VarMonitor Web] No se pudo salvar REC al cerrar WS: {e}", flush=True)
         if shm_reader:
             shm_reader.stop()
         ACTIVE_WS -= 1

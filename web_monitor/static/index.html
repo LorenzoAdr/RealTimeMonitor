@@ -54,6 +54,7 @@
                 <span id="advUiRenderMs" class="adv-val">render: —</span>
                 <span id="advUiFps" class="adv-val">fps: —</span>
                 <span id="advUiPts" class="adv-val">pts: —</span>
+                <span id="advShmCycle" class="adv-val">shm: —</span>
             </div>
         </div>
         <div class="header-right">
@@ -68,6 +69,7 @@
                 </label>
                 <button id="loadServerRecordingBtn" class="btn-small" title="Cargar grabación seleccionada del servidor">Cargar</button>
                 <span id="offlineDatasetStatus" class="offline-dataset-status offline-empty">Sin archivo cargado</span>
+                <button id="offlineSafeModeBadge" class="offline-safe-badge" style="display:none" type="button">Modo seguro</button>
             </div>
             <span class="monitor-cols-label">Cols:</span>
             <button id="monitorColsAddBtn" class="btn-small" title="Añadir columna">+</button>
@@ -75,6 +77,14 @@
             <button id="settingsBtn" class="btn-settings" title="Ajustes">&#9881;</button>
             <div id="settingsPanel" class="settings-panel" style="display:none">
                 <div class="settings-group">
+                    <div class="settings-section-title">Persistencia servidor</div>
+                    <div class="monitor-menu-row template-row">
+                        <span class="settings-inline-label">Plantillas (estado completo):</span>
+                        <select id="dashboardTemplateSelect" title="Plantillas dashboard"></select>
+                        <button id="templateSaveBtn" class="btn-small" title="Guardar layout actual como plantilla">💾 Guardar</button>
+                        <button id="templateLoadBtn" class="btn-small" title="Cargar plantilla seleccionada">📂 Cargar</button>
+                    </div>
+
                     <div class="settings-section-title">General</div>
                     <div class="port-control">
                         <label id="instanceLabel">Instancia:
@@ -99,8 +109,8 @@
                     </label>
                     <label id="timeWindowLabel">Ventana:
                         <select id="timeWindow">
-                            <option value="10">10s</option>
-                            <option value="30" selected>30s</option>
+                            <option value="10" selected>10s</option>
+                            <option value="30">30s</option>
                             <option value="60">1 min</option>
                             <option value="120">2 min</option>
                             <option value="300">5 min</option>
@@ -110,9 +120,9 @@
                     </label>
                     <label id="historyBufferLabel">Buffer:
                         <select id="historyBuffer">
-                            <option value="10">10s</option>
+                            <option value="10" selected>10s</option>
                             <option value="20">20s</option>
-                            <option value="30" selected>30s</option>
+                            <option value="30">30s</option>
                             <option value="45">45s</option>
                             <option value="60">1 min</option>
                         </select>
@@ -129,23 +139,9 @@
                     <label class="settings-adv-checkbox">Snapshot frames:
                         <input type="number" id="snapshotFramesInput" min="2" step="1" value="40">
                     </label>
-                    <div class="settings-section-title">Persistencia servidor</div>
-                    <div class="monitor-menu-row template-row">
-                        <span class="settings-inline-label">Plantillas (estado completo):</span>
-                        <select id="dashboardTemplateSelect" title="Plantillas dashboard"></select>
-                        <button id="templateSaveBtn" class="btn-small" title="Guardar layout actual como plantilla">💾 Guardar</button>
-                        <button id="templateLoadBtn" class="btn-small" title="Cargar plantilla seleccionada">📂 Cargar</button>
-                    </div>
+
+                    <!-- Botón de gestión avanzada al final -->
                     <button id="adminStorageBtn" class="btn-small" title="Abrir gestión avanzada de archivos y puertos">Gestión avanzada…</button>
-                    <div class="settings-section-title">Opciones UI / descarga</div>
-                    <label class="settings-adv-checkbox">
-                        <input type="checkbox" id="sendFileOnFinishCheckbox" title="Al terminar grabación o alarma, enviar fichero al navegador para descarga">
-                        <span id="sendFileOnFinishLabel">Enviar fichero al terminar</span>
-                    </label>
-                    <label class="settings-adv-checkbox">
-                        <input type="checkbox" id="advInfoCheckbox" title="Mostrar RAM y carga de red en el header">
-                        <span id="advInfoLabel">Adv info</span>
-                    </label>
                 </div>
             </div>
         </div>
@@ -161,6 +157,41 @@
             <h3>Gestión avanzada de archivos</h3>
             <div class="help-body">
                 <div class="settings-group" style="grid-template-columns: 1fr 1fr;">
+                    <div class="settings-section-title" style="grid-column: span 2;">UI y análisis (global)</div>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="sendFileOnFinishCheckbox" title="Al terminar grabación o alarma, enviar fichero al navegador para descarga">
+                        <span id="sendFileOnFinishLabel">Enviar fichero al terminar</span>
+                    </label>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="advInfoCheckbox" title="Mostrar RAM y carga de red en el header">
+                        <span id="advInfoLabel">Adv info</span>
+                    </label>
+                    <label class="settings-adv-checkbox" id="offlineWindowSpanLabel" style="display:none">
+                        <span>Ventana análisis (s):</span>
+                        <input type="number" id="offlineWindowSpanInput" min="1" max="20" step="1" value="3" title="Ancho de cada ventana de lectura desde TSV en modo análisis (solo monitorización)">
+                    </label>
+                    <label class="settings-adv-checkbox">Ventana por defecto (s):
+                        <input type="number" id="defaultTimeWindowInput" min="1" max="600" step="1" value="10">
+                    </label>
+                    <label class="settings-adv-checkbox">Buffer por defecto (s):
+                        <input type="number" id="defaultHistoryBufferInput" min="1" max="600" step="1" value="10">
+                    </label>
+                    <label class="settings-adv-checkbox">Umbral carga completa (MB):
+                        <input type="number" id="offlineFullLoadMaxMbInput" min="5" step="1" value="100">
+                    </label>
+                    <label class="settings-adv-checkbox">Preview máximo (MB):
+                        <input type="number" id="offlinePreviewMbInput" min="1" max="8" step="1" value="2">
+                    </label>
+                    <label class="settings-adv-checkbox">Filas preview:
+                        <input type="number" id="offlinePreviewRowsInput" min="500" step="500" value="10000">
+                    </label>
+                    <label class="settings-adv-checkbox">Rango preview (s):
+                        <input type="number" id="offlinePreviewSpanSecInput" min="5" step="5" value="45">
+                    </label>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="offlineAllowForceFullLoadCheckbox">
+                        <span>Permitir forzar carga completa</span>
+                    </label>
                     <label class="admin-full-row">Config:
                         <input id="adminConfigPath" type="text" readonly>
                     </label>
@@ -379,6 +410,7 @@ web_port = 8080          # Puerto de esta web (solo Python)
                 <button id="snapshotBtn" class="btn-small btn-snapshot" title="Crear snapshot TSV (usa el valor de 'Snapshot frames' en Ajustes)">&#128247;</button>
                 <button id="browserToggleBtn" class="btn-small" title="Añadir variables a monitorizar">+</button>
                 <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
+                <span id="monitorLoadingIndicator" class="monitor-loading-indicator" style="display:none">Cargando datos…</span>
                 <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
                 <div id="monitorMenuPanel" class="monitor-menu-panel" style="display:none">
                     <div class="monitor-menu-row">

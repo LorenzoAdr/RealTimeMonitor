@@ -127,7 +127,7 @@ Todos los mensajes entre Python y C++ por UDS siguen el mismo esquema:
 | `unregister_var`      | `"name"`                       | Desregistrar variable en caliente |
 | `set_shm_subscription`| `"names": ["a","b",...]`       | Suscripción SHM: solo escribir esas variables en SHM (vacío = todas) |
 
-Los comandos `get_history`, `get_histories`, `get_histories_since` están en el cliente Python; si el C++ no los implementa, responderá `unknown command`.
+Los antiguos comandos `get_history`, `get_histories`, `get_histories_since` existían solo en el cliente Python; ahora el histórico se construye exclusivamente desde SHM (en vivo) y desde las grabaciones TSV en disco.
 
 ### Respuestas del C++ (response)
 
@@ -184,11 +184,12 @@ Así, **cada proceso C++** (cada PID) tiene exactamente un segmento y un semáfo
 
 ### Layout del segmento (C++ y Python)
 
-- **Header (28 bytes)**:
+- **Header (32 bytes)**:
   - 0–3:   magic (0x4D524156, "VARM" LE).
   - 4–7:   version (1).
   - 8–15:  seq (contador de snapshots).
   - 16–19: count (número de entradas en este snapshot).
+  - 20–23: padding.
   - 24–31: timestamp (double, tiempo Unix).
 
 - **Entradas**: hasta 512 entradas; cada una:
@@ -208,8 +209,18 @@ Solo se escriben variables **escalares** (no arrays ni strings) en SHM. La **sus
 ### Flujo de lectura (Python, ShmReader)
 
 - Abre el segmento con `os.open("/dev/shm/"+shm_name)` y `mmap.mmap(..., MAP_SHARED, PROT_READ)`.
-- Abre el semáforo con `sem_open(sem_name, 0)` (ctypes; `restype = c_void_p` para 64 bits).
+- Abre el semáforo con `sem_open(sem_name, O_RDWR)` (ctypes; `restype = c_void_p` para 64 bits).
 - En un hilo: en bucle, `sem_timedwait(sem, timeout)`; si recibe señal, `buf.seek(0)`, lee header + entradas, construye lista de dicts `{name, type, value}` y la pone en una `Queue`. El bucle del WebSocket consume esa cola.
+
+### Si el semáforo no abre (WSL / ENOENT / EACCES)
+
+En algunos entornos (p. ej. **WSL**) el backend puede no poder abrir el semáforo POSIX creado por el C++. El mensaje del backend incluirá el **errno** (p. ej. `ENOENT` o `EACCES`).
+
+- **ENOENT**: el archivo del semáforo no existe para el proceso Python. En Linux el semáforo está en `/dev/shm/sem.<nombre_sin_barra>` (ej. `/dev/shm/sem.varmon-lariasr-10229`). Compruebe desde la misma sesión/usuario que el C++:
+  - `ls /dev/shm/sem.*` — debe aparecer el semáforo mientras el proceso C++ esté en marcha.
+  - Que el backend Python se ejecute con el **mismo usuario** que el proceso C++ y, en WSL, preferiblemente desde el mismo tipo de sesión (misma terminal o mismo WSL distro).
+- **EACCES**: permisos. El C++ crea el semáforo con `0666`; si aun así falla, compruebe que no haya restricciones de namespace o montajes distintos de `/dev/shm`.
+- **Fallback**: si el semáforo no se puede abrir, el backend usa **modo polling**: lee el segmento SHM cada ~5 ms y detecta datos nuevos por el campo `seq` del header. La grabación sigue siendo a tasa real; solo se pierde la señalización bloqueante (ligero aumento de CPU en el hilo lector).
 
 ---
 
