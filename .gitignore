@@ -19,3 +19,6 @@ web_monitor/recordings/segment_*.tsv
 web_monitor/server_state/
 web_monitor/server_state/templates/
 web_monitor/server_state/sessions/
+
+# MkDocs build output
+site/

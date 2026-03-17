@@ -189,6 +189,16 @@ void write_snapshot(VarMonitor* mon) {
     seq++;
     memcpy(h + 8, &seq, 8);
 
+    if (sub.empty()) {
+        /* Sin suscripción: no volcar variables; solo cabecera (count=0) y sem_post.
+         * La lista de variables disponibles se obtiene por UDS (list_names/list_vars). */
+        count = 0;
+        memcpy(h + 16, &count, 4);
+        memcpy(h + 24, &timestamp, 8);
+        sem_post(g_sem);
+        return;
+    }
+
     char* ent = h + HEADER_SIZE;
     for (const auto& s : vars) {
         if (count >= MAX_VARS) break;

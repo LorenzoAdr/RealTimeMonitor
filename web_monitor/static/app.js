@@ -35,7 +35,7 @@
 
     let plotRafPending = false;
     let localHistMaxSec = 30;
-    /** Origen de tiempo compartido para todos los gráficos (segundos Unix). Opción B: se fija con el primer historial recibido. */
+    /** Origen de tiempo compartido para todos los gráficos (segundos Unix). Se fija con el primer historial recibido. */
     let sessionStartTime = null;
 
     const MAX_RECORD_SEC = 300;
@@ -154,6 +154,16 @@
     const snapshotBtn = document.getElementById("snapshotBtn");
     const adminStorageBtn = document.getElementById("adminStorageBtn");
     const adminStorageOverlay = document.getElementById("adminStorageOverlay");
+    const remoteFileBrowserOverlay = document.getElementById("remoteFileBrowserOverlay");
+    const remoteFileListOverlay = document.getElementById("remoteFileListOverlay");
+    const remoteBrowserOverlayPathInput = document.getElementById("remoteBrowserOverlayPathInput");
+    const remoteBrowserOverlayUpBtn = document.getElementById("remoteBrowserOverlayUpBtn");
+    const remoteBrowserOverlayMkdirBtn = document.getElementById("remoteBrowserOverlayMkdirBtn");
+    const remoteBrowserOverlayCloseBtn = document.getElementById("remoteBrowserOverlayCloseBtn");
+    const openRemoteBrowserForAnalysisBtn = document.getElementById("openRemoteBrowserForAnalysisBtn");
+    const adminConfigPathBrowseBtn = document.getElementById("adminConfigPathBrowseBtn");
+    const adminRecordingsPathBrowseBtn = document.getElementById("adminRecordingsPathBrowseBtn");
+    const adminStatePathBrowseBtn = document.getElementById("adminStatePathBrowseBtn");
     const adminStorageCloseBtn = document.getElementById("adminStorageCloseBtn");
     const adminConfigPath = document.getElementById("adminConfigPath");
     const adminRecordingsPath = document.getElementById("adminRecordingsPath");
@@ -2277,6 +2287,12 @@
     document.getElementById("helpBtn").addEventListener("click", () => {
         helpOverlay.style.display = "flex";
     });
+    const docsBtn = document.getElementById("docsBtn");
+    if (docsBtn) {
+        docsBtn.addEventListener("click", () => {
+            window.open("/docs/", "_blank", "noopener,noreferrer");
+        });
+    }
     document.getElementById("helpCloseBtn").addEventListener("click", () => {
         helpOverlay.style.display = "none";
     });
@@ -2723,6 +2739,11 @@
         if (adminStatePath) adminStatePath.value = d?.paths?.server_state_dir || "";
         if (adminBasePortInput) adminBasePortInput.value = String(d?.runtime?.web_port ?? 8080);
         if (adminPortRangeInput) adminPortRangeInput.value = String(d?.runtime?.web_port_scan_max ?? 10);
+        adminRuntimeBaseline = {
+            web_port: Number(adminBasePortInput?.value || 8080),
+            web_port_scan_max: Number(adminPortRangeInput?.value || 10),
+        };
+        updateAdminApplyButtonState();
         const fillList = (el, rows, kind) => {
             el.innerHTML = "";
             if (!rows || rows.length === 0) {
@@ -2767,6 +2788,26 @@
         fillList(adminRecordingsList, d.recordings || [], "recording");
         fillList(adminTemplatesList, d.templates || [], "template");
     }
+
+    let adminRuntimeBaseline = { web_port: 8080, web_port_scan_max: 10 };
+
+    function updateAdminApplyButtonState() {
+        if (!adminApplyRuntimeBtn) return;
+        const base = Number(adminBasePortInput?.value || 8080);
+        const rng = Number(adminPortRangeInput?.value || 10);
+        const hasChanges = base !== adminRuntimeBaseline.web_port || rng !== adminRuntimeBaseline.web_port_scan_max;
+        adminApplyRuntimeBtn.classList.toggle("admin-apply-has-changes", !!hasChanges);
+    }
+
+    if (adminBasePortInput) {
+        adminBasePortInput.addEventListener("input", updateAdminApplyButtonState);
+        adminBasePortInput.addEventListener("change", updateAdminApplyButtonState);
+    }
+    if (adminPortRangeInput) {
+        adminPortRangeInput.addEventListener("input", updateAdminApplyButtonState);
+        adminPortRangeInput.addEventListener("change", updateAdminApplyButtonState);
+    }
+
     if (adminStorageBtn && adminStorageOverlay) {
         adminStorageBtn.addEventListener("click", async () => {
             await refreshAdminStorageUi();
@@ -2783,6 +2824,209 @@
             if (e.target === adminStorageOverlay) adminStorageOverlay.style.display = "none";
         });
     }
+
+    // --- Navegador de archivos remoto ---
+    let remoteBrowserCurrentPath = "";
+    let remoteBrowserPickForAnalysis = false;
+    /** Cuando se abre desde admin: "config" | "recordings" | "state". Null si es análisis o solo explorar. */
+    let remoteBrowserAdminTarget = null;
+    let remoteBrowserSelectedPath = null;
+    /** Raíz absoluta del proyecto (viene del API /api/browse). */
+    let remoteBrowserRoot = "";
+    const remoteBrowserSelectFooter = document.getElementById("remoteBrowserSelectFooter");
+    const remoteBrowserSelectedPathLabel = document.getElementById("remoteBrowserSelectedPathLabel");
+    const remoteBrowserConfirmSelectBtn = document.getElementById("remoteBrowserConfirmSelectBtn");
+
+    async function loadRemotePath(path) {
+        const listEl = remoteFileListOverlay;
+        const pathInput = remoteBrowserOverlayPathInput;
+        if (!listEl || !pathInput) return;
+        listEl.innerHTML = "<span class=\"remote-browser-loading\">Cargando…</span>";
+        pathInput.value = path || "(raíz)";
+        try {
+            const params = new URLSearchParams();
+            if (path) params.set("path", path);
+            const resp = await fetch("/api/browse?" + params.toString());
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                listEl.innerHTML = "<span class=\"remote-browser-error\">" + (err.error || resp.status) + "</span>";
+                return;
+            }
+            const data = await resp.json();
+            remoteBrowserCurrentPath = data.path || "";
+            if (data.root != null) remoteBrowserRoot = String(data.root);
+            pathInput.value = remoteBrowserCurrentPath || "(raíz)";
+            if (remoteBrowserOverlayUpBtn) remoteBrowserOverlayUpBtn.disabled = !remoteBrowserCurrentPath;
+            if (remoteBrowserAdminTarget) {
+                remoteBrowserSelectedPath = null;
+                const selLabel = document.getElementById("remoteBrowserSelectedPathLabel");
+                if (selLabel) selLabel.textContent = "";
+            }
+            const entries = Array.isArray(data.entries) ? data.entries : [];
+            listEl.innerHTML = "";
+            entries.forEach((ent) => {
+                const row = document.createElement("div");
+                row.className = "remote-file-row " + (ent.is_dir ? "remote-file-dir" : "remote-file-file");
+                row.dataset.name = ent.name;
+                row.dataset.isDir = ent.is_dir ? "1" : "0";
+                const icon = document.createElement("span");
+                icon.className = "remote-file-icon";
+                icon.textContent = ent.is_dir ? "\uD83D\uDCC1" : "\uD83D\uDCC4";
+                const nameSpan = document.createElement("span");
+                nameSpan.className = "remote-file-name";
+                nameSpan.textContent = ent.name;
+                const meta = document.createElement("span");
+                meta.className = "remote-file-meta";
+                if (!ent.is_dir && ent.size != null) meta.textContent = formatBytes(ent.size);
+                if (ent.mtime != null) meta.textContent = (meta.textContent ? meta.textContent + " \u2022 " : "") + new Date(ent.mtime * 1000).toLocaleString();
+                row.appendChild(icon);
+                row.appendChild(nameSpan);
+                row.appendChild(meta);
+                listEl.appendChild(row);
+            });
+        } catch (e) {
+            listEl.innerHTML = "<span class=\"remote-browser-error\">" + (e.message || "Error") + "</span>";
+        }
+    }
+
+    function formatBytes(n) {
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+        return (n / (1024 * 1024)).toFixed(1) + " MB";
+    }
+
+    function openRemoteFileBrowser(initialPath, pickForAnalysisMode, adminTarget) {
+        remoteBrowserPickForAnalysis = !!pickForAnalysisMode;
+        remoteBrowserAdminTarget = adminTarget || null;
+        remoteBrowserSelectedPath = null;
+        remoteBrowserCurrentPath = (initialPath || "").trim();
+        if (remoteFileBrowserOverlay) remoteFileBrowserOverlay.style.display = "flex";
+        if (remoteBrowserOverlayUpBtn) remoteBrowserOverlayUpBtn.disabled = !remoteBrowserCurrentPath;
+        const titleEl = document.getElementById("remoteBrowserOverlayTitle");
+        if (titleEl) titleEl.textContent = remoteBrowserPickForAnalysis ? "Seleccionar archivo para análisis" : "Explorador de archivos";
+        const footer = document.getElementById("remoteBrowserSelectFooter");
+        const selLabel = document.getElementById("remoteBrowserSelectedPathLabel");
+        if (footer) footer.style.display = remoteBrowserAdminTarget ? "flex" : "none";
+        if (selLabel) selLabel.textContent = "";
+        loadRemotePath(remoteBrowserCurrentPath);
+    }
+
+    function closeRemoteFileBrowser() {
+        if (remoteFileBrowserOverlay) remoteFileBrowserOverlay.style.display = "none";
+        remoteBrowserPickForAnalysis = false;
+        remoteBrowserAdminTarget = null;
+        remoteBrowserSelectedPath = null;
+    }
+
+    if (remoteFileListOverlay) {
+        remoteFileListOverlay.addEventListener("click", async (e) => {
+            const row = e.target.closest(".remote-file-row");
+            if (!row) return;
+            const name = row.dataset.name;
+            const isDir = row.dataset.isDir === "1";
+            const pathRel = remoteBrowserCurrentPath ? remoteBrowserCurrentPath + "/" + name : name;
+            if (remoteBrowserAdminTarget) {
+                const absPath = remoteBrowserRoot
+                    ? (pathRel ? remoteBrowserRoot.replace(/\/$/, "") + "/" + pathRel.replace(/^\/+/, "") : remoteBrowserRoot)
+                    : pathRel;
+                remoteBrowserSelectedPath = absPath;
+                remoteFileListOverlay.querySelectorAll(".remote-file-row").forEach((r) => r.classList.remove("remote-file-selected"));
+                row.classList.add("remote-file-selected");
+                const selLabel = document.getElementById("remoteBrowserSelectedPathLabel");
+                if (selLabel) selLabel.textContent = "Seleccionado: " + absPath;
+                return;
+            }
+            const path = pathRel;
+            if (isDir) {
+                loadRemotePath(path);
+                return;
+            }
+            if (remoteBrowserPickForAnalysis && name.toLowerCase().endsWith(".tsv")) {
+                try {
+                    const params = new URLSearchParams({ path });
+                    const resp = await fetch("/api/browse/download?" + params.toString());
+                    if (!resp.ok) throw new Error(resp.statusText);
+                    const text = await resp.text();
+                    const filename = path.split("/").pop() || name;
+                    const ds = parseTsvDataset(text, filename);
+                    if (!ds || !ds.names) throw new Error("TSV inválido");
+                    await loadOfflineDataset(ds, { recordingName: filename, preserveLayout: true });
+                    refreshServerRecordings();
+                    closeRemoteFileBrowser();
+                } catch (err) {
+                    alert("No se pudo cargar el archivo: " + (err.message || String(err)));
+                }
+                return;
+            }
+            window.open("/api/browse/download?" + new URLSearchParams({ path }).toString(), "_blank");
+        });
+    }
+
+    if (remoteBrowserOverlayUpBtn) {
+        remoteBrowserOverlayUpBtn.addEventListener("click", () => {
+            if (!remoteBrowserCurrentPath) return;
+            const parts = remoteBrowserCurrentPath.replace(/\\/g, "/").split("/").filter(Boolean);
+            parts.pop();
+            loadRemotePath(parts.join("/"));
+        });
+    }
+
+    if (remoteBrowserOverlayMkdirBtn) {
+        remoteBrowserOverlayMkdirBtn.addEventListener("click", async () => {
+            const name = window.prompt("Nombre de la nueva carpeta:");
+            if (!name || !name.trim()) return;
+            try {
+                const resp = await fetch("/api/browse/mkdir", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: remoteBrowserCurrentPath, name: name.trim() }),
+                });
+                if (resp.status === 409) {
+                    alert("Ya existe una carpeta o archivo con ese nombre.");
+                    return;
+                }
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.error || resp.statusText);
+                }
+                loadRemotePath(remoteBrowserCurrentPath);
+            } catch (e) {
+                alert("Error: " + (e.message || String(e)));
+            }
+        });
+    }
+
+    if (remoteBrowserOverlayCloseBtn) remoteBrowserOverlayCloseBtn.addEventListener("click", closeRemoteFileBrowser);
+    if (remoteFileBrowserOverlay) {
+        remoteFileBrowserOverlay.addEventListener("click", (e) => {
+            if (e.target === remoteFileBrowserOverlay) closeRemoteFileBrowser();
+        });
+    }
+
+    if (remoteBrowserConfirmSelectBtn) {
+        remoteBrowserConfirmSelectBtn.addEventListener("click", () => {
+            if (!remoteBrowserAdminTarget || remoteBrowserSelectedPath == null) return;
+            const target = remoteBrowserAdminTarget;
+            if (target === "config" && adminConfigPath) adminConfigPath.value = remoteBrowserSelectedPath;
+            else if (target === "recordings" && adminRecordingsPath) adminRecordingsPath.value = remoteBrowserSelectedPath;
+            else if (target === "state" && adminStatePath) adminStatePath.value = remoteBrowserSelectedPath;
+            closeRemoteFileBrowser();
+        });
+    }
+
+    if (openRemoteBrowserForAnalysisBtn) {
+        openRemoteBrowserForAnalysisBtn.addEventListener("click", () => openRemoteFileBrowser("", true));
+    }
+    if (adminConfigPathBrowseBtn) {
+        adminConfigPathBrowseBtn.addEventListener("click", () => openRemoteFileBrowser("", false, "config"));
+    }
+    if (adminRecordingsPathBrowseBtn) {
+        adminRecordingsPathBrowseBtn.addEventListener("click", () => openRemoteFileBrowser("web_monitor/recordings", false, "recordings"));
+    }
+    if (adminStatePathBrowseBtn) {
+        adminStatePathBrowseBtn.addEventListener("click", () => openRemoteFileBrowser("web_monitor/server_state", false, "state"));
+    }
+
     if (adminApplyRuntimeBtn) {
         adminApplyRuntimeBtn.addEventListener("click", async () => {
             const base = Math.max(1, Math.min(65535, Number(adminBasePortInput?.value || 8080)));
@@ -2799,6 +3043,7 @@
                 return;
             }
             await refreshAdminStorageUi();
+            adminApplyRuntimeBtn.classList.remove("admin-apply-has-changes");
             alert("Configuración guardada. El puerto base aplica en el siguiente arranque.");
         });
     }
@@ -6987,7 +7232,7 @@
     }
 
     function rebuildPlotArea() {
-        Object.keys(plotInstances).forEach(gid => {
+        Object.keys(plotInstances).forEach((gid) => {
             const el = document.getElementById("plotContainer_" + gid);
             if (el) Plotly.purge(el);
         });
@@ -7078,6 +7323,8 @@
         });
 
         plotArea.insertBefore(frag, plotEmpty);
+
+        if (plotEmpty) plotEmpty.style.display = graphList.length > 0 ? "none" : "flex";
 
         const addSlot = document.getElementById("plotAddSlot");
         if (addSlot) addSlot.remove();
@@ -7506,6 +7753,12 @@
             nextAllowedRenderAt = 0;
         }
         renderPerfTelemetry();
+
+        // Tras F5 el primer render puede ser sin datos; forzar un segundo pintado cuando ya haya llegado algo.
+        if (graphList.length > 0 && !window.__plotSecondPaintScheduled) {
+            window.__plotSecondPaintScheduled = true;
+            setTimeout(() => { schedulePlotRender(); }, 500);
+        }
     }
 
     timeWindowSelect.addEventListener("change", () => {

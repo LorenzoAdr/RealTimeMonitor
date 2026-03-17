@@ -11,3 +11,15 @@ add_subdirectory(libvarmonitor)
 if(VARMON_BUILD_DEMO)
     add_subdirectory(demo_app)
 endif()
+
+# Documentación MkDocs (usa el venv de web_monitor; ejecutar ./scripts/setup.sh antes)
+if(WIN32)
+    set(MKDOCS_PYTHON "${CMAKE_SOURCE_DIR}/web_monitor/.venv/Scripts/python.exe")
+else()
+    set(MKDOCS_PYTHON "${CMAKE_SOURCE_DIR}/web_monitor/.venv/bin/python")
+endif()
+add_custom_target(docs
+    COMMAND "${MKDOCS_PYTHON}" -m mkdocs build
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Generando documentación con MkDocs en site/"
+)

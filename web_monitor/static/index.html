@@ -58,6 +58,7 @@
             </div>
         </div>
         <div class="header-right">
+            <button id="docsBtn" class="btn-small" type="button" title="Abrir documentación completa">Docs</button>
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <div id="offlineControls" class="offline-controls" style="display:none">
                 <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar</button>
@@ -67,6 +68,7 @@
                         <option value="">(sin grabaciones)</option>
                     </select>
                 </label>
+                <button id="openRemoteBrowserForAnalysisBtn" class="btn-small btn-folder" type="button" title="Abrir explorador de archivos del servidor">&#128193;</button>
                 <button id="loadServerRecordingBtn" class="btn-small" title="Cargar grabación seleccionada del servidor">Cargar</button>
                 <span id="offlineDatasetStatus" class="offline-dataset-status offline-empty">Sin archivo cargado</span>
                 <button id="offlineSafeModeBadge" class="offline-safe-badge" style="display:none" type="button">Modo seguro</button>
@@ -179,12 +181,15 @@
                     </label>
                     <label class="admin-full-row">Config:
                         <input id="adminConfigPath" type="text" readonly>
+                        <button id="adminConfigPathBrowseBtn" class="btn-small btn-folder" type="button" title="Abrir explorador">&#128193;</button>
                     </label>
                     <label class="admin-full-row">Recordings:
                         <input id="adminRecordingsPath" type="text" readonly>
+                        <button id="adminRecordingsPathBrowseBtn" class="btn-small btn-folder" type="button" title="Abrir explorador">&#128193;</button>
                     </label>
                     <label class="admin-full-row">Estado servidor:
                         <input id="adminStatePath" type="text" readonly>
+                        <button id="adminStatePathBrowseBtn" class="btn-small btn-folder" type="button" title="Abrir explorador">&#128193;</button>
                     </label>
                     <div class="admin-runtime-row">
                         <label>Puerto base Python:
@@ -209,6 +214,23 @@
             </div>
             <div class="help-actions">
                 <button id="adminStorageCloseBtn" class="btn-small">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="remoteFileBrowserOverlay" class="help-overlay" style="display:none" role="dialog" aria-label="Explorador de archivos">
+        <div class="help-modal remote-browser-modal">
+            <h3 id="remoteBrowserOverlayTitle">Explorador de archivos</h3>
+            <div class="remote-browser-toolbar">
+                <button id="remoteBrowserOverlayUpBtn" class="btn-small" type="button" title="Subir">&#8593; Subir</button>
+                <button id="remoteBrowserOverlayMkdirBtn" class="btn-small" type="button" title="Nueva carpeta">&#128193; Nueva carpeta</button>
+                <input id="remoteBrowserOverlayPathInput" type="text" readonly class="remote-browser-path" title="Ruta actual">
+                <button id="remoteBrowserOverlayCloseBtn" class="btn-small" type="button">Cerrar</button>
+            </div>
+            <div id="remoteFileListOverlay" class="remote-file-list"></div>
+            <div id="remoteBrowserSelectFooter" class="remote-browser-select-footer" style="display:none">
+                <span id="remoteBrowserSelectedPathLabel" class="remote-browser-selected-path"></span>
+                <button id="remoteBrowserConfirmSelectBtn" class="btn-small" type="button">Usar esta ruta</button>
             </div>
         </div>
     </div>
@@ -314,9 +336,9 @@
 
                 <h3>Cabecera</h3>
                 <ul>
-                    <li><b>Host / Puerto</b>: indican a que instancia de VarMonitor C++ se conecta el backend. Por defecto apunta al propio equipo donde corre el monitor web, pero puedes cambiar el host (otra IP accesible desde ese equipo) y el puerto (en el rango configurado, por defecto 1900–1910).</li>
-                    <li><b>Rel act</b>: relacion de actualizacion (cada cuantos ciclos se actualiza la interfaz). 1 = cada ciclo, 2 = cada dos ciclos, etc.</li>
-                    <li><b>Estado de conexion</b>: indicador verde (conectado) o rojo (desconectado) del WebSocket.</li>
+                    <li><b>Instancia</b>: selector de a que proceso C++ se conecta el backend. Las instancias se descubren por sockets Unix en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code> (sin usar red). Por defecto se elige la mas reciente.</li>
+                    <li><b>Rel act</b>: relacion de actualizacion (cada cuantos ciclos del backend se envia <code>vars_update</code> al navegador). 1 = maxima tasa, 5 por defecto.</li>
+                    <li><b>Estado de conexion</b>: indicador verde (conectado) o rojo (desconectado) del WebSocket con el backend Python.</li>
                 </ul>
 
                 <h3>Atajos de teclado</h3>
@@ -329,15 +351,16 @@
                 </ul>
 
                 <h3>Arquitectura y comunicacion</h3>
-                <p>El sistema tiene tres piezas:</p>
+                <p>El sistema tiene tres piezas; entre C++ y Python no hay TCP, solo UDS y memoria compartida (SHM):</p>
                 <ol>
-                    <li><b>Tu aplicacion C++</b> con <code>libvarmonitor</code> integrada: publica las variables y escucha conexiones TCP.</li>
-                    <li><b>Backend Python (FastAPI)</b>: se conecta por TCP a la app C++ y sirve esta pagina web.</li>
-                    <li><b>Este navegador</b>: se conecta al backend Python via WebSocket para recibir datos en tiempo real.</li>
+                    <li><b>Tu aplicacion C++</b> con <code>libvarmonitor</code>: escribe snapshots en SHM cada ciclo y expone un socket Unix (UDS) en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code> para comandos.</li>
+                    <li><b>Backend Python (FastAPI)</b>: se conecta por UDS a la app C++, lee datos en tiempo real desde SHM (semáforo + cola) y sirve esta web. Envia <code>vars_update</code> al navegador por WebSocket.</li>
+                    <li><b>Este navegador</b>: se conecta al backend Python por WebSocket (HTTP en <code>web_port</code>) y recibe los datos en vivo.</li>
                 </ol>
                 <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
-  App C++ (UDS)       Backend Python         Navegador
- /tmp/varmon-*.sock  &lt;---UDS---&gt;  (web_port)  &lt;---WebSocket---&gt;  UI
+  App C++                  Backend Python              Navegador
+  SHM + UDS  &lt;--sem/lectura--&gt;  ShmReader + UdsBridge   &lt;---WebSocket---&gt;  UI
+  /tmp/varmon-*.sock  &lt;--------UDS (comandos)--------&gt;  (web_port)
                 </pre>
 
                 <h3>Configuracion: varmon.conf</h3>
@@ -351,20 +374,19 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     <li>El C++ expone un socket Unix (UDS) en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code>. El backend Python descubre instancias y se conecta por UDS.</li>
                 </ul>
 
-                <h3>Historial incremental</h3>
-                <p>El monitor usa un sistema de entrega incremental de datos para optimizar el rendimiento:</p>
+                <h3>Flujo de datos en vivo</h3>
+                <p>Los datos van por memoria compartida (SHM) y WebSocket:</p>
                 <ul>
-                    <li>El C++ muestrea las variables a su ritmo y las guarda en un buffer circular pequeno (<code>history_capacity</code> muestras).</li>
-                    <li>El frontend pide al C++ solo los <b>datos nuevos</b> desde la ultima peticion (usando un numero de secuencia interno).</li>
-                    <li>El frontend acumula su propia historia localmente para poder plotear ventanas de tiempo amplias (hasta 10 minutos).</li>
-                    <li>Esto reduce drasticamente el trafico de red: solo se transmiten los puntos nuevos, no el buffer completo cada vez.</li>
+                    <li>El C++ escribe un snapshot en SHM cada ciclo y avisa con un semáforo. No hay TCP entre C++ y Python.</li>
+                    <li>El backend Python (ShmReader) lee cada snapshot, evalúa alarmas y rellena buffers de grabación. A la tasa indicada por <b>Rel act</b>, envía <code>vars_update</code> al navegador.</li>
+                    <li>El frontend acumula los datos recibidos en un historial local (<code>historyCache</code>) para plotear ventanas de tiempo amplias (buffer visual configurable).</li>
                 </ul>
 
                 <h3>Acceso remoto</h3>
                 <ul>
-                    <li>Para acceder desde otro PC en la misma red, abre <code>http://&lt;IP-del-servidor&gt;:8080</code> en el navegador.</li>
-                    <li>Si la app C++ esta en otra maquina, edita <code>host</code> en <code>varmon.conf</code> con la IP correspondiente.</li>
-                    <li>Solo se transmiten por red las variables que estan siendo monitorizadas (no todas).</li>
+                    <li>Para abrir el monitor desde otro PC en la misma red, usa <code>http://&lt;IP-del-servidor&gt;:&lt;web_port&gt;</code> (el puerto donde arranco el backend Python).</li>
+                    <li>La aplicacion C++ debe ejecutarse en la <b>misma maquina</b> que el backend Python: la comunicacion C++–Python es por UDS y SHM (locales).</li>
+                    <li>Entre navegador y backend solo se envian por WebSocket las variables que estan siendo monitorizadas.</li>
                 </ul>
 
                 <h3>Cambiar la ruta de varmon.conf</h3>
@@ -372,8 +394,11 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     <li>Variable de entorno: <code>VARMON_CONFIG=/ruta/al/archivo.conf</code></li>
                     <li>En C++: <code>varmon::set_config_path("/ruta/...")</code> antes de <code>start()</code></li>
                     <li>Por defecto busca <code>./varmon.conf</code> en el directorio de trabajo.</li>
-                    <li>Si no existe el archivo, se usan los valores por defecto (9100, 8080, localhost).</li>
+                    <li>Si no existe, se usan valores por defecto (p. ej. <code>web_port = 8080</code>).</li>
                 </ul>
+
+                <h3>Proyecto en GitHub</h3>
+                <p>Código fuente, issues y más información: <a href="https://github.com/LorenzoAdr/RealTimeMonitor" target="_blank" rel="noopener noreferrer">VarMonitor en GitHub</a>.</p>
             </div>
         </div>
     </div>

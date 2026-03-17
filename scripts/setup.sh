@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../web_monitor"
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install fastapi 'uvicorn[standard]' websockets
+pip install -r requirements.txt
 
 echo "=== Dependencias instaladas correctamente ==="
 echo ""

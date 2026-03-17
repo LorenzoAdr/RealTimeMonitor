@@ -12,6 +12,7 @@ import urllib.request
 import math
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -331,6 +332,8 @@ def _first_uds_bridge():
 # Directorio para grabaciones (backend)
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
 STATE_ROOT_DIR = (_config.get("server_state_dir") or "").strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_state")
+# Raíz del navegador de archivos remoto = directorio principal del proyecto (contiene web_monitor/)
+BROWSER_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
 SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
 ALARM_BUFFER_SEC = 11.0  # 10 s + 1 s para registro en alarma
@@ -720,6 +723,94 @@ async def api_recordings():
         rows = []
     rows.sort(key=lambda x: -x["mtime"])
     return {"recordings": rows}
+
+
+def _resolve_browse_path(relative_path: str) -> Path | None:
+    """Resuelve una ruta relativa bajo BROWSER_ROOT. Devuelve Path o None si es inválida."""
+    root = BROWSER_ROOT.resolve()
+    path = (root / (relative_path or "").strip().lstrip("/")).resolve()
+    try:
+        path = path.resolve()
+        if not path.is_relative_to(root):
+            return None
+        return path
+    except (ValueError, OSError):
+        return None
+
+
+@app.get("/api/browse")
+async def api_browse(path: str = Query("", description="Ruta relativa al root del proyecto")):
+    """Lista el contenido de un directorio dentro de la raíz del proyecto."""
+    resolved = _resolve_browse_path(path)
+    if resolved is None:
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not resolved.is_dir():
+        return JSONResponse({"error": "No es un directorio"}, status_code=400)
+    entries: list[dict] = []
+    try:
+        for entry in sorted(resolved.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            name = entry.name
+            if name.startswith(".") and name not in (".", ".."):
+                continue
+            is_dir = entry.is_dir()
+            st = entry.stat()
+            row = {"name": name, "is_dir": is_dir}
+            if not is_dir:
+                row["size"] = st.st_size
+            row["mtime"] = st.st_mtime
+            entries.append(row)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel_path = str(resolved.relative_to(BROWSER_ROOT)) if resolved != BROWSER_ROOT else ""
+    return {"path": rel_path, "root": str(BROWSER_ROOT), "entries": entries}
+
+
+@app.get("/api/browse/download")
+async def api_browse_download(path: str = Query(..., description="Ruta relativa al root del proyecto")):
+    """Descarga un archivo dentro de la raíz del proyecto."""
+    resolved = _resolve_browse_path(path)
+    if resolved is None:
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not resolved.is_file():
+        return JSONResponse({"error": "No es un archivo"}, status_code=404)
+    return FileResponse(
+        str(resolved),
+        filename=resolved.name,
+        media_type="application/octet-stream",
+    )
+
+
+@app.post("/api/browse/mkdir")
+async def api_browse_mkdir(request: Request):
+    """Crea un directorio dentro de la raíz del proyecto."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Body JSON inválido"}, status_code=400)
+    parent_path = (body.get("path") or "").strip()
+    name = (body.get("name") or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return JSONResponse({"error": "Nombre de carpeta inválido"}, status_code=400)
+    parent = _resolve_browse_path(parent_path)
+    if parent is None:
+        return JSONResponse({"error": "Ruta padre inválida"}, status_code=400)
+    if not parent.is_dir():
+        return JSONResponse({"error": "La ruta padre no es un directorio"}, status_code=400)
+    new_dir = parent / name
+    try:
+        new_dir = new_dir.resolve()
+        if not new_dir.is_relative_to(BROWSER_ROOT):
+            return JSONResponse({"error": "Ruta fuera del proyecto"}, status_code=400)
+    except (ValueError, OSError):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if new_dir.exists():
+        return JSONResponse({"error": "Ya existe"}, status_code=409)
+    try:
+        new_dir.mkdir(parents=False, exist_ok=False)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel = str(new_dir.relative_to(BROWSER_ROOT))
+    return JSONResponse({"path": rel}, status_code=201)
 
 
 @app.get("/api/recordings/{filename}")
@@ -2137,6 +2228,28 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Documentación MkDocs (site/ generado por "mkdocs build" en la raíz del proyecto)
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "site")
+if os.path.isdir(DOCS_DIR):
+    app.mount("/docs", StaticFiles(directory=DOCS_DIR, html=True), name="docs")
+else:
+    _DOCS_NOT_BUILT_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Documentación</title></head><body style="font-family:sans-serif;padding:2rem;max-width:600px">
+    <h1>Documentación no generada</h1>
+    <p>Para tener la documentación disponible aquí, en la raíz del proyecto ejecute:</p>
+    <pre>pip install mkdocs mkdocs-material\nmkdocs build</pre>
+    <p>Luego reinicie el servidor del monitor. La documentación se servirá en <a href="/docs/">/docs/</a>.</p>
+    </body></html>"""
+
+    @app.get("/docs")
+    async def _docs_not_built_root():
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(_DOCS_NOT_BUILT_HTML)
+
+    @app.get("/docs/{full_path:path}")
+    async def _docs_not_built(full_path: str):
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(_DOCS_NOT_BUILT_HTML)
 
 def _find_available_port(host: str, start_port: int, max_offset: int = 10) -> int:
     """Intenta bind en start_port, start_port+1, ... hasta start_port+max_offset. Devuelve el primero libre."""
