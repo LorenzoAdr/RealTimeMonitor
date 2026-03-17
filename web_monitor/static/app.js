@@ -95,7 +95,6 @@
     const refreshNamesBtn = document.getElementById("refreshNames");
     const monitorListEl = document.getElementById("monitorList");
     const timeWindowSelect = document.getElementById("timeWindow");
-    const historyBufferSelect = document.getElementById("historyBuffer");
     const plotEmpty = document.getElementById("plotEmpty");
     const plotArea = document.getElementById("plotArea");
     const recordBtn = document.getElementById("recordBtn");
@@ -171,8 +170,7 @@
     const monitorLoadingIndicator = document.getElementById("monitorLoadingIndicator");
     const offlineWindowSpanInput = document.getElementById("offlineWindowSpanInput");
     const offlineSafeModeBadge = document.getElementById("offlineSafeModeBadge");
-    const defaultTimeWindowInput = document.getElementById("defaultTimeWindowInput");
-    const defaultHistoryBufferInput = document.getElementById("defaultHistoryBufferInput");
+    const defaultVisualBufferInput = document.getElementById("defaultVisualBufferInput");
     const segStartLabel = document.getElementById("segStartLabel");
     const segEndLabel = document.getElementById("segEndLabel");
     const advUiRenderMs = document.getElementById("advUiRenderMs");
@@ -196,11 +194,10 @@
         });
     }
 
-    if (defaultTimeWindowInput && timeWindowSelect) {
-        defaultTimeWindowInput.addEventListener("change", () => {
-            const v = Number(defaultTimeWindowInput.value);
+    if (defaultVisualBufferInput && timeWindowSelect) {
+        defaultVisualBufferInput.addEventListener("change", () => {
+            const v = Number(defaultVisualBufferInput.value);
             if (!Number.isFinite(v) || v <= 0) return;
-            // Ajustar select de ventana al valor más cercano.
             let closest = timeWindowSelect.options[0]?.value || "10";
             let bestDiff = Infinity;
             for (let i = 0; i < timeWindowSelect.options.length; i++) {
@@ -214,28 +211,11 @@
                 }
             }
             timeWindowSelect.value = closest;
+            const sec = parseInt(closest, 10);
+            localHistMaxSec = (Number.isFinite(sec) && sec > 0) ? sec : 60;
+            if (isLiveMode()) trimLocalHistory();
             saveConfig();
-        });
-    }
-
-    if (defaultHistoryBufferInput && historyBufferSelect) {
-        defaultHistoryBufferInput.addEventListener("change", () => {
-            const v = Number(defaultHistoryBufferInput.value);
-            if (!Number.isFinite(v) || v <= 0) return;
-            let closest = historyBufferSelect.options[0]?.value || "10";
-            let bestDiff = Infinity;
-            for (let i = 0; i < historyBufferSelect.options.length; i++) {
-                const opt = historyBufferSelect.options[i];
-                const val = Number(opt.value);
-                if (!Number.isFinite(val) || val <= 0) continue;
-                const d = Math.abs(val - v);
-                if (d < bestDiff) {
-                    bestDiff = d;
-                    closest = opt.value;
-                }
-            }
-            historyBufferSelect.value = closest;
-            saveConfig();
+            schedulePlotRender();
         });
     }
 
@@ -967,6 +947,7 @@
             screenshotTitle: "Capturar gráficos como PNG",
             windowLabel: "Ventana:",
             bufferLabel: "Buffer:",
+            bufferVisualLabel: "Buffer visual:",
             filterPlaceholder: "Filtrar variables...",
             selectAll: "Sel. todo",
             selectNone: "Ninguno",
@@ -980,8 +961,8 @@
             removeGraphTitle: "Eliminar gráfico",
             monitorMenuTitle: "Más opciones",
             timeAxisTitle: "t (s)",
-            resetTimeBtn: "Reset",
-            resetTimeTitle: "Reiniciar origen de tiempo (empezar a grabar desde 0)",
+            resetTimeBtn: "Reset tiempo",
+            resetTimeTitle: "Reiniciar origen de tiempo y borrar historial de gráficos",
             smoothPlotsLabel: "Suavizado",
             smoothPlotsTitle: "Ventana de media móvil para suavizar curvas (1 = sin suavizado)",
             smoothOff: "No",
@@ -1045,6 +1026,7 @@
             screenshotTitle: "Capture plots as PNG",
             windowLabel: "Window:",
             bufferLabel: "Buffer:",
+            bufferVisualLabel: "Visual buffer:",
             filterPlaceholder: "Filter variables...",
             selectAll: "Select all",
             selectNone: "None",
@@ -1058,8 +1040,8 @@
             removeGraphTitle: "Remove plot",
             monitorMenuTitle: "More options",
             timeAxisTitle: "t (s)",
-            resetTimeBtn: "Reset",
-            resetTimeTitle: "Reset time origin (start recording from 0)",
+            resetTimeBtn: "Reset time",
+            resetTimeTitle: "Reset time origin and clear all graph history",
             smoothPlotsLabel: "Smooth",
             smoothPlotsTitle: "Moving average window for smoothing curves (1 = off)",
             smoothOff: "Off",
@@ -1200,13 +1182,9 @@
         if (authPasswordInput) authPasswordInput.placeholder = tr.authPlaceholder;
         if (authSubmitBtn) authSubmitBtn.textContent = tr.authSubmit;
 
-        const timeWindowLabel = timeWindowSelect?.parentElement;
-        if (timeWindowLabel && timeWindowLabel.tagName === "LABEL") {
-            timeWindowLabel.childNodes[0].nodeValue = tr.windowLabel + " ";
-        }
-        const historyBufferLabel = historyBufferSelect?.parentElement;
-        if (historyBufferLabel && historyBufferLabel.tagName === "LABEL") {
-            historyBufferLabel.childNodes[0].nodeValue = tr.bufferLabel + " ";
+        const visualBufferLabelEl = document.getElementById("visualBufferLabel");
+        if (visualBufferLabelEl && visualBufferLabelEl.tagName === "LABEL" && visualBufferLabelEl.firstChild) {
+            visualBufferLabelEl.childNodes[0].nodeValue = tr.bufferVisualLabel + " ";
         }
 
         if (varFilter) varFilter.placeholder = tr.filterPlaceholder;
@@ -1471,7 +1449,6 @@
                 graphs: varGraphAssignment,
                 graphList: graphList,
                 timeWindow: timeWindowSelect.value,
-                historyBuffer: historyBufferSelect.value,
                 smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
                 instance: portSelect ? portSelect.value : "",
                 hideLevels: hideLevels,
@@ -1520,10 +1497,14 @@
             if (Array.isArray(cfg.graphList)) {
                 graphList = cfg.graphList;
             }
-            if (cfg.timeWindow) timeWindowSelect.value = cfg.timeWindow;
-            if (cfg.historyBuffer) {
-                historyBufferSelect.value = cfg.historyBuffer;
-                localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+            if (cfg.timeWindow) {
+                timeWindowSelect.value = cfg.timeWindow;
+                const v = parseInt(cfg.timeWindow, 10);
+                localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+            } else if (cfg.historyBuffer) {
+                timeWindowSelect.value = cfg.historyBuffer;
+                const v = parseInt(cfg.historyBuffer, 10);
+                localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
             }
             const smoothPlotsSelect = document.getElementById("smoothPlotsSelect");
             if (smoothPlotsSelect && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
@@ -2554,7 +2535,6 @@
             graphs: varGraphAssignment,
             graphList: graphList,
             timeWindow: timeWindowSelect.value,
-            historyBuffer: historyBufferSelect.value,
             smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
             instance: portSelect ? portSelect.value : "",
             hideLevels: hideLevels,
@@ -2599,10 +2579,14 @@
         }
         if (cfg.graphs && typeof cfg.graphs === "object") varGraphAssignment = cfg.graphs;
         if (Array.isArray(cfg.graphList)) graphList = cfg.graphList;
-        if (cfg.timeWindow) timeWindowSelect.value = cfg.timeWindow;
-        if (cfg.historyBuffer) {
-            historyBufferSelect.value = cfg.historyBuffer;
-            localHistMaxSec = parseInt(cfg.historyBuffer) || 30;
+        if (cfg.timeWindow) {
+            timeWindowSelect.value = cfg.timeWindow;
+            const v = parseInt(cfg.timeWindow, 10);
+            localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+        } else if (cfg.historyBuffer) {
+            timeWindowSelect.value = cfg.historyBuffer;
+            const v = parseInt(cfg.historyBuffer, 10);
+            localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
         }
         const smoothSel = document.getElementById("smoothPlotsSelect");
         if (smoothSel && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
@@ -2902,9 +2886,23 @@
 
     if (resetTimeBtn) resetTimeBtn.addEventListener("click", () => {
         if (isOfflineMode()) return;
+        // Primero borrar todos los buffers (gráficos y grabación); después restablecer el offset.
+        for (const name of Object.keys(historyCache)) {
+            historyCache[name] = { timestamps: [], values: [] };
+        }
+        for (const key of Object.keys(arrayElemHistory)) {
+            arrayElemHistory[key] = { timestamps: [], values: [] };
+        }
+        for (const cv of computedVars) {
+            if (computedHistories[cv.name]) {
+                computedHistories[cv.name] = { timestamps: [], values: [] };
+            }
+        }
+        recordBuffer = [];
+        localRecordSamples = [];
+        if (isRecording) recordStartTime = Date.now();
         sessionStartTime = Date.now() / 1000;
         sharedZoomXRange = null;
-        trimHistoryToSessionStart();
         schedulePlotRender();
     });
 
@@ -3943,7 +3941,7 @@
         markerA = null;
         markerB = null;
         deltaByName = {};
-        if (timeWindowSelect) timeWindowSelect.value = "0"; // Mostrar todo el registro en modo análisis
+        if (timeWindowSelect) timeWindowSelect.value = "120"; // 2 min en modo análisis (máx. buffer visual)
         onVarNames(ds.names);
         rebuildHistoriesFromOffline(ds);
         // Si ya teníamos históricos completos de variables (cargados bajo demanda),
@@ -6828,7 +6826,9 @@
             const m = h.timestamps[0];
             if (newMin === null || m < newMin) newMin = m;
         }
-        if (newMin !== null) sessionStartTime = newMin;
+        // En live los timestamps ya son relativos (0, 0.1, ...); sessionStartTime debe seguir
+        // siendo el Unix del inicio de sesión. Solo actualizar en modo offline (tiempos absolutos).
+        if (!isLiveMode() && newMin !== null) sessionStartTime = newMin;
     }
 
     /** Elimina puntos con timestamp anterior al origen de sesión (tras "Reset tiempo"). */
@@ -7268,20 +7268,21 @@
         }
         const win = windowSec > 0 ? windowSec : 60;
         let defaultXRange;
+        let liveUseAutorange = false;
         if (isOfflineMode()) {
-            // En análisis offline NO forzamos origen a 0: usamos tiempos absolutos
-            // tal y como vienen de la grabación (time_s). El rango se ajusta
-            // simplemente al tramo visible y a la ventana seleccionada.
             const endAbs = globalTMax != null ? globalTMax : (dataOrigin != null ? dataOrigin + win : win);
             const startAbs = (windowSec > 0 && dataOrigin != null)
                 ? Math.max(dataOrigin, endAbs - win)
                 : (dataOrigin != null ? dataOrigin : Math.max(0, endAbs - win));
             defaultXRange = [startAbs, Math.max(startAbs + 0.1, endAbs)];
         } else {
-            // En live mantenemos ventana deslizante clásica relativa al origen:
-            // el eje X siempre va de 0 a ventana (segundos relativos desde que
-            // se empezó a recibir datos).
-            defaultXRange = [0, win];
+            // En live ventana deslizante: mostrar siempre los últimos 'win' segundos.
+            // Si hay datos, [tMax - win, tMax]; si no, [0, win].
+            if (globalTMax != null) {
+                defaultXRange = [Math.max(0, globalTMax - win), Math.max(globalTMax, win)];
+            } else {
+                defaultXRange = [0, win];
+            }
         }
         const sharedXRange = (Array.isArray(sharedZoomXRange) && sharedZoomXRange.length === 2)
             ? sharedZoomXRange
@@ -7439,8 +7440,7 @@
                 hovermode: "x unified",
                 xaxis: {
                     title: (I18N[currentLang] || I18N.es).timeAxisTitle,
-                    range: sharedXRange,
-                    autorange: false,
+                    ...(liveUseAutorange ? { autorange: true } : { range: sharedXRange, autorange: false }),
                     gridcolor: colors.gridcolor,
                     zerolinecolor: colors.gridcolor,
                 },
@@ -7508,11 +7508,12 @@
         renderPerfTelemetry();
     }
 
-    timeWindowSelect.addEventListener("change", () => { saveConfig(); renderPlots(); });
-    historyBufferSelect.addEventListener("change", () => {
-        localHistMaxSec = parseInt(historyBufferSelect.value) || 30;
+    timeWindowSelect.addEventListener("change", () => {
+        const v = parseInt(timeWindowSelect.value, 10);
+        localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
         if (isLiveMode()) trimLocalHistory();
         saveConfig();
+        schedulePlotRender();
     });
 
     if (offlineFullLoadMaxMbInput) {
@@ -7793,6 +7794,14 @@
 
         if (computedVars.length > 0) evalComputedVars();
         const nowTs = forcedTs != null ? forcedTs : (Date.now() / 1000);
+        // En modo live usamos tiempo relativo desde el inicio de sesión para los
+        // historiales de las gráficas, así evitamos timestamps absolutos enormes.
+        if (isLiveMode()) {
+            if (sessionStartTime == null) sessionStartTime = nowTs;
+        }
+        const tsForHistBase = (isLiveMode() && sessionStartTime != null)
+            ? (nowTs - sessionStartTime)
+            : nowTs;
         changedNames.forEach((baseName) => {
             if (!isArincEnabled(baseName)) return;
             if (isArincDerivedName(baseName)) return;
@@ -7800,14 +7809,17 @@
             if (!vd || Array.isArray(vd.value)) return;
             const num = typeof vd.value === "number" ? vd.value : Number(vd.value);
             if (!Number.isFinite(num)) return;
-            const ts = (vd.timestamp && Number.isFinite(vd.timestamp)) ? vd.timestamp : nowTs;
+            let ts = (vd.timestamp && Number.isFinite(vd.timestamp)) ? vd.timestamp : nowTs;
+            if (isLiveMode() && sessionStartTime != null) {
+                ts = ts - sessionStartTime;
+            }
             pushArincDerivedSample(baseName, ts, num, appendHistory);
         });
         const hadArrayElems = trackArrayElementHistories(appendHistory);
 
         // Acumular buffer para gráficos desde el poll de monitorización (solo escalares; arrays en arrayElemHistory, computed en evalComputedVars).
         if (appendHistory) {
-            const now = nowTs;
+            const now = tsForHistBase;
             for (let i = 0; i < data.length; i++) {
                 const v = data[i];
                 if (isComputed(v.name)) continue;

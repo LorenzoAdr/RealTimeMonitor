@@ -107,24 +107,12 @@
                             <option value="light">Claro</option>
                         </select>
                     </label>
-                    <label id="timeWindowLabel">Ventana:
+                    <label id="visualBufferLabel">Buffer visual:
                         <select id="timeWindow">
-                            <option value="10" selected>10s</option>
-                            <option value="30">30s</option>
+                            <option value="10">10s</option>
+                            <option value="30" selected>30s</option>
                             <option value="60">1 min</option>
                             <option value="120">2 min</option>
-                            <option value="300">5 min</option>
-                            <option value="600">10 min</option>
-                            <option value="0">Todo</option>
-                        </select>
-                    </label>
-                    <label id="historyBufferLabel">Buffer:
-                        <select id="historyBuffer">
-                            <option value="10" selected>10s</option>
-                            <option value="20">20s</option>
-                            <option value="30">30s</option>
-                            <option value="45">45s</option>
-                            <option value="60">1 min</option>
                         </select>
                     </label>
                     <div class="settings-section-title">Layout y rendimiento</div>
@@ -170,11 +158,8 @@
                         <span>Ventana análisis (s):</span>
                         <input type="number" id="offlineWindowSpanInput" min="1" max="20" step="1" value="3" title="Ancho de cada ventana de lectura desde TSV en modo análisis (solo monitorización)">
                     </label>
-                    <label class="settings-adv-checkbox">Ventana por defecto (s):
-                        <input type="number" id="defaultTimeWindowInput" min="1" max="600" step="1" value="10">
-                    </label>
-                    <label class="settings-adv-checkbox">Buffer por defecto (s):
-                        <input type="number" id="defaultHistoryBufferInput" min="1" max="600" step="1" value="10">
+                    <label class="settings-adv-checkbox">Buffer visual por defecto (s):
+                        <input type="number" id="defaultVisualBufferInput" min="1" max="120" step="1" value="30">
                     </label>
                     <label class="settings-adv-checkbox">Umbral carga completa (MB):
                         <input type="number" id="offlineFullLoadMaxMbInput" min="5" step="1" value="100">
@@ -306,8 +291,7 @@
                     <li><b>&times;</b> en la cabecera del grafico: eliminar ese grafico.</li>
                     <li><b>&#9654; Play / &#9646;&#9646; Pausa</b>: pausar o reanudar la actualizacion de todos los graficos.</li>
                     <li><b>&#128247; PNG</b>: capturar todos los graficos visibles como una sola imagen PNG.</li>
-                    <li><b>Ventana</b>: seleccionar el rango temporal visible (10s a 10min o todo el historial).</li>
-                    <li><b>Buffer</b>: memoria interna del navegador. Controla cuantos segundos de datos se acumulan en RAM (30s a 30min). Si el monitor consume mucha RAM, reduce este valor.</li>
+                    <li><b>Buffer visual</b>: segundos de datos mostrados en el grafico y conservados en memoria (10s a 10min o todo). Afecta al tamano de la grafica y al uso de RAM.</li>
                     <li><b>Crosshair</b>: al pasar el raton, se muestra el valor de todas las trazas en ese instante.</li>
                     <li><b>Zoom</b>: arrastra un rectangulo sobre el grafico para hacer zoom. Usa la rueda del raton para zoom rapido.</li>
                     <li><b>Pan</b>: pulsa el boton de pan en la barra de herramientas y arrastra para desplazar la vista.</li>
@@ -449,6 +433,7 @@ web_port = 8080          # Puerto de esta web (solo Python)
             <div class="col-header">
                 <h2 id="colPlotTitle">Gráficos</h2>
                 <div class="plot-controls">
+                    <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo y borrar historial de gráficos">&#10227; Reset tiempo</button>
                     <label id="smoothPlotsLabel" title="Ventana de media móvil para suavizar curvas">Suavizado:
                         <select id="smoothPlotsSelect">
                             <option value="1" id="smoothOpt1">No</option>
@@ -459,7 +444,6 @@ web_port = 8080          # Puerto de esta web (solo Python)
                         </select>
                     </label>
                     <button id="resetPlotsBtn" class="btn-small" title="Quitar asignaciones de variables a gráficos">&#128465; Limpiar</button>
-                    <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo">&#10227; Reset</button>
                     <button id="pauseBtn" class="btn-small" title="Pausar/reanudar gráficos">&#9654; Play</button>
                     <div id="offlinePlaybackControls" class="offline-playback-controls" style="display:none">
                         <button id="offlinePlayPauseBtn" class="btn-small" title="Reproducir/pausar análisis offline">&#9654; Play</button>
