@@ -1,12 +1,14 @@
 """FastAPI backend for VarMonitor web interface."""
 
 import asyncio
+import collections
 import getpass
 import logging
 import json
 import os
 import resource
 import socket
+import sys
 import time
 import urllib.request
 import math
@@ -36,6 +38,9 @@ DEFAULTS = {
     "cycle_interval_ms": 100,
     "update_ratio_max": 100,
     "server_state_dir": "",
+    "log_buffer_size": 5000,
+    "log_file_cpp": "",
+    "shm_max_vars": 2048,
 }
 
 CONFIG_ABS_PATH = ""
@@ -67,7 +72,11 @@ def load_config() -> dict:
                 key, val = key.strip(), val.strip()
                 if key in ("web_port", "web_port_scan_max", "cycle_interval_ms", "update_ratio_max"):
                     cfg[key] = int(val)
-                elif key in ("lan_ip", "bind_host", "auth_password", "server_state_dir"):
+                elif key == "log_buffer_size":
+                    cfg[key] = max(100, min(50000, int(val)))
+                elif key == "shm_max_vars":
+                    cfg[key] = max(64, min(100000, int(val)))
+                elif key in ("lan_ip", "bind_host", "auth_password", "server_state_dir", "log_file_cpp"):
                     cfg[key] = val
         CONFIG_ABS_PATH = os.path.abspath(path)
         print(f"[VarMonitor Web] Config cargada desde {CONFIG_ABS_PATH}")
@@ -87,6 +96,47 @@ def load_config() -> dict:
 
 
 _config = load_config()
+
+# --- Buffer de log para visor integrado ---
+_LOG_BUFFER_LOCK = threading.Lock()
+_LOG_BUFFER: collections.deque = collections.deque(
+    maxlen=max(100, min(50000, int(_config.get("log_buffer_size", 5000)))),
+)
+
+
+class _LogTee:
+    """Escribe en el stream original y duplica cada línea (con timestamp) al buffer de log."""
+    def __init__(self, stream):
+        self._stream = stream
+        self._linebuf: list[str] = []
+
+    def write(self, data: str):
+        self._stream.write(data)
+        with _LOG_BUFFER_LOCK:
+            for ch in data:
+                if ch == "\n" or ch == "\r":
+                    if self._linebuf:
+                        line = "".join(self._linebuf).strip()
+                        if line:
+                            _LOG_BUFFER.append({
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                                "level": "info",
+                                "msg": line,
+                            })
+                        self._linebuf.clear()
+                else:
+                    self._linebuf.append(ch)
+        return len(data)
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+_ORIGINAL_STDOUT = sys.stdout
+sys.stdout = _LogTee(_ORIGINAL_STDOUT)
 
 # Numero de conexiones WebSocket activas
 ACTIVE_WS = 0
@@ -224,6 +274,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="VarMonitor", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def log_requests_middleware(request: Request, call_next):
+    """Registra cada petición HTTP en el buffer de log (visible en el visor integrado)."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    path = getattr(request.url, "path", "") or ""
+    query = getattr(request.url, "query", "") or ""
+    if query:
+        path_display = path + "?" + (query if len(query) <= 100 else query[:100] + "...")
+    else:
+        path_display = path
+    status = getattr(response, "status_code", 0)
+    print(f"[Req] {request.method} {path_display} -> {status} ({elapsed_ms:.0f}ms)")
+    return response
 
 
 @app.get("/")
@@ -1406,6 +1473,56 @@ async def api_session_delete(name: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def _read_cpp_log_tail(path: str, max_lines: int) -> list[dict]:
+    """Lee las últimas max_lines líneas del archivo de log C++ (si existe)."""
+    out: list[dict] = []
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        for line in lines[-max_lines:]:
+            line = line.rstrip("\n\r")
+            if line:
+                out.append({"ts": "", "level": "info", "msg": f"[C++] {line}"})
+    except Exception:
+        out.append({"ts": "", "level": "warning", "msg": f"[C++] No se pudo leer {path}"})
+    return out
+
+
+@app.get("/api/log")
+async def api_log(
+    request: Request,
+    tail: int = Query(2000, ge=1, le=20000),
+    source: str = Query("python", description="python | cpp | all"),
+):
+    """Devuelve el log del backend (Python) y opcionalmente del proceso C++ (archivo configurado)."""
+    source = (source or "python").strip().lower()
+    if source not in ("python", "cpp", "all"):
+        source = "python"
+    lines: list[dict] = []
+    if source in ("python", "all"):
+        with _LOG_BUFFER_LOCK:
+            lines = list(_LOG_BUFFER)[-tail:]
+        if source == "all":
+            lines = [{"ts": x["ts"], "level": x["level"], "msg": f"[Py] {x['msg']}"} for x in lines]
+    if source in ("cpp", "all"):
+        cpp_path = (_config.get("log_file_cpp") or "").strip()
+        cpp_lines = _read_cpp_log_tail(cpp_path, tail)
+        if source == "all":
+            lines = list(lines) + cpp_lines
+            lines.sort(key=lambda x: (x["ts"], x["msg"]))
+        else:
+            lines = cpp_lines
+    if request.headers.get("accept", "").strip().startswith("text/plain"):
+        text = "\n".join(
+            (f"{x['ts']} {x['msg']}" if x.get("ts") else x["msg"]) for x in lines
+        )
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(text)
+    return {"lines": lines, "source": source}
+
+
 @app.get("/api/admin/storage")
 async def api_admin_storage():
     _ensure_recordings_dir()
@@ -1754,8 +1871,9 @@ async def websocket_endpoint(ws: WebSocket):
     shm_queue: Queue | None = None
     if info and info.get("shm_name") and info.get("sem_name"):
         shm_queue = Queue()
+        shm_max_vars = int(_config.get("shm_max_vars", 2048))
         shm_reader = ShmReader(
-            info["shm_name"], info["sem_name"], shm_queue, poll_interval=0.5
+            info["shm_name"], info["sem_name"], shm_queue, poll_interval=0.5, max_vars=shm_max_vars
         )
         if shm_reader.start():
             if getattr(shm_reader, "_polling_only", False):

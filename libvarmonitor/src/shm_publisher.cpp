@@ -13,6 +13,7 @@
 #include <pwd.h>
 #include <cerrno>
 #include <dirent.h>
+#include <atomic>
 #include <csignal>
 #include <mutex>
 #include <unordered_set>
@@ -23,10 +24,14 @@ namespace shm_publisher {
 static constexpr uint32_t MAGIC = 0x4D524156u; /* "VARM" little-endian */
 static constexpr uint32_t VERSION = 1u;
 static constexpr size_t NAME_MAX_LEN = 128u;
-static constexpr size_t MAX_VARS = 512u;
 static constexpr size_t ENTRY_SIZE = NAME_MAX_LEN + 1 + 8; /* name + type + value (double) */
 static constexpr size_t HEADER_SIZE = 4 + 4 + 8 + 4 + 4 + 8;   /* magic, version, seq, count, padding, timestamp (32 bytes) */
-static constexpr size_t SEGMENT_SIZE = HEADER_SIZE + MAX_VARS * ENTRY_SIZE;
+static constexpr size_t DEFAULT_MAX_VARS = 2048u;
+static constexpr size_t MIN_MAX_VARS = 64u;
+static constexpr size_t MAX_MAX_VARS = 32768u;
+
+static size_t g_max_vars = DEFAULT_MAX_VARS;
+static size_t g_segment_size = 0;  /* fijado en init() */
 
 static int g_shm_fd = -1;
 static void* g_shm_ptr = nullptr;
@@ -81,8 +86,14 @@ void cleanup_stale_shm_for_user() {
 #endif
 }
 
-bool init() {
+bool init(size_t max_vars) {
     if (g_active) return true;
+    if (max_vars == 0) max_vars = DEFAULT_MAX_VARS;
+    if (max_vars < MIN_MAX_VARS) max_vars = MIN_MAX_VARS;
+    if (max_vars > MAX_MAX_VARS) max_vars = MAX_MAX_VARS;
+    g_max_vars = max_vars;
+    g_segment_size = HEADER_SIZE + g_max_vars * ENTRY_SIZE;
+
     cleanup_stale_shm_for_user();
     std::string user = get_username();
     pid_t pid = getpid();
@@ -96,12 +107,12 @@ bool init() {
         std::cerr << "[VarMonitor] shm_open failed: " << strerror(errno) << "\n";
         return false;
     }
-    if (ftruncate(fd, static_cast<off_t>(SEGMENT_SIZE)) != 0) {
+    if (ftruncate(fd, static_cast<off_t>(g_segment_size)) != 0) {
         close(fd);
         shm_unlink(("/" + g_shm_name).c_str());
         return false;
     }
-    void* ptr = mmap(nullptr, SEGMENT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    void* ptr = mmap(nullptr, g_segment_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (ptr == MAP_FAILED) {
         close(fd);
         shm_unlink(("/" + g_shm_name).c_str());
@@ -112,7 +123,7 @@ bool init() {
 
     sem_t* sem = sem_open(g_sem_name.c_str(), O_CREAT | O_EXCL, 0666, 0);
     if (sem == SEM_FAILED) {
-        munmap(g_shm_ptr, SEGMENT_SIZE);
+        munmap(g_shm_ptr, g_segment_size);
         close(g_shm_fd);
         shm_unlink(("/" + g_shm_name).c_str());
         g_shm_ptr = nullptr;
@@ -134,7 +145,8 @@ bool init() {
     memcpy(h + 24, &ts, 8);
 
     g_active = true;
-    std::cout << "[VarMonitor] SHM listo: /dev/shm/" << g_shm_name << " sem " << g_sem_name << "\n";
+    std::cout << "[VarMonitor] SHM listo: /dev/shm/" << g_shm_name << " sem " << g_sem_name
+              << " (" << g_max_vars << " vars, " << (g_segment_size / 1024) << " KiB)\n";
     return true;
 }
 
@@ -146,9 +158,10 @@ void shutdown() {
         sem_unlink(g_sem_name.c_str());
         g_sem = nullptr;
     }
-    if (g_shm_ptr) {
-        munmap(g_shm_ptr, SEGMENT_SIZE);
+    if (g_shm_ptr && g_segment_size > 0) {
+        munmap(g_shm_ptr, g_segment_size);
         g_shm_ptr = nullptr;
+        g_segment_size = 0;
     }
     if (g_shm_fd >= 0) {
         close(g_shm_fd);
@@ -172,7 +185,6 @@ static double scalar_to_double(const VarMonitor::VarSnapshot& s) {
 
 void write_snapshot(VarMonitor* mon) {
     if (!g_active || !g_shm_ptr || !mon || !g_sem) return;
-    auto vars = mon->list_vars();
     uint32_t count = 0;
     uint64_t seq = 0;
     double timestamp = std::chrono::duration<double>(
@@ -192,25 +204,35 @@ void write_snapshot(VarMonitor* mon) {
     if (sub.empty()) {
         /* Sin suscripción: no volcar variables; solo cabecera (count=0) y sem_post.
          * La lista de variables disponibles se obtiene por UDS (list_names/list_vars). */
-        count = 0;
         memcpy(h + 16, &count, 4);
         memcpy(h + 24, &timestamp, 8);
         sem_post(g_sem);
         return;
     }
 
+    /* Iterar solo la suscripción (get_var por nombre), no list_vars() completo.
+     * Con 20k vars registradas y 2k monitorizadas, coste O(2k) en lugar de O(20k). */
+    if (sub.size() > g_max_vars) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            std::cerr << "[VarMonitor] AVISO: suscripcion tiene " << sub.size()
+                      << " variables pero shm_max_vars=" << g_max_vars
+                      << ". Solo se escriben las primeras " << g_max_vars
+                      << "; el resto mostraran \"--\" hasta aumentar shm_max_vars en varmon.conf\n";
+        }
+    }
     char* ent = h + HEADER_SIZE;
-    for (const auto& s : vars) {
-        if (count >= MAX_VARS) break;
-        if (s.type == VarType::Array) continue;
-        if (s.type == VarType::String) continue; /* solo escalares numéricos */
-        if (!sub.empty() && sub.count(s.name) == 0) continue; /* suscripción: solo las pedidas */
-        size_t name_len = std::min(s.name.size(), NAME_MAX_LEN);
+    for (const auto& name : sub) {
+        if (count >= g_max_vars) break;
+        auto opt = mon->get_var(name);
+        if (!opt) continue;
+        if (opt->type == VarType::Array || opt->type == VarType::String) continue;
+        size_t name_len = std::min(opt->name.size(), NAME_MAX_LEN);
         memset(ent, 0, ENTRY_SIZE);
-        memcpy(ent, s.name.c_str(), name_len);
-        uint8_t type_byte = static_cast<uint8_t>(static_cast<int>(s.type));
+        memcpy(ent, opt->name.c_str(), name_len);
+        uint8_t type_byte = static_cast<uint8_t>(static_cast<int>(opt->type));
         ent[NAME_MAX_LEN] = type_byte;
-        double val = scalar_to_double(s);
+        double val = scalar_to_double(*opt);
         memcpy(ent + NAME_MAX_LEN + 1, &val, 8);
         ent += ENTRY_SIZE;
         count++;

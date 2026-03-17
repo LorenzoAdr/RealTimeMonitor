@@ -110,4 +110,7 @@ void set_global_instance(VarMonitor* instance);
 void set_config_path(const std::string& path);
 bool load_config();
 
+/** Valor entero sin signo leido de varmon.conf (key = valor). Si no existe o no es numero, devuelve default_val. */
+unsigned get_config_uint(const std::string& key, unsigned default_val);
+
 } // namespace varmon

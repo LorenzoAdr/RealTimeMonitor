@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -13,8 +14,8 @@ namespace shm_publisher {
 /** Limpia segmentos zombie en /dev/shm para el usuario actual (varmon-<user>-<pid> con PID muerto). */
 void cleanup_stale_shm_for_user();
 
-/** Crea segmento SHM y semáforo POSIX. Nombre: varmon-<user>-<pid>. Debe llamarse tras cleanup_stale_shm_for_user(). */
-bool init();
+/** Crea segmento SHM y semáforo POSIX. Nombre: varmon-<user>-<pid>. max_vars=0 usa valor por defecto (2048). */
+bool init(size_t max_vars = 0);
 
 /** Cierra y elimina segmento y semáforo. */
 void shutdown();

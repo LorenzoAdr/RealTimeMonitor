@@ -32,7 +32,7 @@ El backend está en [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSoc
 
 ## Configuración
 
-- **load_config()**: Lee `varmon.conf` (o ruta en `VARMON_CONFIG`). Devuelve un dict con `web_port`, `auth_password`, `cycle_interval_ms`, etc. Se invoca al arrancar y el resultado se guarda en `_config`.
+- **load_config()**: Lee `varmon.conf` (o ruta en `VARMON_CONFIG`). Devuelve un dict con `web_port`, `auth_password`, `cycle_interval_ms`, **`shm_max_vars`**, etc. Se invoca al arrancar y el resultado se guarda en `_config`. El valor `shm_max_vars` (defecto 2048) se pasa al **ShmReader** para que lea del segmento SHM hasta ese número de entradas; si no se incluye en la config, el backend usaría 2048 y truncaría snapshots con más variables (las que quedan después de la 2048 mostrarían "--" en el frontend).
 
 ## Descubrimiento de instancias UDS
 
@@ -43,7 +43,7 @@ El backend está en [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSoc
 1. **Aceptar y autenticar**: `ws.accept()`. Si `auth_password` está configurado, se exige `?password=...` en la URL; si falla, se envía `error` con `message: "auth_required"` y se cierra.
 2. **Elegir instancia UDS**: Si no viene `uds_path` en la query, se llama a `_list_uds_instances(None)` y se toma la primera. Si no hay instancias, se envía `error` y se cierra.
 3. **Conectar UDS y server_info**: Se crea `UdsBridge(query_uds, 5.0)` y se llama a `bridge.get_server_info()`. Con la respuesta se obtienen `shm_name` y `sem_name`.
-4. **ShmReader**: Si hay `shm_name` y `sem_name`, se crea una `Queue` y un `ShmReader(shm_name, sem_name, shm_queue)`. Se llama a `shm_reader.start()`. Si el semáforo no abre (ej. WSL), el ShmReader puede usar modo polling (lee SHM cada ~5 ms y detecta cambios por `seq`).
+4. **ShmReader**: Si hay `shm_name` y `sem_name`, se crea una `Queue` y un `ShmReader(shm_name, sem_name, shm_queue, max_vars=_config["shm_max_vars"])`. Se llama a `shm_reader.start()`. El parámetro `max_vars` indica cuántas entradas leer por snapshot (debe coincidir con el C++ para no truncar). Si el semáforo no abre (ej. WSL), el ShmReader puede usar modo polling (lee SHM cada ~5 ms y detecta cambios por `seq`).
 5. **Bucle principal**: Se crea una tarea `_shm_drain_loop()` que drena la cola SHM en un bucle asíncrono. Por cada snapshot: se actualiza `latest_snapshot`, se evalúan alarmas (`_evaluate_alarms`), se rellena `alarm_buffer` (rodante 10 s + 1 s) y, si hay grabación activa, se encola el snapshot para el hilo de escritura TSV. A **tasa visual** (cada `update_ratio` ciclos) se envía `vars_update` al navegador con el snapshot actual.
 6. **Mensajes del cliente**: En paralelo se reciben mensajes JSON del frontend: `monitored`, `set_alarms`, `start_recording`, `stop_recording`, `update_ratio`, `send_file_on_finish`, etc. Según el tipo se actualizan `monitored_names`, `alarms_config`, `recording`, etc.
 7. **Alarmas**: En `_shm_drain_loop`, si `_evaluate_alarms` detecta cruce de umbral se envía `alarm_triggered`; si vuelve a rango, `alarm_cleared`. Tras disparar, 1 s después se escribe un TSV del buffer de alarma y se envía `alarm_recording_ready` (path y opcionalmente `file_base64`).

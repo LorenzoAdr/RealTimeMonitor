@@ -105,13 +105,13 @@ Cada proceso C++ tiene un segmento y un semáforo; el mismo par user/pid identif
   - 20–23: padding.
   - 24–31: timestamp (double, tiempo Unix).
 
-- **Entradas**: hasta 512; cada una: 128 bytes nombre (C string), 1 byte tipo (0=double, 1=int32, 2=bool, 3=string, 4=array), 8 bytes valor (double).
+- **Entradas**: hasta **shm_max_vars** (configurable en `varmon.conf`, defecto 2048); cada una: 128 bytes nombre (C string), 1 byte tipo (0=double, 1=int32, 2=bool, 3=string, 4=array), 8 bytes valor (double).
 
 Solo variables **escalares** en SHM. La suscripción `set_shm_subscription` restringe qué variables se escriben: si no está vacía, solo esas; si está vacía, el C++ no escribe ninguna entrada (solo cabecera con `count = 0`). Ver más abajo el sistema de actualización de variables monitorizadas.
 
 ### Funcionamiento detallado del segmento SHM
 
-El segmento es un **buffer de tamaño fijo** en `/dev/shm/`: `HEADER_SIZE + MAX_VARS * ENTRY_SIZE` (32 + 512×137 bytes). C++ y Python acuerdan el mismo layout para poder leer/escribir sin protocolo adicional.
+El segmento es un **buffer de tamaño fijo** en `/dev/shm/`: `HEADER_SIZE + shm_max_vars * ENTRY_SIZE` (32 + shm_max_vars×137 bytes). C++ lee `shm_max_vars` de `varmon.conf` al iniciar y crea el segmento con ese tamaño; el backend Python debe leer el mismo valor de `varmon.conf` para no truncar la lectura (si Python usa un límite menor, solo verá las primeras N variables y el resto mostrarán "--"). Ambos acuerdan el mismo layout para poder leer/escribir sin protocolo adicional.
 
 **Serialización de variables**
 
@@ -170,7 +170,7 @@ En memoria (bytes):
 | 24       | 8      | timestamp (double, Unix) |
 | 32       | 137    | entrada 0: name[128], type[1], value[8] |
 | 169      | 137    | entrada 1 |
-| …        | …      | hasta `count` entradas (máx. 512) |
+| …        | …      | hasta `count` entradas (máx. shm_max_vars) |
 
 ### Flujo de escritura (C++)
 

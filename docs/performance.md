@@ -17,8 +17,9 @@ Además del uso de SHM y UDS, se aplican varias medidas para no saturar ni la re
 ### Variables monitorizadas únicamente
 
 - Solo las variables que el usuario ha elegido **monitorizar** se envían por WebSocket al navegador.
-- El C++ solo escribe en SHM las variables suscritas (`set_shm_subscription`): si la suscripción tiene nombres, escribe solo esas; si está **vacía**, no escribe ninguna entrada (solo actualiza la cabecera con `count = 0` y hace `sem_post`), evitando volcar todas las variables en cada ciclo cuando nadie está monitorizando. La lista de variables disponibles se obtiene entonces por UDS (`list_names` / `list_vars`) bajo demanda.
+- El C++ solo escribe en SHM las variables suscritas (`set_shm_subscription`): si la suscripción tiene nombres, escribe solo esas (iterando por nombre con `get_var`, no por todas las variables registradas); si está **vacía**, no escribe ninguna entrada (solo actualiza la cabecera con `count = 0` y hace `sem_post`), evitando volcar todas las variables en cada ciclo cuando nadie está monitorizando. La lista de variables disponibles se obtiene entonces por UDS (`list_names` / `list_vars`) bajo demanda.
 - Las variables no monitorizadas se ignoran en el envío al cliente; no se transmite todo el conjunto de variables en cada actualización.
+- El número máximo de variables que caben en el segmento SHM es **shm_max_vars** (configurable en `varmon.conf`; C++ y Python deben usar el mismo valor). Si monitorizas más que ese límite, solo las primeras reciben valor; el resto muestran "--". Véase [Resolución de problemas — Algunas variables muestran "--"](troubleshooting.md#algunas-variables-muestran-al-monitorizar-muchas).
 
 Ver [Protocolos — Sistema de actualización de variables monitorizadas](protocols.md#sistema-de-actualización-de-variables-monitorizadas).
 

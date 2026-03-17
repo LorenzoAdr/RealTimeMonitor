@@ -7,6 +7,8 @@ import threading
 from queue import Queue, Empty
 
 # Layout C++: HEADER 32 bytes (magic, version, seq, count, padding, timestamp), ENTRY 137 (name[128], type, double)
+# Debe coincidir con MAX_VARS en libvarmonitor/src/shm_publisher.cpp
+MAX_VARS = 2048
 MAGIC = 0x4D524156  # VARM little-endian
 HEADER_SIZE = 4 + 4 + 8 + 4 + 4 + 8  # magic, version, seq, count, padding, timestamp = 32
 NAME_MAX_LEN = 128
@@ -89,11 +91,13 @@ def _sem_close(libc, sem):
     libc.sem_close(sem_ptr)
 
 
-def read_snapshot(buf: mmap.mmap) -> dict | None:
+def read_snapshot(buf: mmap.mmap, max_vars: int | None = None) -> dict | None:
     """Lee header + entradas del buffer SHM.
 
     Devuelve {"timestamp": <sec>, "data": [vars...]} o None si magic inválido.
+    max_vars: límite de entradas a leer (por defecto MAX_VARS del módulo; debe coincidir con C++).
     """
+    cap = max_vars if max_vars is not None else MAX_VARS
     if buf.size() < HEADER_SIZE:
         return None
     raw = buf.read(HEADER_SIZE)
@@ -106,8 +110,8 @@ def read_snapshot(buf: mmap.mmap) -> dict | None:
         timestamp = 0.0
     if magic != MAGIC:
         return None
-    if count > 512:
-        count = 512
+    if count > cap:
+        count = cap
     result = []
     for _ in range(count):
         if buf.tell() + ENTRY_SIZE > buf.size():
@@ -136,11 +140,19 @@ def read_snapshot(buf: mmap.mmap) -> dict | None:
 class ShmReader:
     """Lee SHM en un hilo: sem_wait (o polling si el semáforo no abre) -> lee snapshot -> pone en queue."""
 
-    def __init__(self, shm_name: str, sem_name: str, queue: Queue, poll_interval: float = 0.5):
+    def __init__(
+        self,
+        shm_name: str,
+        sem_name: str,
+        queue: Queue,
+        poll_interval: float = 0.5,
+        max_vars: int | None = None,
+    ):
         self.shm_name = shm_name
         self.sem_name = sem_name
         self.queue = queue
         self.poll_interval = poll_interval
+        self._max_vars = max_vars  # None = usar MAX_VARS del módulo (debe coincidir con C++)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._fd = None
@@ -212,7 +224,7 @@ class ShmReader:
                     continue
                 try:
                     buf.seek(0)
-                    snapshot = read_snapshot(buf)
+                    snapshot = read_snapshot(buf, self._max_vars)
                     if snapshot is not None:
                         self.queue.put(snapshot)
                 except Exception:
@@ -228,7 +240,7 @@ class ShmReader:
                     break
                 try:
                     buf.seek(0)
-                    snapshot = read_snapshot(buf)
+                    snapshot = read_snapshot(buf, self._max_vars)
                     if snapshot is not None:
                         seq = snapshot.get("seq")
                         if seq is not None and seq != last_seq:

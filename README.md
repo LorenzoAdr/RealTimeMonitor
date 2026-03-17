@@ -53,7 +53,10 @@ Ejemplo mínimo:
 web_port = 8080
 ```
 
-Opcional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`.  
+Opcional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**.
+
+- **shm_max_vars** (entero, defecto 2048): máximo de variables que caben en el segmento SHM. Si monitorizas más variables que este valor, solo las primeras reciben valor; el resto muestran "--". Tamaño del segmento ≈ 32 + shm_max_vars×137 bytes (ej. 2048 → ~274 KiB). Debe coincidir en C++ y Python; **reinicia el proceso C++ y el backend Python** tras cambiarlo.
+
 Ruta del archivo: variable de entorno `VARMON_CONFIG` o en C++ `varmon::set_config_path(...)`.
 
 ## Integración en tu proyecto C++

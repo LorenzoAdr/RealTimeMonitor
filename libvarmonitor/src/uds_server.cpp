@@ -15,6 +15,8 @@
 #include <chrono>
 #include <iomanip>
 #include <limits.h>
+#include <map>
+#include <cstdlib>
 
 namespace varmon {
 
@@ -85,6 +87,19 @@ static std::string get_username() {
 
 void set_config_path(const std::string& path) { g_config_path = path; }
 
+static std::map<std::string, std::string> g_config;
+
+unsigned get_config_uint(const std::string& key, unsigned default_val) {
+    auto it = g_config.find(key);
+    if (it == g_config.end() || it->second.empty()) return default_val;
+    try {
+        unsigned long v = std::stoul(it->second);
+        return static_cast<unsigned>(v);
+    } catch (...) {
+        return default_val;
+    }
+}
+
 static std::string trim(const std::string& s) {
     size_t start = s.find_first_not_of(" \t\r\n");
     if (start == std::string::npos) return "";
@@ -123,6 +138,7 @@ bool load_config() {
         return false;
     }
 
+    g_config.clear();
     std::string line;
     while (std::getline(file, line)) {
         line = trim(line);
@@ -131,8 +147,7 @@ bool load_config() {
         if (eq == std::string::npos) continue;
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
-        (void)key;
-        (void)val;
+        if (!key.empty()) g_config[key] = val;
     }
 
     std::cout << "[VarMonitor] Config cargada desde " << path << "\n";

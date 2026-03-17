@@ -180,7 +180,8 @@ bool VarMonitor::start(int sample_interval_ms) {
 
     load_config();
 
-    shm_publisher::init();
+    unsigned max_vars = get_config_uint("shm_max_vars", 2048);
+    shm_publisher::init(static_cast<size_t>(max_vars));
 
     sample_thread_ = std::thread(&VarMonitor::sample_loop, this);
     rpc_thread_ = std::thread(&VarMonitor::uds_server_loop, this);
