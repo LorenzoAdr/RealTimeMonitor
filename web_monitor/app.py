@@ -1889,7 +1889,17 @@ async def websocket_endpoint(ws: WebSocket):
         print("[VarMonitor Web] SHM no disponible: el proceso C++ no envió shm_name/sem_name (¿SHM inicializado con monitor.start()?)", flush=True)
 
     print(f"[VarMonitor Web] WebSocket conectado a C++ {connection_label}", flush=True)
-    await ws.send_json({"type": "vars_names", "data": []})
+    # Enviar lista real de variables al conectar. Si falla, no enviar [] (evita vaciar la UI);
+    # el bucle principal reintentará en breve.
+    try:
+        names_list = await asyncio.to_thread(bridge.list_names)
+        if not names_list:
+            names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+        await ws.send_json({"type": "vars_names", "data": names_list})
+        last_names_send = time.monotonic()
+        names_sent_once = True
+    except Exception as e:
+        print(f"[VarMonitor Web] Aviso: no se pudo obtener vars_names al conectar: {e}", flush=True)
 
     shm_drain_task: asyncio.Task | None = None
 

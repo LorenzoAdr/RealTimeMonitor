@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarMonitor</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=2">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -26,6 +26,7 @@
                     <select id="modeSelect">
                         <option value="live">Live</option>
                         <option value="offline">Análisis</option>
+                        <option value="replay">Replay</option>
                     </select>
                 </label>
             </div>
@@ -59,6 +60,7 @@
         </div>
         <div class="header-right">
             <button id="docsBtn" class="btn-small" type="button" title="Abrir documentación completa">Docs</button>
+            <button id="logBtn" class="btn-small" type="button" title="Registro del servidor (Python y opcionalmente C++)">Log</button>
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <div id="offlineControls" class="offline-controls" style="display:none">
                 <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar</button>
@@ -251,7 +253,7 @@
                 </div>
             </div>
             <div class="search-box">
-                <input type="text" id="varFilter" placeholder="Filtrar variables...">
+                <input type="text" id="varFilter" placeholder="Filtrar variables..." title="Escriba «tsv» para ver solo variables de la grabación TSV cargada">
             </div>
             <div class="select-actions">
                 <label class="drawer-agrupar-label" title="Mostrar variables agrupadas por categorías o en lista plana">
@@ -264,6 +266,34 @@
                 <button id="addToMonitor" class="btn-primary">+ Monitorizar</button>
             </div>
             <div id="varBrowserList" class="var-list"></div>
+        </div>
+    </div>
+
+    <div id="logOverlay" class="help-overlay" style="display:none">
+        <div class="log-modal">
+            <div class="help-modal-header">
+                <h2 id="logPanelTitle">Registro del servidor</h2>
+                <button id="logCloseBtn" class="help-close" type="button">&times;</button>
+            </div>
+            <div class="log-modal-toolbar">
+                <button id="logRefreshBtn" class="btn-small" type="button" title="Actualizar">&#8635; Actualizar</button>
+                <label class="log-auto-refresh-label">
+                    <input type="checkbox" id="logAutoRefreshCheckbox" title="Actualizar cada pocos segundos"> Auto-actualizar
+                </label>
+                <select id="logSourceSelect" title="Fuente del log">
+                    <option value="python">Python</option>
+                    <option value="cpp">C++</option>
+                    <option value="all">Ambos</option>
+                </select>
+                <label class="log-filter-label">
+                    <span id="logFilterLabel">Filtro:</span>
+                    <input type="text" id="logFilterInput" class="log-filter-input" placeholder="Filtrar por texto..." title="Filtrar líneas que contengan este texto">
+                </label>
+                <button id="logSaveBtn" class="btn-small" type="button" title="Descargar registro">&#128190; Guardar</button>
+            </div>
+            <div class="log-viewer-frame">
+                <pre id="logViewerContent" class="log-viewer-content"></pre>
+            </div>
         </div>
     </div>
 
@@ -450,6 +480,16 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     </div>
                 </div>
             </div>
+            <div id="monitorToolbar" class="monitor-toolbar">
+                <input type="text" id="monitorFilterInput" class="monitor-filter-input" placeholder="Filtrar variables… (tsv = solo en grabación)" title="Filtrar por nombre. Escriba «tsv» (o «tsv nombre») para ver solo variables de la grabación TSV">
+                <button type="button" id="monitorSelectAllBtn" class="btn-small" title="Preseleccionar todas las variables visibles (lote)">Seleccionar todas</button>
+                <button type="button" id="monitorDeselectAllBtn" class="btn-small" title="Quitar preselección">Deseleccionar todas</button>
+                <span id="monitorSortSep" class="monitor-toolbar-sep" aria-hidden="true">|</span>
+                <button type="button" id="monitorSortByNameBtn" class="btn-small" title="Ordenar por nombre">Por nombre</button>
+                <button type="button" id="monitorSortByGraphBtn" class="btn-small" title="Con gráfico asignado primero, luego sin asignar">Con gráfico primero</button>
+                <button type="button" id="monitorSortByTsvBtn" class="btn-small" title="Variables en el TSV primero, luego el resto">En TSV primero</button>
+                <span id="monitorFilterStatus" class="monitor-filter-status" aria-live="polite"></span>
+            </div>
             <div id="monitorList" class="monitor-list"></div>
         </section>
         <div id="monitorResizeHandle" class="monitor-resize-handle" role="separator" aria-orientation="vertical" title="Redimensionar panel de monitorización"></div>
@@ -488,6 +528,9 @@ web_port = 8080          # Puerto de esta web (solo Python)
                         <span id="offlineTimeLabel" class="offline-time-label">t=0.000s</span>
                         <span id="markerInfoLabel" class="offline-marker-label">A: -- | B: --</span>
                     </div>
+                    <label id="plotVsRefWrap" class="plot-vs-ref-wrap" style="display:none" title="Graficar variables frente a la referencia">
+                        <input type="checkbox" id="plotVsRefCheckbox" class="plot-vs-ref-checkbox"> Frente a ref
+                    </label>
                     <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
                 </div>
             </div>

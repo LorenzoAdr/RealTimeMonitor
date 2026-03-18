@@ -82,6 +82,7 @@ Con macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
 ## Funcionalidades del monitor web
 
 - Tres columnas: variables disponibles, monitor en vivo, gráficos.
+- Modos **Live**, **Análisis** y **Replay híbrido** (TSV + SHM/C++ con imposición selectiva por variable).
 - Gráficos dinámicos (Plotly), alarmas Hi/Lo, grabación TSV (backend), notificaciones, variables computadas, guardar/cargar configuración, acceso remoto por web_port, atajos de teclado (R grabación, S screenshot, etc.).
 
 ## Estructura del proyecto

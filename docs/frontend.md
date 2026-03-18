@@ -30,10 +30,11 @@ El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.
 
 - **saveConfig()** / **loadConfig()**: Guardan y cargan en `localStorage` (clave `varmon_config`) la lista de variables monitorizadas, `varGraphAssignment`, `graphList`, ventana de tiempo, tema, idioma, modo (live/offline), rutas de grabación, etc. Al cargar la página, `loadConfig()` restaura el estado y luego se llama a `rebuildPlotArea()` al final del init, de modo que los slots de gráficos existan desde el principio.
 
-## Modos: live y offline (análisis)
+## Modos: live, análisis y replay híbrido
 
 - **Live**: Datos por WebSocket desde el backend (SHM/UDS). Selector de instancia UDS, Rel act (update_ratio), grabación, alarmas.
 - **Offline (análisis)**: Se cargan grabaciones TSV (desde servidor o fichero local). El frontend pide ventanas de tiempo por API (`/api/recordings/{filename}/window` o `window_batch`) y rellena `historyCache` / `arrayElemHistory` para pintar los mismos gráficos. `offlineDataset`, `offlineRecordingName`, segmentos, scrubber y controles de reproducción son específicos de este modo.
+- **Replay (híbrido)**: Mantiene WebSocket activo para recibir `vars_names`/`vars_update` de SHM y, a la vez, usa una grabación TSV como referencia temporal. La lista de variables es la unión de backend + TSV. Solo las variables TSV marcadas como **imponer** escriben continuamente a SHM siguiendo el valor del TSV (con offsets `Δt`/`Δv`); las TSV no impuestas se comportan como variables normales de SHM.
 
 ## Resize de gráficos
 

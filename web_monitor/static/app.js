@@ -17,13 +17,26 @@
     const DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_SPAN_SEC = 45;
 
     let ws = null;
-    let appMode = "live"; // live | offline
+    let appMode = "live"; // live | offline | replay
     let varsByName = {};
     let baseKnownVarNames = [];
     let knownVarNames = [];
     let monitoredNames = new Set();
     /** Orden de visualización de variables monitorizadas (permite reordenar por drag-and-drop) */
     let monitoredOrder = [];
+    /** Filtro de texto en la columna de monitorización (solo muestra filas cuyo nombre coincida). */
+    let monitorFilterText = "";
+    /** Preselección para acciones por lote: arrastrar una al gráfico asigna todas; cruz elimina todas. */
+    let monitorSelectedNames = new Set();
+    /** En modo replay: variables marcadas para imposición a SHM (checkboxes; lógica de escritura en fases posteriores). */
+    let impositionNames = new Set();
+    /** Offset temporal (s) y numérico por variable para imposición en replay. */
+    let impositionTimeOffset = {};
+    let impositionValueOffset = {};
+    /** En replay: graficar variables frente a la ref (eje Y relativo). */
+    let plotVsRef = false;
+    /** Nombres de variables que están en el TSV cargado (scalares y bases de array); vacío si no hay dataset. */
+    let varNamesInTsv = new Set();
     let varGraphAssignment = {};
     let historyCache = {};
     let graphList = [];
@@ -94,6 +107,13 @@
     const selectNoneBtn = document.getElementById("selectNone");
     const refreshNamesBtn = document.getElementById("refreshNames");
     const monitorListEl = document.getElementById("monitorList");
+    const monitorFilterInput = document.getElementById("monitorFilterInput");
+    const monitorSelectAllBtn = document.getElementById("monitorSelectAllBtn");
+    const monitorDeselectAllBtn = document.getElementById("monitorDeselectAllBtn");
+    const monitorSortSep = document.getElementById("monitorSortSep");
+    const monitorSortByNameBtn = document.getElementById("monitorSortByNameBtn");
+    const monitorSortByGraphBtn = document.getElementById("monitorSortByGraphBtn");
+    const monitorSortByTsvBtn = document.getElementById("monitorSortByTsvBtn");
     const timeWindowSelect = document.getElementById("timeWindow");
     const plotEmpty = document.getElementById("plotEmpty");
     const plotArea = document.getElementById("plotArea");
@@ -345,10 +365,17 @@
     const fullHistoryPending = new Set();
 
     async function fetchFullHistoryIfNeeded(varName) {
-        if (!isOfflineMode()) return;
+        if (!isPlaybackMode()) return;
         if (!offlineRecordingName) return;
         const key = String(varName || "");
         if (!key) return;
+        // En replay híbrido, una variable TSV no impuesta no debe usar histórico TSV.
+        if (isReplayMode() && isVarInTsv(key) && !impositionNames.has(key)) {
+            delete historyCache[key];
+            delete fullHistoryByName[key];
+            schedulePlotRender();
+            return;
+        }
         if (fullHistoryPending.has(key)) return;
         fullHistoryPending.add(key);
         try {
@@ -373,7 +400,7 @@
     }
 
     function restoreFullHistoriesForPlottedVars() {
-        if (!isOfflineMode()) return;
+        if (!isPlaybackMode()) return;
         if (!fullHistoryByName || typeof fullHistoryByName !== "object") return;
         if (!Array.isArray(graphList) || graphList.length === 0) return;
         for (const gid of graphList) {
@@ -389,7 +416,7 @@
     }
 
     async function fetchWindowHistoryBatch(names, centerTs) {
-        if (!isOfflineMode() || !offlineRecordingName) return;
+        if (!isPlaybackMode() || !offlineRecordingName) return;
         const cleanNames = (names || []).map((n) => String(n || "")).filter((n) => n);
         if (cleanNames.length === 0) return;
         const span = WINDOW_SPAN_SEC;
@@ -415,6 +442,10 @@
                 const s = series[i];
                 const name = String(s.name || "");
                 if (!name) continue;
+                if (isReplayMode() && isVarInTsv(name) && !impositionNames.has(name)) {
+                    delete historyCache[name];
+                    continue;
+                }
                 const ts = Array.isArray(s.timestamps) ? s.timestamps : [];
                 const vals = Array.isArray(s.values) ? s.values : [];
                 if (ts.length === 0 || vals.length === 0 || ts.length !== vals.length) continue;
@@ -432,7 +463,7 @@
 
     function scheduleWindowFetchAroundTime(centerTs) {
         // Ventanas cortas solo tienen sentido en modo seguro (grabaciones grandes).
-        if (!isOfflineMode() || !offlineDataset || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+        if (!isPlaybackMode() || !offlineDataset || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
         if (!Number.isFinite(centerTs)) return;
 
         const runFetch = () => {
@@ -440,6 +471,7 @@
             const batchNames = [];
             for (const name of monitoredNames) {
                 if (isArrayElem(name)) continue;
+                if (isReplayMode() && isVarInTsv(name) && !impositionNames.has(name)) continue;
                 // Si la variable está ploteada y ya tiene histórico completo, no pedimos ventana corta.
                 const assigned = varGraphAssignment[name] || "";
                 if (assigned && fullHistoryByName[name]) continue;
@@ -486,6 +518,18 @@
         currentIndex: 0,
         lastTickMs: 0,
     };
+
+    /** Tiempo actual en replay/offline (scrubber o playback); para que generadores funcionen sin dar a Play. */
+    function getReplayCurrentTs() {
+        if (offlinePlayback && Number.isFinite(offlinePlayback.currentTs)) return offlinePlayback.currentTs;
+        if (offlineDataset && offlineScrubber) {
+            const ratio = (parseInt(offlineScrubber.value, 10) || 0) / 1000;
+            const minT = Number.isFinite(offlineRecordingGlobalMinTs) ? offlineRecordingGlobalMinTs : offlineDataset.minTs;
+            const maxT = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
+            return minT + ratio * (maxT - minT);
+        }
+        return (offlineDataset && Number.isFinite(offlineDataset.minTs)) ? offlineDataset.minTs : 0;
+    }
 
     // Gestión de ventanas cortas por variable monitorizada (solo monitorización, no ploteadas).
     let WINDOW_SPAN_SEC = 3.0;
@@ -544,7 +588,7 @@
     }
 
     function startGenerator(name, type, params) {
-        if (!isLiveMode()) return;
+        if (!isLiveMode() && !isPlaybackMode()) return;
         stopGenerator(name);
         const startTime = Date.now();
         const arrElem = isArrayElem(name);
@@ -556,26 +600,58 @@
         }
         const vd = arrElem ? null : varsByName[name];
         const varType = vd ? (vd.type === "int32" ? "int32" : vd.type === "bool" ? "bool" : "double") : "double";
+        const playbackOnly = isPlaybackMode() && !isLiveMode();
 
         const intervalId = setInterval(() => {
-            if (!isLiveMode() || !ws || ws.readyState !== WebSocket.OPEN) return;
             const t = (Date.now() - startTime) / 1000;
             const val = computeGenValue(type, params, t);
 
-            if (arrElem) {
-                sendWsAction({
-                    action: "set_array_element",
-                    name: arrName,
-                    index: arrIdx,
-                    value: val,
-                });
+            if (playbackOnly) {
+                const now = getReplayCurrentTs();
+                if (arrElem) {
+                    if (!arrayElemHistory[name]) arrayElemHistory[name] = { timestamps: [], values: [] };
+                    const h = arrayElemHistory[name];
+                    h.timestamps.push(now);
+                    h.values.push(val);
+                    if (h.timestamps.length > ARRAY_HIST_MAX) {
+                        h.timestamps.shift();
+                        h.values.shift();
+                    }
+                    const arrVd = varsByName[arrName];
+                    if (arrVd && Array.isArray(arrVd.value) && arrIdx >= 0 && arrIdx < arrVd.value.length) {
+                        arrVd.value[arrIdx] = val;
+                    }
+                } else {
+                    if (!varsByName[name]) varsByName[name] = { name, value: val, type: varType || "double" };
+                    else varsByName[name].value = val;
+                    if (!historyCache[name]) historyCache[name] = { timestamps: [], values: [] };
+                    const h = historyCache[name];
+                    h.timestamps.push(now);
+                    h.values.push(val);
+                    if (h.timestamps.length > (localHistMaxSec || 30) * 100) {
+                        h.timestamps.shift();
+                        h.values.shift();
+                    }
+                }
+                schedulePlotRender();
+                const wrap = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(arrElem ? arrName : name)}"]`);
+                if (wrap) {
+                    if (arrElem) {
+                        const row = wrap.querySelector(`.arr-row[data-idx="${arrIdx}"]`);
+                        const valEl = row && row.querySelector(".arr-val");
+                        if (valEl) valEl.textContent = typeof val === "number" ? val.toFixed(4) : String(val);
+                    } else {
+                        const valEl = wrap.querySelector(".mon-value");
+                        if (valEl) valEl.textContent = typeof val === "number" ? val.toFixed(4) : String(val);
+                    }
+                }
             } else {
-                sendWsAction({
-                    action: "set_var",
-                    name: name,
-                    value: val,
-                    var_type: varType,
-                });
+                if (!isLiveMode() || !ws || ws.readyState !== WebSocket.OPEN) return;
+                if (arrElem) {
+                    sendWsAction({ action: "set_array_element", name: arrName, index: arrIdx, value: val });
+                } else {
+                    sendWsAction({ action: "set_var", name: name, value: val, var_type: varType });
+                }
             }
 
             const isDone = (type === "step" && t > params.delay + 0.5) ||
@@ -1010,6 +1086,8 @@
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
             statusOffline: "Modo análisis (offline)",
+            statusReplay: "Modo replay",
+            modeReplay: "Replay",
             sendFileOnFinishLabel: "Enviar fichero al terminar",
             recordPathLabel: "Guardado en:",
             advInfoLabel: "Adv info",
@@ -1089,6 +1167,8 @@
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
             statusOffline: "Analysis mode (offline)",
+            statusReplay: "Replay mode",
+            modeReplay: "Replay",
             sendFileOnFinishLabel: "Send file when finished",
             recordPathLabel: "Saved at:",
             advInfoLabel: "Adv info",
@@ -1152,9 +1232,10 @@
         }
         const modeLabelTextEl = document.getElementById("modeLabelText");
         if (modeLabelTextEl) modeLabelTextEl.textContent = tr.modeLabel || "Modo:";
-        if (modeSelect && modeSelect.options.length >= 2) {
+        if (modeSelect && modeSelect.options.length >= 3) {
             modeSelect.options[0].textContent = tr.modeLive || "Live";
             modeSelect.options[1].textContent = tr.modeOffline || "Análisis";
+            modeSelect.options[2].textContent = tr.modeReplay || "Replay";
         }
         if (loadLocalTsvBtn) loadLocalTsvBtn.textContent = tr.offlineLoadLocal || "Cargar TSV local";
         if (loadServerRecordingBtn) loadServerRecordingBtn.textContent = tr.offlineLoadServer || "Cargar";
@@ -1208,7 +1289,9 @@
         }
 
         if (statusEl) {
-            if (isOfflineMode()) {
+            if (isReplayMode()) {
+                statusEl.textContent = tr.statusReplay || "Modo replay";
+            } else if (isOfflineMode()) {
                 statusEl.textContent = tr.statusOffline || "Modo análisis (offline)";
             } else {
                 statusEl.textContent = statusEl.classList.contains("connected") ? tr.statusConnected : tr.statusDisconnected;
@@ -1408,7 +1491,7 @@
 
     function renderArincBusHealth() {
         if (!arincBusHealthPanel) return;
-        if (isOfflineMode()) {
+        if (isPlaybackMode()) {
             arincBusHealthPanel.innerHTML =
                 `<div>ARINC bus health</div>` +
                 `<div>Words: ${arincBusHealth.totalWords} | Parity err: ${arincBusHealth.parityErrors} | SSM err: ${arincBusHealth.ssmErrors}</div>`;
@@ -1485,6 +1568,10 @@
                 offlineSafePreviewMaxRows: offlineSafePreviewMaxRows,
                 offlineSafePreviewMaxSpanSec: offlineSafePreviewMaxSpanSec,
                 offlineAllowForceFullLoad: !!offlineAllowForceFullLoad,
+                impositionNames: Array.from(impositionNames),
+                impositionTimeOffset: { ...impositionTimeOffset },
+                impositionValueOffset: { ...impositionValueOffset },
+                plotVsRef: !!plotVsRef,
             }));
             maybePushLayoutHistory();
         } catch (e) { /* quota exceeded or private mode */ }
@@ -1566,7 +1653,7 @@
             }
             if (Array.isArray(cfg.notesByTs)) notesByTs = cfg.notesByTs;
             if (Array.isArray(cfg.offlineSegments)) offlineSegments = cfg.offlineSegments;
-            if (cfg.appMode === "offline" || cfg.appMode === "live") {
+            if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay") {
                 appMode = cfg.appMode;
             }
             if (typeof cfg.offlineRecordingName === "string") offlineRecordingName = cfg.offlineRecordingName;
@@ -1591,6 +1678,16 @@
             if (typeof cfg.offlineAllowForceFullLoad === "boolean") {
                 offlineAllowForceFullLoad = cfg.offlineAllowForceFullLoad;
             }
+            if (Array.isArray(cfg.impositionNames)) {
+                impositionNames = new Set(cfg.impositionNames);
+            }
+            if (cfg.impositionTimeOffset && typeof cfg.impositionTimeOffset === "object") {
+                impositionTimeOffset = { ...cfg.impositionTimeOffset };
+            }
+            if (cfg.impositionValueOffset && typeof cfg.impositionValueOffset === "object") {
+                impositionValueOffset = { ...cfg.impositionValueOffset };
+            }
+            if (typeof cfg.plotVsRef === "boolean") plotVsRef = cfg.plotVsRef;
             if (offlineFullLoadMaxMbInput) offlineFullLoadMaxMbInput.value = String(offlineFullLoadMaxMb);
             if (offlinePreviewMbInput) offlinePreviewMbInput.value = String(offlinePreviewMb);
             if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
@@ -1698,9 +1795,10 @@
     if (modeSelect) {
         modeSelect.value = appMode;
         modeSelect.addEventListener("change", async () => {
-            const nextMode = modeSelect.value === "offline" ? "offline" : "live";
+            const v = (modeSelect.value || "").trim();
+            const nextMode = v === "offline" ? "offline" : (v === "replay" ? "replay" : "live");
             setAppMode(nextMode);
-            if (nextMode === "offline") {
+            if (nextMode === "offline" || nextMode === "replay") {
                 await refreshServerRecordings();
             }
         });
@@ -1731,7 +1829,7 @@
                     const text = await f.text();
                     ds = parseTsvDataset(text, f.name);
                 }
-                if (!isOfflineMode()) setAppMode("offline", { keepData: true });
+                if (!isPlaybackMode()) setAppMode("offline", { keepData: true });
                 loadOfflineDataset(ds, { target: "A", recordingName: "", safeInfo });
             } catch (e) {
                 alert("Error cargando TSV: " + (e && e.message ? e.message : String(e)));
@@ -1745,7 +1843,7 @@
             const fn = (recordingSelect.value || "").trim();
             if (!fn) return;
             try {
-                if (!isOfflineMode()) setAppMode("offline", { keepData: true });
+                if (!isPlaybackMode()) setAppMode("offline", { keepData: true });
                 await loadRecordingFromServer(fn, { preserveLayout: false, target: "A" });
             } catch (e) {
                 alert("Error cargando grabación: " + (e && e.message ? e.message : String(e)));
@@ -1790,6 +1888,7 @@
             const span = Math.max(1e-9, maxTs - minTs);
             const ts = minTs + span * ratio;
             applyOfflineTime(ts);
+            schedulePlotRender();
         });
     }
     if (offlinePlayPauseBtn) {
@@ -2004,7 +2103,7 @@
     function buildSnapshotTsv(frameCount) {
         const names = monitoredOrder.slice();
         if (!names.length) return null;
-        if (isOfflineMode() && offlineDataset && Array.isArray(offlineDataset.samples) && offlineDataset.samples.length) {
+        if (isPlaybackMode() && offlineDataset && Array.isArray(offlineDataset.samples) && offlineDataset.samples.length) {
             const idx = Math.max(0, Math.min(offlineDataset.samples.length - 1, binarySearchSampleIndex(offlineDataset.samples, offlinePlayback.currentTs || offlineDataset.minTs)));
             const half = Math.floor(frameCount / 2);
             const start = Math.max(0, idx - half);
@@ -2258,7 +2357,7 @@
         });
     }
     const handleOfflineArrowSeek = (e) => {
-        if (!isOfflineMode() || !offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length < 2) return;
+        if (!isPlaybackMode() || !offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length < 2) return;
         if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
         const tag = (document.activeElement && document.activeElement.tagName) ? document.activeElement.tagName.toLowerCase() : "";
         if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -2299,6 +2398,221 @@
     helpOverlay.addEventListener("click", (e) => {
         if (e.target === helpOverlay) helpOverlay.style.display = "none";
     });
+
+    // --- Toolbar lista de monitorización (filtro, seleccionar todas) ---
+    if (monitorFilterInput) {
+        monitorFilterInput.addEventListener("input", () => {
+            monitorFilterText = (monitorFilterInput.value || "").trim();
+            rebuildMonitorList();
+        });
+    }
+    if (monitorSelectAllBtn) {
+        monitorSelectAllBtn.addEventListener("click", () => {
+            getVisibleMonitorNames().forEach(n => monitorSelectedNames.add(n));
+            rebuildMonitorList();
+        });
+    }
+    if (monitorDeselectAllBtn) {
+        monitorDeselectAllBtn.addEventListener("click", () => {
+            monitorSelectedNames.clear();
+            rebuildMonitorList();
+        });
+    }
+    if (monitorSortByNameBtn) {
+        monitorSortByNameBtn.addEventListener("click", () => {
+            monitoredOrder.sort((a, b) => (a || "").localeCompare(b || ""));
+            rebuildMonitorList();
+            saveConfig();
+        });
+    }
+    if (monitorSortByGraphBtn) {
+        monitorSortByGraphBtn.addEventListener("click", () => {
+            monitoredOrder.sort((a, b) => {
+                const aHas = !!(varGraphAssignment[a] && graphList.includes(varGraphAssignment[a]));
+                const bHas = !!(varGraphAssignment[b] && graphList.includes(varGraphAssignment[b]));
+                if (aHas && !bHas) return -1;
+                if (!aHas && bHas) return 1;
+                return (a || "").localeCompare(b || "");
+            });
+            rebuildMonitorList();
+            saveConfig();
+        });
+    }
+    if (monitorSortByTsvBtn) {
+        monitorSortByTsvBtn.addEventListener("click", () => {
+            monitoredOrder.sort((a, b) => {
+                const aIn = isVarInTsv(a);
+                const bIn = isVarInTsv(b);
+                if (aIn && !bIn) return -1;
+                if (!aIn && bIn) return 1;
+                return (a || "").localeCompare(b || "");
+            });
+            rebuildMonitorList();
+            saveConfig();
+        });
+    }
+
+    // --- Visor de log del servidor ---
+    const logBtn = document.getElementById("logBtn");
+    const logOverlay = document.getElementById("logOverlay");
+    const logCloseBtn = document.getElementById("logCloseBtn");
+    const logRefreshBtn = document.getElementById("logRefreshBtn");
+    const logAutoRefreshCheckbox = document.getElementById("logAutoRefreshCheckbox");
+    const logSourceSelect = document.getElementById("logSourceSelect");
+    const logViewerContent = document.getElementById("logViewerContent");
+    const logFilterInput = document.getElementById("logFilterInput");
+    const logSaveBtn = document.getElementById("logSaveBtn");
+    let logAutoRefreshInterval = null;
+    let logViewerRawLines = [];
+
+    function escapeLogHtml(s) {
+        return String(s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function logLineClass(line) {
+        const l = line.toLowerCase();
+        if (/\b(200|ok|success)\b/.test(l) || /-> 200\b/.test(line)) return "log-line-ok";
+        if (/\b(500|404|503|error|exception|failed|fail|incorrecta|denied)\b/.test(l) || /-> (4|5)\d{2}\b/.test(line)) return "log-line-error";
+        if (/\b(4\d{2}|warn|warning|aviso)\b/.test(l)) return "log-line-warn";
+        if (/\[req\]/.test(l)) return "log-line-req";
+        return "";
+    }
+
+    function applyLogViewerFilter() {
+        if (!logViewerContent) return;
+        const q = (logFilterInput && logFilterInput.value) ? logFilterInput.value.trim().toLowerCase() : "";
+        const lines = q
+            ? logViewerRawLines.filter((line) => line.toLowerCase().includes(q))
+            : logViewerRawLines;
+        if (lines.length === 0) {
+            logViewerContent.textContent = q ? "(ninguna línea coincide con el filtro)" : "(vacío)";
+            logViewerContent.className = "log-viewer-content";
+            return;
+        }
+        const cls = "log-viewer-content";
+        const html = lines
+            .map((line) => {
+                const c = logLineClass(line);
+                return '<span class="log-line ' + (c ? c : "") + '">' + escapeLogHtml(line) + "</span>\n";
+            })
+            .join("");
+        logViewerContent.innerHTML = html;
+        logViewerContent.className = cls;
+        logViewerContent.scrollTop = logViewerContent.scrollHeight;
+    }
+
+    async function fetchLogViewer() {
+        if (!logViewerContent) return;
+        const source = (logSourceSelect && logSourceSelect.value) || "python";
+        try {
+            const r = await fetch(`/api/log?tail=2000&source=${encodeURIComponent(source)}`);
+            if (!r.ok) {
+                logViewerRawLines = [`Error ${r.status}: ${r.statusText}`];
+                applyLogViewerFilter();
+                return;
+            }
+            const contentType = r.headers.get("content-type") || "";
+            if (contentType.includes("application/json")) {
+                const data = await r.json();
+                logViewerRawLines = (data.lines || []).map((x) =>
+                    (x.ts ? x.ts + " " : "") + (x.msg || "")
+                );
+            } else {
+                const text = await r.text() || "";
+                logViewerRawLines = text ? text.split("\n") : [];
+            }
+            applyLogViewerFilter();
+        } catch (e) {
+            logViewerRawLines = ["Error al cargar el registro: " + (e.message || String(e))];
+            applyLogViewerFilter();
+        }
+    }
+
+    function downloadLogViewer() {
+        const text = logViewerContent ? logViewerContent.textContent : "";
+        if (!text) return;
+        const now = new Date();
+        const stamp =
+            now.getFullYear() +
+            String(now.getMonth() + 1).padStart(2, "0") +
+            String(now.getDate()).padStart(2, "0") +
+            "_" +
+            String(now.getHours()).padStart(2, "0") +
+            String(now.getMinutes()).padStart(2, "0") +
+            String(now.getSeconds()).padStart(2, "0");
+        const name = "varmon_log_" + stamp + ".txt";
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    if (logBtn && logOverlay) {
+        logBtn.addEventListener("click", () => {
+            logOverlay.style.display = "flex";
+            fetchLogViewer();
+        });
+    }
+    if (logCloseBtn && logOverlay) {
+        logCloseBtn.addEventListener("click", () => {
+            logOverlay.style.display = "none";
+            if (logAutoRefreshInterval) {
+                clearInterval(logAutoRefreshInterval);
+                logAutoRefreshInterval = null;
+            }
+            if (logAutoRefreshCheckbox) logAutoRefreshCheckbox.checked = false;
+        });
+    }
+    logOverlay.addEventListener("click", (e) => {
+        if (e.target === logOverlay) {
+            logOverlay.style.display = "none";
+            if (logAutoRefreshInterval) {
+                clearInterval(logAutoRefreshInterval);
+                logAutoRefreshInterval = null;
+            }
+            if (logAutoRefreshCheckbox) logAutoRefreshCheckbox.checked = false;
+        }
+    });
+    if (logRefreshBtn) {
+        logRefreshBtn.addEventListener("click", () => fetchLogViewer());
+    }
+    if (logAutoRefreshCheckbox) {
+        logAutoRefreshCheckbox.addEventListener("change", () => {
+            if (logAutoRefreshCheckbox.checked) {
+                if (logAutoRefreshInterval) clearInterval(logAutoRefreshInterval);
+                logAutoRefreshInterval = setInterval(() => {
+                    if (logOverlay && logOverlay.style.display === "flex") fetchLogViewer();
+                }, 4000);
+            } else {
+                if (logAutoRefreshInterval) {
+                    clearInterval(logAutoRefreshInterval);
+                    logAutoRefreshInterval = null;
+                }
+            }
+        });
+    }
+    if (logSourceSelect) {
+        logSourceSelect.addEventListener("change", () => fetchLogViewer());
+    }
+    if (logFilterInput) {
+        logFilterInput.addEventListener("input", () => applyLogViewerFilter());
+        logFilterInput.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                logFilterInput.value = "";
+                applyLogViewerFilter();
+            }
+        });
+    }
+    if (logSaveBtn) {
+        logSaveBtn.addEventListener("click", () => downloadLogViewer());
+    }
 
     // --- Variable browser drawer (columna 1 como panel lateral derecho) ---
 
@@ -2660,9 +2974,9 @@
         if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
         if (offlinePreviewSpanSecInput) offlinePreviewSpanSecInput.value = String(offlineSafePreviewMaxSpanSec);
         if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
-        if (cfg.appMode === "offline" || cfg.appMode === "live") setAppMode(cfg.appMode, { keepData: true });
+        if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay") setAppMode(cfg.appMode, { keepData: true });
         const rec = (cfg.offlineRecordingName || "").trim();
-        if (opts.autoLoadOffline && cfg.appMode === "offline" && rec) {
+        if (opts.autoLoadOffline && (cfg.appMode === "offline" || cfg.appMode === "replay") && rec) {
             try {
                 await loadRecordingFromServer(rec, { preserveLayout: true });
             } catch (e) {
@@ -3112,10 +3426,7 @@
             delete arrayElemAssignment[key];
             delete arrayElemHistory[key];
         }
-        monitorListEl.querySelectorAll(".graph-select, .arr-graph-select").forEach(sel => {
-            sel.selectedIndex = 0;
-            updateSelectStyle(sel);
-        });
+        rebuildMonitorList();
         saveConfig();
         pruneEmptyGraphs();
         updateMonitorItemStyles();
@@ -3128,9 +3439,17 @@
     if (smoothPlotsSelect) {
         smoothPlotsSelect.addEventListener("change", () => { saveConfig(); schedulePlotRender(); });
     }
+    const plotVsRefCheckbox = document.getElementById("plotVsRefCheckbox");
+    if (plotVsRefCheckbox) {
+        plotVsRefCheckbox.addEventListener("change", () => {
+            plotVsRef = !!plotVsRefCheckbox.checked;
+            saveConfig();
+            schedulePlotRender();
+        });
+    }
 
     if (resetTimeBtn) resetTimeBtn.addEventListener("click", () => {
-        if (isOfflineMode()) return;
+        if (isPlaybackMode()) return;
         // Primero borrar todos los buffers (gráficos y grabación); después restablecer el offset.
         for (const name of Object.keys(historyCache)) {
             historyCache[name] = { timestamps: [], values: [] };
@@ -3334,9 +3653,14 @@
 
     function isOfflineMode() { return appMode === "offline"; }
     function isLiveMode() { return appMode === "live"; }
+    function isReplayMode() { return appMode === "replay"; }
+    /** Modo análisis o replay: sin conexión en vivo, se usa grabación y controles de reproducción */
+    function isPlaybackMode() { return isOfflineMode() || isReplayMode(); }
+    /** Modos que requieren conexión al backend (WS): live y replay híbrido. */
+    function hasBackendConnectionMode() { return isLiveMode() || isReplayMode(); }
 
     function sendWsAction(payload) {
-        if (!isLiveMode()) return false;
+        if (!hasBackendConnectionMode()) return false;
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(payload));
             return true;
@@ -3347,7 +3671,7 @@
     function setOfflineStatus() {
         if (!statusEl) return;
         const tr = I18N[currentLang] || I18N.es;
-        statusEl.textContent = tr.statusOffline || "Modo análisis (offline)";
+        statusEl.textContent = isReplayMode() ? (tr.statusReplay || "Modo replay") : (tr.statusOffline || "Modo análisis (offline)");
         statusEl.className = "status disconnected";
         statusEl.title = "";
     }
@@ -3399,6 +3723,7 @@
         historyCache = {};
         arrayElemHistory = {};
         deltaByName = {};
+        varNamesInTsv = new Set();
         anomalyResults = [];
         eventCursorIndex = -1;
         arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
@@ -3445,50 +3770,81 @@
 
     function setModeUi() {
         const offline = isOfflineMode();
+        const replay = isReplayMode();
+        const playback = isPlaybackMode(); // offline o replay: controles de carga/reproducción
         const portControl = settingsPanel ? settingsPanel.querySelector(".port-control") : null;
-        document.body.classList.toggle("mode-live", !offline);
+        document.body.classList.toggle("mode-live", !playback);
         document.body.classList.toggle("mode-analysis", offline);
-        if (offlineControls) offlineControls.style.display = offline ? "flex" : "none";
-        if (offlinePlaybackControls) offlinePlaybackControls.style.display = offline ? "flex" : "none";
-        if (anomalyPanel) anomalyPanel.style.display = offline ? "block" : "none";
-        if (alarmPanel) alarmPanel.style.display = offline ? "none" : "";
+        document.body.classList.toggle("mode-replay", replay);
+        if (offlineControls) offlineControls.style.display = playback ? "flex" : "none";
+        if (offlinePlaybackControls) offlinePlaybackControls.style.display = playback ? "flex" : "none";
+        const setMarkerABtn = document.getElementById("setMarkerABtn");
+        const setMarkerBBtn = document.getElementById("setMarkerBBtn");
+        const clearMarkersBtn = document.getElementById("clearMarkersBtn");
+        const markerInfoLabel = document.getElementById("markerInfoLabel");
+        if (replay) {
+            if (setMarkerABtn) setMarkerABtn.style.display = "none";
+            if (setMarkerBBtn) setMarkerBBtn.style.display = "none";
+            if (clearMarkersBtn) clearMarkersBtn.style.display = "none";
+            if (markerInfoLabel) markerInfoLabel.style.display = "none";
+            if (anomalyPanel) anomalyPanel.style.display = "none";
+        } else {
+            if (setMarkerABtn) setMarkerABtn.style.display = "";
+            if (setMarkerBBtn) setMarkerBBtn.style.display = "";
+            if (clearMarkersBtn) clearMarkersBtn.style.display = "";
+            if (markerInfoLabel) markerInfoLabel.style.display = "";
+            if (anomalyPanel) anomalyPanel.style.display = playback ? "block" : "none";
+        }
+        if (alarmPanel) alarmPanel.style.display = playback ? "none" : "";
         const spanLabel = document.getElementById("offlineWindowSpanLabel");
-        if (spanLabel) spanLabel.style.display = offline ? "flex" : "none";
-        if (recordBtn) recordBtn.style.display = offline ? "none" : "";
-        if (refreshNamesBtn) refreshNamesBtn.style.display = offline ? "none" : "";
-        if (reconnectBtn) reconnectBtn.style.display = offline ? "none" : "";
-        if (pauseBtn) pauseBtn.style.display = offline ? "none" : "";
-        if (portControl) portControl.style.display = offline ? "none" : "";
-        if (resetTimeBtn) resetTimeBtn.style.display = offline ? "none" : "";
+        if (spanLabel) spanLabel.style.display = playback ? "flex" : "none";
+        if (recordBtn) recordBtn.style.display = playback ? "none" : "";
+        if (refreshNamesBtn) refreshNamesBtn.style.display = playback ? "none" : "";
+        if (reconnectBtn) reconnectBtn.style.display = playback ? "none" : "";
+        if (pauseBtn) pauseBtn.style.display = playback ? "none" : "";
+        if (portControl) portControl.style.display = playback ? "none" : "";
+        if (resetTimeBtn) resetTimeBtn.style.display = playback ? "none" : "";
         if (sendFileOnFinishCheckbox) {
-            sendFileOnFinishCheckbox.disabled = offline;
-            if (sendFileOnFinishCheckbox.parentElement) sendFileOnFinishCheckbox.parentElement.style.opacity = offline ? "0.55" : "1";
+            sendFileOnFinishCheckbox.disabled = playback;
+            if (sendFileOnFinishCheckbox.parentElement) sendFileOnFinishCheckbox.parentElement.style.opacity = playback ? "0.55" : "1";
         }
         if (modeSelect) modeSelect.value = appMode;
+        if (monitorSortSep) monitorSortSep.style.display = replay ? "" : "none";
+        if (monitorSortByNameBtn) monitorSortByNameBtn.style.display = replay ? "" : "none";
+        if (monitorSortByGraphBtn) monitorSortByGraphBtn.style.display = replay ? "" : "none";
+        if (monitorSortByTsvBtn) monitorSortByTsvBtn.style.display = replay ? "" : "none";
+        const plotVsRefWrap = document.getElementById("plotVsRefWrap");
+        const plotVsRefCheckbox = document.getElementById("plotVsRefCheckbox");
+        if (plotVsRefWrap) plotVsRefWrap.style.display = replay ? "" : "none";
+        if (plotVsRefCheckbox) plotVsRefCheckbox.checked = !!plotVsRef;
         updateOfflineDatasetStatus();
         updateMarkerInfoLabel();
         renderSegmentsUi();
         renderNotesList();
         renderArincBusHealth();
-        // Refrescar filas para ocultar/mostrar controles dependientes de modo.
         rebuildMonitorList();
     }
 
     function setAppMode(mode, opts = {}) {
-        const desired = mode === "offline" ? "offline" : "live";
+        const desired = mode === "offline" ? "offline" : (mode === "replay" ? "replay" : "live");
         const changed = desired !== appMode;
         appMode = desired;
         setModeUi();
         if (changed) {
             stopOfflinePlayback();
             if (isLocalRecording) stopLocalRecording(false);
-            if (appMode === "offline") {
+            if (desired === "offline") {
                 if (ws) {
                     try { ws.close(); } catch (e) {}
                     ws = null;
                 }
                 setOfflineStatus();
                 if (!opts.keepData) clearDataBuffers();
+            } else if (desired === "replay") {
+                // Modo híbrido: mantener conexión al backend para tener vars_names + vars_update (C++/SHM).
+                setOfflineStatus();
+                if (!opts.keepData) clearDataBuffers();
+                checkAuthThenStart();
             } else {
                 resetStateForNewTarget();
                 checkAuthThenStart();
@@ -3726,11 +4082,113 @@
         const idx = binarySearchSampleIndex(offlineDataset.samples, clamped);
         offlinePlayback.currentIndex = idx;
         const sample = offlineDataset.samples[idx];
-        onVarsUpdate(sample.data, { timestamp: sample.ts, appendHistory: false });
+        const replayData = (isReplayMode() && Array.isArray(sample.data))
+            ? sample.data.filter((it) => it && it.name && impositionNames.has(it.name) && isVarInTsv(it.name))
+            : sample.data;
+        onVarsUpdate(replayData, { timestamp: sample.ts, appendHistory: false });
         updateOfflineScrubberFromTs(clamped);
         updateOfflineTimeLabel(clamped);
         // Pedir ventanas cortas para variables solo monitorizadas alrededor del nuevo tiempo.
         scheduleWindowFetchAroundTime(clamped);
+        // En replay híbrido, imponer continuamente sobre SHM los valores marcados.
+        applyReplayImpositions(clamped);
+    }
+
+    function getReplayImposedValueAtTs(name, ts) {
+        if (!name || !Number.isFinite(ts)) return null;
+        if (!offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length === 0) return null;
+        const idx = binarySearchSampleIndex(offlineDataset.samples, ts);
+        const sample = offlineDataset.samples[idx];
+        if (!sample || !Array.isArray(sample.data)) return null;
+        const entry = sample.data.find((it) => it && it.name === name);
+        if (entry) {
+            const n = (typeof entry.value === "number") ? entry.value : Number(entry.value);
+            if (Number.isFinite(n)) return n;
+        }
+        const hist = historyCache[name];
+        const vHist = getValueAtTs(hist, ts);
+        if (vHist != null) return vHist;
+        return null;
+    }
+
+    function applyReplayImpositions(currentTs) {
+        if (!isReplayMode() || !offlineDataset || !Number.isFinite(currentTs)) return;
+        if (impositionNames.size === 0) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        impositionNames.forEach((name) => {
+            if (!isVarInTsv(name)) return;
+            const dt = Number(impositionTimeOffset[name]);
+            const dv = Number(impositionValueOffset[name]);
+            const tImpose = currentTs + (Number.isFinite(dt) ? dt : 0);
+            const baseVal = getReplayImposedValueAtTs(name, tImpose);
+            if (baseVal == null) return;
+            const vd = varsByName[name];
+            const varType = vd
+                ? (vd.type === "int32" ? "int32" : vd.type === "bool" ? "bool" : "double")
+                : "double";
+            let sendVal = baseVal + (Number.isFinite(dv) ? dv : 0);
+            if (varType === "bool") sendVal = sendVal ? 1 : 0;
+            else if (varType === "int32") sendVal = (Math.trunc(sendVal) | 0);
+            sendWsAction({
+                action: "set_var",
+                name: name,
+                value: sendVal,
+                var_type: varType,
+            });
+        });
+    }
+
+    function syncReplayTsvHistoryForName(name) {
+        if (!isReplayMode() || !name || !isVarInTsv(name) || isArrayVar(name)) return;
+        if (impositionNames.has(name)) {
+            const series = getRefSeriesFromOfflineDataset(name);
+            if (series && Array.isArray(series.timestamps) && Array.isArray(series.values)) {
+                historyCache[name] = {
+                    timestamps: series.timestamps.slice(),
+                    values: series.values.slice(),
+                };
+                fullHistoryByName[name] = {
+                    timestamps: series.timestamps.slice(),
+                    values: series.values.slice(),
+                };
+            }
+        } else {
+            delete historyCache[name];
+            delete fullHistoryByName[name];
+        }
+    }
+
+    /** Serie de referencia desde el TSV (solo replay); para plotVsRef con etiqueta _ref. */
+    function getRefSeriesFromOfflineDataset(name) {
+        if (!offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length === 0) return null;
+        const isArrElem = name.includes("[") && name.endsWith("]");
+        let base, idx;
+        if (isArrElem) {
+            const br = name.lastIndexOf("[");
+            base = name.substring(0, br);
+            idx = parseInt(name.substring(br + 1), 10);
+            if (!Number.isFinite(idx)) return null;
+        }
+        const timestamps = [];
+        const values = [];
+        for (let i = 0; i < offlineDataset.samples.length; i++) {
+            const s = offlineDataset.samples[i];
+            if (!s || !Array.isArray(s.data)) continue;
+            let v = null;
+            if (isArrElem) {
+                const e = s.data.find((it) => it && it.name === base && Array.isArray(it.value));
+                if (e && idx >= 0 && idx < e.value.length) v = e.value[idx];
+            } else {
+                const e = s.data.find((it) => it && it.name === name);
+                if (e) v = e.value;
+            }
+            if (v !== null && v !== undefined) {
+                timestamps.push(Number(s.ts));
+                values.push(typeof v === "number" ? v : Number(v));
+            }
+        }
+        if (timestamps.length === 0) return null;
+        return { timestamps, values };
     }
 
     function getValueAtTs(hist, ts) {
@@ -3927,7 +4385,7 @@
     }
 
     function startOfflinePlayback() {
-        if (!offlineDataset || offlineDataset.samples.length === 0 || !isOfflineMode()) return;
+        if (!offlineDataset || offlineDataset.samples.length === 0 || !isPlaybackMode()) return;
         if (offlinePlayback.isPlaying) return;
         // Si estamos al final del tramo actual, solo entonces reiniciamos al inicio
         // de este tramo. Si no, respetamos la posición actual (por ejemplo, al
@@ -3937,6 +4395,7 @@
         if (!Number.isFinite(offlinePlayback.currentTs) ||
             offlinePlayback.currentTs >= (maxTs - 1e-9)) {
             applyOfflineTime(minTs);
+            schedulePlotRender();
         }
         offlinePlayback.isPlaying = true;
         offlinePlayback.lastTickMs = Date.now();
@@ -3951,6 +4410,7 @@
             const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
             if (nextTs >= maxTs) {
                 applyOfflineTime(maxTs);
+                schedulePlotRender();
                 stopOfflinePlayback();
                 // Al terminar no forzamos volver al inicio automáticamente, para
                 // que el usuario pueda seguir navegando entre tramos sin que el
@@ -3958,6 +4418,7 @@
                 return;
             }
             applyOfflineTime(nextTs);
+            schedulePlotRender();
         }, 40);
     }
 
@@ -4139,6 +4600,8 @@
         const preserveLayout = !!opts.preserveLayout;
         stopOfflinePlayback();
         const prevRecording = offlineRecordingName || "";
+        // En replay (modo híbrido) conservar nombres del backend para unir con los del TSV.
+        const liveVarNamesForMerge = isReplayMode() ? baseKnownVarNames.slice() : [];
         if (!preserveLayout) clearUserLayout();
         clearDataBuffers();
         // Si cambiamos de grabación, el historial completo por variable ya no es válido.
@@ -4152,6 +4615,7 @@
             rebuildMonitorList();
         }
         offlineDataset = ds;
+        varNamesInTsv = new Set(ds && Array.isArray(ds.names) ? ds.names : []);
         // Mantener una referencia global de tiempo por grabación para que
         // los tramos sucesivos no reinicien el eje temporal a 0. Solo se
         // inicializa una vez (aunque ds.minTs pueda ser 0, que es válido).
@@ -4187,12 +4651,25 @@
         markerB = null;
         deltaByName = {};
         if (timeWindowSelect) timeWindowSelect.value = "120"; // 2 min en modo análisis (máx. buffer visual)
-        onVarNames(ds.names);
+        if (isReplayMode() && liveVarNamesForMerge.length > 0) {
+            const merged = [...new Set([...(ds && ds.names ? ds.names : []), ...liveVarNamesForMerge])].sort();
+            onVarNames(merged);
+        } else {
+            onVarNames(ds.names);
+        }
         rebuildHistoriesFromOffline(ds);
+        if (isReplayMode() && ds && Array.isArray(ds.names)) {
+            ds.names.forEach((n) => syncReplayTsvHistoryForName(n));
+        }
         // Si ya teníamos históricos completos de variables (cargados bajo demanda),
         // reinyectarlos tras cambiar de tramo para que los gráficos sigan usando
         // el espectro total de tiempo.
         restoreFullHistoriesForPlottedVars();
+        // restoreFullHistoriesForPlottedVars puede reinyectar histórico TSV completo:
+        // volver a sincronizar para limpiar las TSV NO impuestas.
+        if (isReplayMode() && ds && Array.isArray(ds.names)) {
+            ds.names.forEach((n) => syncReplayTsvHistoryForName(n));
+        }
         // Inicializar valores visibles con el primer valor disponible de cada variable.
         const initialSnapshot = buildInitialOfflineSnapshot(ds);
         if (initialSnapshot.length > 0) {
@@ -4262,7 +4739,7 @@
     }
 
     function connect() {
-        if (!isLiveMode()) {
+        if (!hasBackendConnectionMode()) {
             setOfflineStatus();
             return;
         }
@@ -4448,6 +4925,13 @@
         return vd && vd.type === "array";
     }
 
+    function isVarInTsv(name) {
+        if (!name) return false;
+        const idx = name.indexOf("[");
+        const base = idx >= 0 && name.endsWith("]") ? name.substring(0, idx) : name;
+        return varNamesInTsv.has(base);
+    }
+
     function formatValue(v, type, name) {
         if (type === "array") {
             if (Array.isArray(v)) return "[" + v.length + "]";
@@ -4536,8 +5020,8 @@
     }
 
     function renderBrowserList() {
-        const filter = varFilter.value.toLowerCase();
-        const filtered = knownVarNames.filter(n => !filter || n.toLowerCase().includes(filter));
+        const filterText = varFilter.value;
+        const filtered = knownVarNames.filter(n => nameMatchesFilter(n, filterText));
         if (!groupVariables && filtered.length > 350) {
             renderBrowserListVirtualFlat(filtered);
             browserVirtualEnabled = true;
@@ -4603,11 +5087,18 @@
             cb.type = "checkbox";
             cb.checked = selected;
             cb.disabled = inMonitor;
+            el.appendChild(cb);
+            if (isVarInTsv(name)) {
+                const tsvBadge = document.createElement("span");
+                tsvBadge.className = "var-tsv-badge";
+                tsvBadge.textContent = "TSV";
+                tsvBadge.title = "Variable en la grabación TSV cargada";
+                el.appendChild(tsvBadge);
+            }
             const label = document.createElement("span");
             label.className = "tree-leaf-name";
             label.textContent = name;
             label.title = name;
-            el.appendChild(cb);
             el.appendChild(label);
             if (!inMonitor) {
                 el.addEventListener("click", (e) => {
@@ -4729,12 +5220,19 @@
             cb.checked = selected;
             cb.disabled = inMonitor;
 
+            el.appendChild(cb);
+            if (isVarInTsv(name)) {
+                const tsvBadge = document.createElement("span");
+                tsvBadge.className = "var-tsv-badge";
+                tsvBadge.textContent = "TSV";
+                tsvBadge.title = "Variable en la grabación TSV cargada";
+                el.appendChild(tsvBadge);
+            }
             const label = document.createElement("span");
             label.className = "tree-leaf-name";
             label.textContent = leafName;
             label.title = name;
 
-            el.appendChild(cb);
             el.appendChild(label);
 
             if (varsByName[name] && varsByName[name].type === "array") {
@@ -4784,9 +5282,8 @@
     expandAllBtn.addEventListener("click", expandAll);
 
     selectAllBtn.addEventListener("click", () => {
-        const filter = varFilter.value.toLowerCase();
         knownVarNames.forEach(name => {
-            if (!monitoredNames.has(name) && (!filter || name.toLowerCase().includes(filter)))
+            if (!monitoredNames.has(name) && nameMatchesFilter(name, varFilter.value))
                 browserSelection.add(name);
         });
         renderBrowserList();
@@ -4827,6 +5324,22 @@
         return { min, max, count: n };
     }
 
+    function nameMatchesFilter(name, filterText) {
+        const t = (filterText || "").trim().toLowerCase();
+        if (!t) return true;
+        const parts = t.split(/\s+/).filter(Boolean);
+        const requireTsv = parts.includes("tsv");
+        const nameParts = parts.filter(p => p !== "tsv");
+        if (requireTsv && !isVarInTsv(name)) return false;
+        const nameLower = (name || "").toLowerCase();
+        if (nameParts.length === 0) return true;
+        return nameParts.every(p => nameLower.includes(p));
+    }
+
+    function getVisibleMonitorNames() {
+        return monitoredOrder.filter(n => nameMatchesFilter(n, monitorFilterText));
+    }
+
     function buildGraphSelectOptions() {
         let html = '<option value="">—</option>';
         graphList.forEach((gid, idx) => {
@@ -4838,60 +5351,132 @@
         return html;
     }
 
+    function syncMonitorImpositionVisual(wrap, name) {
+        if (!wrap) return;
+        const isImposing = isReplayMode() && isVarInTsv(name) && impositionNames.has(name);
+        wrap.classList.toggle("monitor-item-imposing", isImposing);
+        const rowEl = wrap.querySelector(".monitor-item");
+        if (!rowEl) return;
+        let badge = rowEl.querySelector(".mon-impose-badge");
+        if (!badge) {
+            badge = document.createElement("span");
+            badge.className = "mon-impose-badge";
+            badge.textContent = "IMP";
+            badge.title = "Imponiendo valor desde TSV a SHM";
+            const nameNode = rowEl.querySelector(".mon-name");
+            if (nameNode) rowEl.insertBefore(badge, nameNode);
+            else rowEl.appendChild(badge);
+        }
+        badge.style.display = isImposing ? "inline-flex" : "none";
+    }
+
     function rebuildMonitorList() {
         const existing = monitorListEl.querySelectorAll(".monitor-item-wrap");
         const existingMap = {};
         existing.forEach(el => { existingMap[el.dataset.name] = el; });
 
-        const optionsHtml = buildGraphSelectOptions();
-
-        function attachGraphSelectHandler(sel, varName) {
-            const handler = () => {
-                if (sel.value === "__new__") {
-                    addGraph();
-                    const newGid = graphList[graphList.length - 1];
-                    varGraphAssignment[varName] = newGid;
-                    rebuildMonitorList();
-                } else {
-                    varGraphAssignment[varName] = sel.value;
-                    pruneEmptyGraphs();
-                }
-                // En modo análisis offline, al asignar por primera vez una variable
-                // a una gráfica, pedimos su histórico completo desde el TSV.
-                if (isOfflineMode() && sel.value && sel.value !== "__new__") {
-                    fetchFullHistoryIfNeeded(varName);
-                }
-                updateSelectStyle(sel);
-                updateMonitorItemStyles();
-                saveConfig();
-                schedulePlotRender();
-            };
-            sel._graphHandler && sel.removeEventListener("change", sel._graphHandler);
-            sel._graphHandler = handler;
-            sel.addEventListener("change", handler);
-        }
-
+        let visibleCount = 0;
         for (const name of monitoredOrder) {
-            if (existingMap[name]) {
-                const sel = existingMap[name].querySelector(".graph-select");
-                if (sel && isArrayVar(name)) {
-                    sel.remove();
-                } else if (sel) {
-                    sel.innerHTML = optionsHtml;
-                    const assigned = varGraphAssignment[name] || "";
-                    if (assigned && graphList.includes(assigned)) {
-                        sel.value = assigned;
-                    } else {
-                        sel.selectedIndex = 0;
-                        varGraphAssignment[name] = "";
-                    }
-                    updateSelectStyle(sel);
-                    attachGraphSelectHandler(sel, name);
+            if (!nameMatchesFilter(name, monitorFilterText)) {
+                if (existingMap[name]) {
+                    existingMap[name].remove();
                 }
-                // Actualizar el nombre mostrado segun hideLevels
-                const nameSpan = existingMap[name].querySelector(".mon-name");
+                delete existingMap[name];
+                continue;
+            }
+            visibleCount++;
+
+            if (existingMap[name]) {
+                const wrap = existingMap[name];
+                wrap.classList.toggle("monitor-item-selected", monitorSelectedNames.has(name));
+                if (!wrap._selectionClickAttached) {
+                    wrap._selectionClickAttached = true;
+                    wrap.addEventListener("click", (e) => {
+                        if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
+                        if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
+                        else monitorSelectedNames.add(name);
+                        rebuildMonitorList();
+                    });
+                }
+                const nameSpan = wrap.querySelector(".mon-name");
                 if (nameSpan) {
                     nameSpan.textContent = formatNameWithHiddenLevels(name, hideLevels);
+                }
+                syncMonitorImpositionVisual(wrap, name);
+                if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
+                    const rowEl = wrap.querySelector(".monitor-item");
+                    let imposeWrap = wrap.querySelector(".monitor-impose-wrap");
+                    if (!imposeWrap && rowEl) {
+                        imposeWrap = document.createElement("span");
+                        imposeWrap.className = "monitor-impose-wrap";
+                        const lab = document.createElement("label");
+                        const cb = document.createElement("input");
+                        cb.type = "checkbox";
+                        cb.className = "monitor-impose-cb";
+                        cb.title = "Imponer a SHM (replay)";
+                        cb.addEventListener("change", (e) => {
+                            e.stopPropagation();
+                            const checked = cb.checked;
+                            const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                            toApply.forEach(n => {
+                                if (checked) impositionNames.add(n);
+                                else impositionNames.delete(n);
+                                syncReplayTsvHistoryForName(n);
+                            });
+                            saveConfig();
+                            rebuildMonitorList();
+                        });
+                        lab.appendChild(cb);
+                        imposeWrap.appendChild(lab);
+                        const dtWrap = document.createElement("span");
+                        dtWrap.className = "monitor-impose-offsets";
+                        const dtLabel = document.createElement("label");
+                        dtLabel.className = "monitor-offset-label";
+                        dtLabel.textContent = "Δt:";
+                        const dtInput = document.createElement("input");
+                        dtInput.type = "number";
+                        dtInput.className = "monitor-offset-input";
+                        dtInput.step = "any";
+                        dtInput.placeholder = "0";
+                        dtInput.title = "Offset temporal (s)";
+                        dtInput.addEventListener("change", (e) => {
+                            e.stopPropagation();
+                            const v = parseFloat(dtInput.value);
+                            const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                            toApply.forEach(n => { impositionTimeOffset[n] = Number.isFinite(v) ? v : 0; });
+                            saveConfig();
+                        });
+                        const dvLabel = document.createElement("label");
+                        dvLabel.className = "monitor-offset-label";
+                        dvLabel.textContent = "Δv:";
+                        const dvInput = document.createElement("input");
+                        dvInput.type = "number";
+                        dvInput.className = "monitor-offset-input";
+                        dvInput.step = "any";
+                        dvInput.placeholder = "0";
+                        dvInput.title = "Offset numérico";
+                        dvInput.addEventListener("change", (e) => {
+                            e.stopPropagation();
+                            const v = parseFloat(dvInput.value);
+                            const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                            toApply.forEach(n => { impositionValueOffset[n] = Number.isFinite(v) ? v : 0; });
+                            saveConfig();
+                        });
+                        dtLabel.appendChild(dtInput);
+                        dvLabel.appendChild(dvInput);
+                        dtWrap.appendChild(dtLabel);
+                        dtWrap.appendChild(dvLabel);
+                        imposeWrap.appendChild(dtWrap);
+                        rowEl.insertBefore(imposeWrap, rowEl.querySelector(".mon-name"));
+                    }
+                    const cb = imposeWrap && imposeWrap.querySelector(".monitor-impose-cb");
+                    if (cb) cb.checked = impositionNames.has(name);
+                    const offsetInputs = imposeWrap && imposeWrap.querySelectorAll(".monitor-offset-input");
+                    if (offsetInputs && offsetInputs[0]) offsetInputs[0].value = impositionTimeOffset[name] != null ? String(impositionTimeOffset[name]) : "";
+                    if (offsetInputs && offsetInputs[1]) offsetInputs[1].value = impositionValueOffset[name] != null ? String(impositionValueOffset[name]) : "";
+                } else {
+                    const imposeWrap = wrap.querySelector(".monitor-impose-wrap");
+                    if (imposeWrap) imposeWrap.remove();
                 }
                 delete existingMap[name];
                 continue;
@@ -4900,6 +5485,13 @@
             const wrap = document.createElement("div");
             wrap.className = "monitor-item-wrap";
             wrap.dataset.name = name;
+            if (monitorSelectedNames.has(name)) wrap.classList.add("monitor-item-selected");
+            wrap.addEventListener("click", (e) => {
+                if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
+                if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
+                else monitorSelectedNames.add(name);
+                rebuildMonitorList();
+            });
 
             const el = document.createElement("div");
             el.className = "monitor-item";
@@ -4929,14 +5521,71 @@
                 });
             });
 
-            let sel = null;
-            if (!isArrayVar(name)) {
-                sel = document.createElement("select");
-                sel.className = "graph-select";
-                sel.innerHTML = optionsHtml;
-                sel.value = varGraphAssignment[name] || "";
-                updateSelectStyle(sel);
-                attachGraphSelectHandler(sel, name);
+            if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
+                const imposeWrap = document.createElement("span");
+                imposeWrap.className = "monitor-impose-wrap";
+                const lab = document.createElement("label");
+                const imposeCb = document.createElement("input");
+                imposeCb.type = "checkbox";
+                imposeCb.className = "monitor-impose-cb";
+                imposeCb.title = "Imponer a SHM (replay)";
+                imposeCb.checked = impositionNames.has(name);
+                imposeCb.addEventListener("change", (e) => {
+                    e.stopPropagation();
+                    const checked = imposeCb.checked;
+                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                    toApply.forEach(n => {
+                        if (checked) impositionNames.add(n);
+                        else impositionNames.delete(n);
+                        syncReplayTsvHistoryForName(n);
+                    });
+                    saveConfig();
+                    rebuildMonitorList();
+                });
+                lab.appendChild(imposeCb);
+                imposeWrap.appendChild(lab);
+                const dtWrap = document.createElement("span");
+                dtWrap.className = "monitor-impose-offsets";
+                const dtLabel = document.createElement("label");
+                dtLabel.className = "monitor-offset-label";
+                dtLabel.textContent = "Δt:";
+                const dtInput = document.createElement("input");
+                dtInput.type = "number";
+                dtInput.className = "monitor-offset-input";
+                dtInput.step = "any";
+                dtInput.placeholder = "0";
+                dtInput.title = "Offset temporal (s)";
+                dtInput.value = impositionTimeOffset[name] != null ? String(impositionTimeOffset[name]) : "";
+                dtInput.addEventListener("change", (e) => {
+                    e.stopPropagation();
+                    const v = parseFloat(dtInput.value);
+                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                    toApply.forEach(n => { impositionTimeOffset[n] = Number.isFinite(v) ? v : 0; });
+                    saveConfig();
+                });
+                const dvLabel = document.createElement("label");
+                dvLabel.className = "monitor-offset-label";
+                dvLabel.textContent = "Δv:";
+                const dvInput = document.createElement("input");
+                dvInput.type = "number";
+                dvInput.className = "monitor-offset-input";
+                dvInput.step = "any";
+                dvInput.placeholder = "0";
+                dvInput.title = "Offset numérico";
+                dvInput.value = impositionValueOffset[name] != null ? String(impositionValueOffset[name]) : "";
+                dvInput.addEventListener("change", (e) => {
+                    e.stopPropagation();
+                    const v = parseFloat(dvInput.value);
+                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                    toApply.forEach(n => { impositionValueOffset[n] = Number.isFinite(v) ? v : 0; });
+                    saveConfig();
+                });
+                dtLabel.appendChild(dtInput);
+                dvLabel.appendChild(dvInput);
+                dtWrap.appendChild(dtLabel);
+                dtWrap.appendChild(dvLabel);
+                imposeWrap.appendChild(dtWrap);
+                el.appendChild(imposeWrap);
             }
 
             const nameEl = document.createElement("span");
@@ -4957,7 +5606,6 @@
                 valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
             }
 
-            if (sel) el.appendChild(sel);
             if (isArrayVar(name)) {
                 const badge = document.createElement("span");
                 badge.className = "array-badge";
@@ -4984,15 +5632,16 @@
             alarmIcon.title = "Alarma configurada";
             if (!alarms[name]) alarmIcon.style.display = "none";
 
+            const imposeBadge = document.createElement("span");
+            imposeBadge.className = "mon-impose-badge";
+            imposeBadge.textContent = "IMP";
+            imposeBadge.title = "Imponiendo valor desde TSV a SHM";
+            imposeBadge.style.display = "none";
+
+            el.appendChild(imposeBadge);
             el.appendChild(nameEl);
             el.appendChild(alarmIcon);
             if (valEl) el.appendChild(valEl);
-            if (!isArrayVar(name)) {
-                const deltaEl = document.createElement("span");
-                deltaEl.className = "mon-delta";
-                deltaEl.textContent = "";
-                el.appendChild(deltaEl);
-            }
 
             const removeBtn = document.createElement("button");
             removeBtn.className = "btn-mon-remove";
@@ -5000,21 +5649,25 @@
             removeBtn.title = "Quitar de monitorizacion";
             removeBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                if (isComputed(name)) removeComputedVar(name);
-                else {
-                    monitoredNames.delete(name);
-                    monitoredOrder = monitoredOrder.filter(n => n !== name);
-                    delete varGraphAssignment[name];
-                    delete historyCache[name];
-                    expandedStats.delete(name);
-                    if (!isArincDerivedName(name) && isArincEnabled(name)) {
-                        removeArincDerivedForBase(name);
-                    }
-                    if (isArrayVar(name)) {
-                        for (const key of Object.keys(arrayElemAssignment)) {
-                            if (key.startsWith(name + "[")) {
-                                delete arrayElemAssignment[key];
-                                delete arrayElemHistory[key];
+                const toRemove = monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                for (const n of toRemove) {
+                    if (isComputed(n)) removeComputedVar(n);
+                    else {
+                        monitoredNames.delete(n);
+                        monitoredOrder = monitoredOrder.filter(o => o !== n);
+                        delete varGraphAssignment[n];
+                        delete historyCache[n];
+                        expandedStats.delete(n);
+                        monitorSelectedNames.delete(n);
+                        if (!isArincDerivedName(n) && isArincEnabled(n)) {
+                            removeArincDerivedForBase(n);
+                        }
+                        if (isArrayVar(n)) {
+                            for (const key of Object.keys(arrayElemAssignment)) {
+                                if (key.startsWith(n + "[")) {
+                                    delete arrayElemAssignment[key];
+                                    delete arrayElemHistory[key];
+                                }
                             }
                         }
                     }
@@ -5029,9 +5682,27 @@
             el.appendChild(removeBtn);
             wrap.appendChild(el);
             monitorListEl.appendChild(wrap);
+            syncMonitorImpositionVisual(wrap, name);
+        }
+
+        const statusEl = document.getElementById("monitorFilterStatus");
+        if (statusEl) {
+            const total = monitoredOrder.length;
+            if ((monitorFilterText || "").trim()) {
+                statusEl.textContent = "Mostrando " + visibleCount + " de " + total;
+                statusEl.style.display = "";
+            } else {
+                statusEl.textContent = "";
+                statusEl.style.display = "none";
+            }
         }
 
         Object.values(existingMap).forEach(el => el.remove());
+        // Reordenar DOM para que coincida con monitoredOrder (p. ej. tras "Por nombre" / "Con gráfico primero")
+        monitoredOrder.forEach(n => {
+            const w = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(n)}"]`);
+            if (w) monitorListEl.appendChild(w);
+        });
         monitorListEl.classList.toggle("monitor-virtualized", monitoredOrder.length > 300);
         updateMonitorItemStyles();
     }
@@ -5083,7 +5754,6 @@
             wrap.appendChild(table);
         }
 
-        const optionsHtml = buildGraphSelectOptions();
         let rows = table.querySelectorAll(".arr-row");
         const needRebuild = rows.length !== arr.length;
 
@@ -5116,38 +5786,12 @@
 
         if (needRebuild) {
             table.innerHTML = "";
-            table._prevOptions = optionsHtml;
             for (let i = 0; i < arr.length; i++) {
                 const eName = arrayElemName(name, i);
                 const row = document.createElement("div");
                 row.className = "arr-row";
                 row.dataset.idx = i;
                 attachArrayElemDrag(row, eName);
-
-                const sel = document.createElement("select");
-                sel.className = "arr-graph-select";
-                sel.innerHTML = optionsHtml;
-                sel.value = arrayElemAssignment[eName] || "";
-                updateSelectStyle(sel);
-                sel.addEventListener("change", () => {
-                    if (sel.value === "__new__") {
-                        addGraph();
-                        const newGid = graphList[graphList.length - 1];
-                        arrayElemAssignment[eName] = newGid;
-                        rebuildMonitorList();
-                    } else {
-                        arrayElemAssignment[eName] = sel.value;
-                        if (!sel.value) {
-                            delete arrayElemAssignment[eName];
-                            delete arrayElemHistory[eName];
-                        }
-                        pruneEmptyGraphs();
-                    }
-                    updateSelectStyle(sel);
-                    saveConfig();
-                    schedulePlotRender();
-                });
-                sel.addEventListener("click", (e) => e.stopPropagation());
 
                 const idx = document.createElement("span");
                 idx.className = "arr-idx-label";
@@ -5197,19 +5841,15 @@
                     }
                 });
 
-                row.appendChild(sel);
                 row.appendChild(idx);
                 row.appendChild(val);
-                if (isLiveMode()) {
+                if (isLiveMode() || isPlaybackMode()) {
                     row.appendChild(alarmBtn);
                     row.appendChild(genBtn);
                 }
                 table.appendChild(row);
             }
         } else {
-            const optionsChanged = table._prevOptions !== optionsHtml;
-            if (optionsChanged) table._prevOptions = optionsHtml;
-
             rows.forEach(row => {
                 const i = parseInt(row.dataset.idx);
                 if (i === editingIdx) return;
@@ -5217,15 +5857,6 @@
                 attachArrayElemDrag(row, eName);
                 const valEl = row.querySelector(".arr-val");
                 if (valEl && i < arr.length) valEl.textContent = arr[i].toFixed(4);
-                if (optionsChanged) {
-                    const sel = row.querySelector(".arr-graph-select");
-                    if (sel) {
-                        const eName = arrayElemName(name, i);
-                        sel.innerHTML = optionsHtml;
-                        sel.value = arrayElemAssignment[eName] || "";
-                        updateSelectStyle(sel);
-                    }
-                }
                 const ab = row.querySelector(".arr-alarm-btn");
                 if (ab) {
                     const hasAlarm = !!alarms[eName];
@@ -5423,7 +6054,9 @@
             const vd = varsByName[name];
             if (!vd || !Array.isArray(vd.value)) continue;
             const arr = vd.value;
-            const now = vd.timestamp || (Date.now() / 1000);
+            const now = isReplayMode()
+                ? getReplayCurrentTs()
+                : (vd.timestamp || (Date.now() / 1000));
             for (let i = 0; i < arr.length; i++) {
                 const eName = arrayElemName(name, i);
                 if (!arrayElemAssignment[eName]) continue;
@@ -5530,6 +6163,30 @@
         }
         if (!statsRow.parentNode) panel.appendChild(statsRow);
 
+        const deltaRow = panel.querySelector(".delta-row") || document.createElement("div");
+        deltaRow.className = "delta-row";
+        const dVal = deltaByName[name];
+        const hasMarkers = Number.isFinite(markerA) && Number.isFinite(markerB);
+        if (Number.isFinite(dVal) || hasMarkers) {
+            deltaRow.innerHTML = "";
+            if (Number.isFinite(dVal)) {
+                const span = document.createElement("span");
+                span.className = "stat-item";
+                span.innerHTML = `Δ valor <b>${dVal >= 0 ? "+" : ""}${dVal.toFixed(4)}</b>`;
+                deltaRow.appendChild(span);
+            }
+            if (hasMarkers) {
+                const dt = markerB - markerA;
+                const tSpan = document.createElement("span");
+                tSpan.className = "stat-item";
+                tSpan.innerHTML = `Δt <b>${dt.toFixed(3)}</b> s`;
+                deltaRow.appendChild(tSpan);
+            }
+            if (!deltaRow.parentNode) panel.appendChild(deltaRow);
+        } else {
+            if (deltaRow.parentNode) deltaRow.remove();
+        }
+
         if (isArincDerivedName(name)) {
             let hint = panel.querySelector(".arinc-derived-hint");
             if (!hint) {
@@ -5551,11 +6208,18 @@
             return;
         }
 
+        if (impositionNames.has(name)) {
+            const fmtOld = panel.querySelector(".fmt-row");
+            if (fmtOld) fmtOld.remove();
+            const genOld = panel.querySelector(".gen-row");
+            if (genOld) genOld.remove();
+        }
+
         const vf = ensureVarFormatEntry(name);
         const canUseArincMode = !isArincDerivedName(name) && !isComputed(name);
         if (!canUseArincMode && vf.sal === "arinc429") vf.sal = "dec";
         let fmtRow = panel.querySelector(".fmt-row");
-        if (!fmtRow) {
+        if (!impositionNames.has(name) && !fmtRow) {
             fmtRow = document.createElement("div");
             fmtRow.className = "fmt-row";
             const fmtOpts = canUseArincMode
@@ -5615,7 +6279,7 @@
             fmtRow.appendChild(salLbl);
             fmtRow.appendChild(salSel);
             panel.appendChild(fmtRow);
-        } else {
+        } else if (fmtRow && !impositionNames.has(name)) {
             const sels = fmtRow.querySelectorAll(".fmt-select");
             if (sels[0]) sels[0].value = vf.ori || "dec";
             if (sels[1]) sels[1].value = vf.sal || "dec";
@@ -5764,7 +6428,7 @@
                         varGraphAssignment[dName] = sel.value || "";
                         pruneEmptyGraphs();
                     }
-                    if (isOfflineMode() && sel.value && sel.value !== "__new__") {
+                    if (isPlaybackMode() && sel.value && sel.value !== "__new__") {
                         fetchFullHistoryIfNeeded(dName);
                     }
                     updateSelectStyle(sel);
@@ -5812,13 +6476,15 @@
             if (arincSubvars) arincSubvars.remove();
         }
 
-        // En análisis offline ocultamos controles live (alarmas y generadores).
+        // En modo no-live ocultamos alarmas (solo tienen sentido en vivo). Generadores sí en replay/offline.
         if (!isLiveMode()) {
             const alarmRowOffline = panel.querySelector(".alarm-row");
             if (alarmRowOffline) alarmRowOffline.remove();
-            const genRowOffline = panel.querySelector(".gen-row");
-            if (genRowOffline) genRowOffline.remove();
-            return;
+            if (!isPlaybackMode()) {
+                const genRowOffline = panel.querySelector(".gen-row");
+                if (genRowOffline) genRowOffline.remove();
+                return;
+            }
         }
 
         let alarmRow = panel.querySelector(".alarm-row");
@@ -5880,45 +6546,47 @@
             }
         }
 
-        let genRow = panel.querySelector(".gen-row");
-        const gen = activeGenerators[name];
+        if (!impositionNames.has(name)) {
+            let genRow = panel.querySelector(".gen-row");
+            const gen = activeGenerators[name];
 
-        if (gen) {
-            if (!genRow) {
-                genRow = document.createElement("div");
-                genRow.className = "gen-row gen-row-active";
-                panel.appendChild(genRow);
-            }
-            if (!genRow.classList.contains("gen-row-active") || !genRow.querySelector(".btn-gen-stop")) {
-                genRow.innerHTML = "";
-                genRow.className = "gen-row gen-row-active";
+            if (gen) {
+                if (!genRow) {
+                    genRow = document.createElement("div");
+                    genRow.className = "gen-row gen-row-active";
+                    panel.appendChild(genRow);
+                }
+                if (!genRow.classList.contains("gen-row-active") || !genRow.querySelector(".btn-gen-stop")) {
+                    genRow.innerHTML = "";
+                    genRow.className = "gen-row gen-row-active";
 
-                const label = document.createElement("span");
-                label.className = "gen-label-active";
-                label.textContent = "\u25B6 " + (GEN_TYPES[gen.type] ? GEN_TYPES[gen.type].label : gen.type);
-                genRow.appendChild(label);
+                    const label = document.createElement("span");
+                    label.className = "gen-label-active";
+                    label.textContent = "\u25B6 " + (GEN_TYPES[gen.type] ? GEN_TYPES[gen.type].label : gen.type);
+                    genRow.appendChild(label);
 
-                const stopBtn = document.createElement("button");
-                stopBtn.className = "btn-gen-stop";
-                stopBtn.textContent = "\u25A0 Stop";
-                stopBtn.addEventListener("click", (e) => {
-                    e.stopPropagation();
-                    stopGenerator(name);
-                    updateStatsPanel(wrap, name);
-                });
-                genRow.appendChild(stopBtn);
-            }
-        } else {
-            if (!genRow) {
-                genRow = document.createElement("div");
-                genRow.className = "gen-row";
-                panel.appendChild(genRow);
-            }
+                    const stopBtn = document.createElement("button");
+                    stopBtn.className = "btn-gen-stop";
+                    stopBtn.textContent = "\u25A0 Stop";
+                    stopBtn.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        stopGenerator(name);
+                        updateStatsPanel(wrap, name);
+                    });
+                    genRow.appendChild(stopBtn);
+                }
+            } else {
+                if (!genRow) {
+                    genRow = document.createElement("div");
+                    genRow.className = "gen-row";
+                    panel.appendChild(genRow);
+                }
 
-            if (!genRow.querySelector(".gen-form") && !genRow.querySelector(".gen-select")) {
-                genRow.innerHTML = "";
-                genRow.className = "gen-row";
-                buildGenSelector(genRow, name, wrap);
+                if (!genRow.querySelector(".gen-form") && !genRow.querySelector(".gen-select")) {
+                    genRow.innerHTML = "";
+                    genRow.className = "gen-row";
+                    buildGenSelector(genRow, name, wrap);
+                }
             }
         }
     }
@@ -6243,7 +6911,7 @@
         const fn = (filename || basenameFromPath(path)).trim();
         if (!fn) return;
         try {
-            if (!isOfflineMode()) setAppMode("offline", { keepData: true });
+            if (!isPlaybackMode()) setAppMode("offline", { keepData: true });
             await refreshServerRecordings();
             if (recordingSelect) {
                 const has = Array.from(recordingSelect.options).some(o => o.value === fn);
@@ -6517,13 +7185,12 @@
             const monVal = el.querySelector(".mon-value");
             const vd = varsByName[name];
             let usedHistory = false;
-            // En modo análisis offline, si tenemos historial (completo o ventana)
-            // para esta variable, usar el valor interpolado en el tiempo actual.
-            if (isOfflineMode() && offlineRecordingName && monVal) {
-                const hist = historyCache[name];
+            // En replay: SOLO las variables TSV impuestas usan valor del TSV;
+            // las no impuestas se comportan como variables normales (SHM/C++).
+            if (isPlaybackMode() && offlineRecordingName && isVarInTsv(name) && impositionNames.has(name) && monVal) {
                 const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
-                if (hist && tNow != null) {
-                    const vHist = getValueAtTs(hist, tNow);
+                if (tNow != null) {
+                    const vHist = getReplayImposedValueAtTs(name, tNow);
                     if (vHist != null) {
                         monVal.textContent = formatValue(vHist, "double", name);
                         usedHistory = true;
@@ -6537,21 +7204,8 @@
                     arrBadge.textContent = "[" + vd.value.length + "]";
                 }
             }
-            const dEl = el.querySelector(".mon-delta");
             const wrap = el.closest(".monitor-item-wrap");
-            const d = deltaByName[name];
-            if (dEl) {
-                if (Number.isFinite(d)) {
-                    dEl.textContent = "Δ " + (d >= 0 ? "+" : "") + d.toFixed(4);
-                    dEl.style.display = "";
-                } else {
-                    dEl.textContent = "";
-                    dEl.style.display = "none";
-                }
-            }
-            if (wrap) {
-                wrap.querySelector(".monitor-item")?.classList.toggle("delta-highlight", Number.isFinite(d) && Math.abs(d) > 1e-12);
-            }
+            if (wrap && expandedStats.has(name)) updateStatsPanel(wrap, name);
         }
         sendAlarmsToBackend();
         refreshAllStats();
@@ -6561,7 +7215,7 @@
     const WINDOW_SLOW_THRESHOLD_MS = 1200;
     setInterval(() => {
         // Solo considerar modo pensativo en análisis + modo seguro.
-        if (!isOfflineMode() || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) {
+        if (!isPlaybackMode() || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) {
             if (windowFetchSlow) {
                 windowFetchSlow = false;
                 if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "none";
@@ -7131,25 +7785,26 @@
 
     function handleNewGraphDrop(name) {
         if (!name) return;
-        if (!monitoredNames.has(name) && !isArrayElem(name) && !isArincDerivedName(name)) {
-            ensureArincBaseMonitored(name);
-            ensureMonitoredName(name);
-            sendMonitored();
+        const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
+        for (const n of namesToAssign) {
+            if (!monitoredNames.has(n) && !isArrayElem(n) && !isArincDerivedName(n)) {
+                ensureArincBaseMonitored(n);
+                ensureMonitoredName(n);
+            }
         }
+        if (namesToAssign.length) sendMonitored();
         if (graphList.length >= MAX_GRAPHS) return;
         addGraph();
         const newGid = graphList[graphList.length - 1];
-        if (isArrayElem(name)) {
-            arrayElemAssignment[name] = newGid;
-        } else {
-            varGraphAssignment[name] = newGid;
-            // En análisis offline, al asignar una variable a un nuevo gráfico
-            // vía drag & drop, solicitar siempre su historial completo.
-            if (isOfflineMode()) {
-                fetchFullHistoryIfNeeded(name);
+        for (const n of namesToAssign) {
+            if (isArrayElem(n)) {
+                arrayElemAssignment[n] = newGid;
+            } else {
+                varGraphAssignment[n] = newGid;
+                if (isPlaybackMode()) fetchFullHistoryIfNeeded(n);
             }
+            browserSelection.delete(n);
         }
-        browserSelection.delete(name);
         pruneEmptyGraphs();
         rebuildMonitorList();
         saveConfig();
@@ -7296,25 +7951,23 @@
                 slot.classList.remove("plot-drop-over");
                 const name = e.dataTransfer.getData("text/plain");
                 if (!name) return;
-                // Si la variable aun no esta monitorizada, añadirla
-                if (!monitoredNames.has(name) && !isArrayElem(name) && !isArincDerivedName(name)) {
-                    ensureArincBaseMonitored(name);
-                    ensureMonitoredName(name);
-                    sendMonitored();
-                }
-                // Asignar variable (o elemento de array) al grafico gid
-                if (isArrayElem(name)) {
-                    arrayElemAssignment[name] = gid;
-                } else {
-                    varGraphAssignment[name] = gid;
-                    // En análisis offline, al soltar una variable en un gráfico
-                    // existente, solicitar siempre su histórico completo.
-                    if (isOfflineMode()) {
-                        fetchFullHistoryIfNeeded(name);
+                const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
+                for (const n of namesToAssign) {
+                    if (!monitoredNames.has(n) && !isArrayElem(n) && !isArincDerivedName(n)) {
+                        ensureArincBaseMonitored(n);
+                        ensureMonitoredName(n);
                     }
                 }
-                // Sincronizar estado visual del navegador de variables
-                browserSelection.delete(name);
+                if (namesToAssign.length) sendMonitored();
+                for (const n of namesToAssign) {
+                    if (isArrayElem(n)) {
+                        arrayElemAssignment[n] = gid;
+                    } else {
+                        varGraphAssignment[n] = gid;
+                        if (isPlaybackMode()) fetchFullHistoryIfNeeded(n);
+                    }
+                    browserSelection.delete(n);
+                }
                 pruneEmptyGraphs();
                 rebuildMonitorList();
                 saveConfig();
@@ -7480,7 +8133,7 @@
         if (!containerEl || containerEl._varmonClickSeekHooked) return;
         containerEl._varmonClickSeekHooked = true;
         containerEl.on("plotly_click", (evt) => {
-            if (!isOfflineMode() || !offlineDataset || !evt || !Array.isArray(evt.points) || evt.points.length === 0) return;
+            if (!isPlaybackMode() || !offlineDataset || !evt || !Array.isArray(evt.points) || evt.points.length === 0) return;
             const p = evt.points[0];
             const x = Number(p && p.x);
             if (!Number.isFinite(x)) return;
@@ -7516,7 +8169,13 @@
         const win = windowSec > 0 ? windowSec : 60;
         let defaultXRange;
         let liveUseAutorange = false;
-        if (isOfflineMode()) {
+        if (isReplayMode() && offlineDataset) {
+            const minTs = Number.isFinite(offlineRecordingGlobalMinTs) ? offlineRecordingGlobalMinTs : offlineDataset.minTs;
+            const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
+            const safeMin = Number.isFinite(minTs) ? minTs : 0;
+            const safeMax = Number.isFinite(maxTs) ? maxTs : (safeMin + 0.1);
+            defaultXRange = [safeMin, Math.max(safeMin + 0.1, safeMax)];
+        } else if (isPlaybackMode()) {
             const endAbs = globalTMax != null ? globalTMax : (dataOrigin != null ? dataOrigin + win : win);
             const startAbs = (windowSec > 0 && dataOrigin != null)
                 ? Math.max(dataOrigin, endAbs - win)
@@ -7531,9 +8190,11 @@
                 defaultXRange = [0, win];
             }
         }
-        const sharedXRange = (Array.isArray(sharedZoomXRange) && sharedZoomXRange.length === 2)
-            ? sharedZoomXRange
-            : defaultXRange;
+        const sharedXRange = isReplayMode()
+            ? defaultXRange
+            : ((Array.isArray(sharedZoomXRange) && sharedZoomXRange.length === 2)
+                ? sharedZoomXRange
+                : defaultXRange);
 
         for (const gid of graphList) {
             const varsInGraph = getVarsForGraph(gid);
@@ -7550,21 +8211,14 @@
 
             const gIdx = graphList.indexOf(gid);
             const traces = [];
+            const useVsRef = plotVsRef && isReplayMode() && offlineDataset && offlineDataset.samples && offlineDataset.samples.length > 0;
 
-            varsInGraph.forEach((name, idx) => {
-                const isArrElem = name.includes("[") && name.endsWith("]");
-                const hist = isArrElem ? arrayElemHistory[name] : historyCache[name];
-                if (!hist || !hist.timestamps || hist.timestamps.length === 0) {
-                    // En análisis offline, si falta historial, pedirlo bajo demanda.
-                    if (isOfflineMode()) {
-                        fetchFullHistoryIfNeeded(name);
-                    }
-                    return;
-                }
-                let xs = hist.timestamps;
-                let ys = hist.values;
+            function addTraceFromHist(hist, displayName, colorIdx, dash) {
+                if (!hist || !hist.timestamps || hist.timestamps.length === 0) return;
+                let xs = hist.timestamps.slice();
+                let ys = hist.values.slice();
                 const tMax = xs[xs.length - 1];
-                if (windowSec > 0) {
+                if (windowSec > 0 && !isReplayMode()) {
                     const tMin = tMax - windowSec;
                     let lo = 0, hi = xs.length;
                     while (lo < hi) {
@@ -7578,25 +8232,44 @@
                 }
                 const smoothWindow = Math.max(1, parseInt(document.getElementById("smoothPlotsSelect")?.value, 10) || 1);
                 const ySmooth = smoothWindow > 1 ? movingAverage(ys, smoothWindow) : ys;
-
-                let xForPlot;
-                // En análisis: X en tiempo absoluto; en live ya están en relativo.
-                xForPlot = xs;
-
-                const ds = downsampleSeries(xForPlot, ySmooth, downsampleMaxPoints);
+                const ds = downsampleSeries(xs, ySmooth, downsampleMaxPoints);
                 traces.push({
                     x: ds.x,
                     y: ds.y,
                     type: "scatter",
                     mode: "lines",
-                    name: `${name} ✕`,
-                    meta: { varName: name },
+                    name: displayName,
+                    meta: { varName: displayName },
                     line: {
-                        color: TRACE_COLORS[idx % TRACE_COLORS.length],
+                        color: TRACE_COLORS[colorIdx % TRACE_COLORS.length],
                         width: 1.5,
                         shape: smoothWindow > 1 ? "linear" : "hv",
+                        dash: dash || null,
                     },
                 });
+            }
+
+            varsInGraph.forEach((name, idx) => {
+                const isArrElem = name.includes("[") && name.endsWith("]");
+                const hist = isArrElem ? arrayElemHistory[name] : historyCache[name];
+
+                if (useVsRef) {
+                    const refSeries = getRefSeriesFromOfflineDataset(name);
+                    if (refSeries) {
+                        addTraceFromHist(refSeries, name + "_ref", idx, "dash");
+                    }
+                    if (hist && hist.timestamps && hist.timestamps.length > 0) {
+                        addTraceFromHist(hist, name + " ✕", idx, null);
+                    } else {
+                        if (isPlaybackMode()) fetchFullHistoryIfNeeded(name);
+                    }
+                } else {
+                    if (!hist || !hist.timestamps || hist.timestamps.length === 0) {
+                        if (isPlaybackMode()) fetchFullHistoryIfNeeded(name);
+                        return;
+                    }
+                    addTraceFromHist(hist, `${name} ✕`, idx, null);
+                }
             });
 
             const alarmShapes = [];
@@ -7619,9 +8292,9 @@
                 }
             });
             // Cursor temporal offline: raya vertical común en todos los gráficos.
-            if (isOfflineMode() && offlineDataset && Number.isFinite(offlinePlayback.currentTs)) {
-                const t0 = origin != null ? origin : offlineDataset.minTs;
-                const xCursor = Math.max(0, offlinePlayback.currentTs - t0);
+            // En modo análisis el eje X usa tiempo absoluto (mismo que offlinePlayback.currentTs).
+            if (isPlaybackMode() && offlineDataset && Number.isFinite(offlinePlayback.currentTs)) {
+                const xCursor = offlinePlayback.currentTs;
                 alarmShapes.push({
                     type: "line",
                     xref: "x",
@@ -7630,14 +8303,15 @@
                     yref: "paper",
                     y0: 0,
                     y1: 1,
-                    line: { color: "rgba(56,189,248,0.95)", width: 1.5, dash: "dot" },
+                    line: { color: "rgba(56,189,248,0.95)", width: 2, dash: "dot" },
+                    layer: "above",
                 });
                 if (Number.isFinite(markerA)) {
                     alarmShapes.push({
                         type: "line",
                         xref: "x",
-                        x0: Math.max(0, markerA - t0),
-                        x1: Math.max(0, markerA - t0),
+                        x0: markerA,
+                        x1: markerA,
                         yref: "paper",
                         y0: 0,
                         y1: 1,
@@ -7648,8 +8322,8 @@
                     alarmShapes.push({
                         type: "line",
                         xref: "x",
-                        x0: Math.max(0, markerB - t0),
-                        x1: Math.max(0, markerB - t0),
+                        x0: markerB,
+                        x1: markerB,
                         yref: "paper",
                         y0: 0,
                         y1: 1,
@@ -7659,12 +8333,11 @@
                 if (anomalyResults.length > 0) {
                     const maxMarks = 120;
                     for (let ai = 0; ai < anomalyResults.length && ai < maxMarks; ai++) {
-                        const xx = Math.max(0, anomalyResults[ai].ts - t0);
                         alarmShapes.push({
                             type: "line",
                             xref: "x",
-                            x0: xx,
-                            x1: xx,
+                            x0: anomalyResults[ai].ts,
+                            x1: anomalyResults[ai].ts,
                             yref: "paper",
                             y0: 0,
                             y1: 1,
@@ -7676,6 +8349,9 @@
 
             const cRect = containerEl.getBoundingClientRect();
             const colors = getPlotLayoutColors();
+            const yAxisCfg = isReplayMode()
+                ? { gridcolor: colors.gridcolor, zerolinecolor: colors.gridcolor, autorange: true, fixedrange: false }
+                : { gridcolor: colors.gridcolor, zerolinecolor: colors.gridcolor };
             const layout = {
                 paper_bgcolor: colors.paper_bgcolor,
                 plot_bgcolor: colors.plot_bgcolor,
@@ -7691,7 +8367,7 @@
                     gridcolor: colors.gridcolor,
                     zerolinecolor: colors.gridcolor,
                 },
-                yaxis: { gridcolor: colors.gridcolor, zerolinecolor: colors.gridcolor },
+                yaxis: yAxisCfg,
                 shapes: alarmShapes,
                 legend: {
                     bgcolor: colors.legendBg,
@@ -7998,6 +8674,10 @@
             await refreshServerRecordings();
             return;
         }
+        if (isReplayMode()) {
+            await refreshServerRecordings();
+            setOfflineStatus();
+        }
         if (udsInstances.length > 0) {
             fillPortSelectWithUds();
             updateMultiInstanceWarning();
@@ -8012,11 +8692,19 @@
 
     function onVarNames(names) {
         if (!Array.isArray(names)) return;
+        // Evitar vaciados transitorios: si llega [] pero ya teníamos catálogo, no borrar UI.
+        if (names.length === 0 && baseKnownVarNames.length > 0 && (isLiveMode() || isReplayMode())) {
+            return;
+        }
+        // En replay con TSV cargado: unir siempre con las del archivo para no perder unas u otras.
+        if (isReplayMode() && offlineDataset && Array.isArray(offlineDataset.names) && offlineDataset.names.length > 0) {
+            names = [...new Set([...names, ...offlineDataset.names])].sort();
+        }
         const sorted = names.slice().sort();
         const key = sorted.join(",");
         const oldKey = baseKnownVarNames.join(",");
 
-        varCountEl.textContent = `${names.length} vars`;
+        varCountEl.textContent = `${sorted.length} vars`;
 
         if (key !== oldKey) {
             baseKnownVarNames = sorted;
@@ -8038,15 +8726,27 @@
         if (!Array.isArray(data)) return;
         const appendHistory = opts.appendHistory !== false;
         const forcedTs = (typeof opts.timestamp === "number" && Number.isFinite(opts.timestamp)) ? opts.timestamp : null;
+        const isOfflineSnapshot = forcedTs != null && opts.appendHistory === false;
         const changedNames = new Set();
+        const accepted = [];
 
         for (let i = 0; i < data.length; i++) {
-            varsByName[data[i].name] = data[i];
-            changedNames.add(data[i].name);
+            const item = data[i];
+            if (!item || !item.name) continue;
+            // En replay, si una variable del TSV está impuesta, ignorar cualquier valor entrante de SHM.
+            if (isReplayMode() && !isOfflineSnapshot && impositionNames.has(item.name) && isVarInTsv(item.name)) {
+                continue;
+            }
+            accepted.push(item);
+            varsByName[item.name] = item;
+            changedNames.add(item.name);
         }
+        if (accepted.length === 0) return;
 
         if (computedVars.length > 0) evalComputedVars();
-        const nowTs = forcedTs != null ? forcedTs : (Date.now() / 1000);
+        const nowTs = forcedTs != null
+            ? forcedTs
+            : (isReplayMode() ? getReplayCurrentTs() : (Date.now() / 1000));
         // En modo live usamos tiempo relativo desde el inicio de sesión para los
         // historiales de las gráficas, así evitamos timestamps absolutos enormes.
         if (isLiveMode()) {
@@ -8058,6 +8758,7 @@
         changedNames.forEach((baseName) => {
             if (!isArincEnabled(baseName)) return;
             if (isArincDerivedName(baseName)) return;
+            if (isReplayMode() && isVarInTsv(baseName) && impositionNames.has(baseName)) return;
             const vd = varsByName[baseName];
             if (!vd || Array.isArray(vd.value)) return;
             const num = typeof vd.value === "number" ? vd.value : Number(vd.value);
@@ -8073,18 +8774,20 @@
         // Acumular buffer para gráficos desde el poll de monitorización (solo escalares; arrays en arrayElemHistory, computed en evalComputedVars).
         if (appendHistory) {
             const now = tsForHistBase;
-            for (let i = 0; i < data.length; i++) {
-                const v = data[i];
+            for (let i = 0; i < accepted.length; i++) {
+                const v = accepted[i];
                 if (isComputed(v.name)) continue;
                 if (isArincDerivedName(v.name)) continue;
                 if (Array.isArray(v.value)) continue;
+                // En replay, solo bloqueamos histórico SHM para variables TSV impuestas.
+                if (isReplayMode() && isVarInTsv(v.name) && impositionNames.has(v.name)) continue;
                 const num = typeof v.value === "number" ? v.value : (v.value === true ? 1 : v.value === false ? 0 : Number(v.value));
                 if (!isFinite(num)) continue;
                 if (!historyCache[v.name]) historyCache[v.name] = { timestamps: [], values: [] };
                 historyCache[v.name].timestamps.push(now);
                 historyCache[v.name].values.push(num);
             }
-            trimLocalHistory();
+            if (!isReplayMode()) trimLocalHistory();
         }
         if (isLocalRecording && isLiveMode()) {
             localRecordSamples.push(buildLocalFrontendSample(nowTs));
@@ -8169,6 +8872,8 @@
     });
 
     async function checkAuthThenStart() {
+        // En modo análisis puro (offline) no se abre WS.
+        // En replay sí necesitamos WS para el modo híbrido (variables SHM/C++).
         if (isOfflineMode()) {
             await refreshServerRecordings();
             setOfflineStatus();
