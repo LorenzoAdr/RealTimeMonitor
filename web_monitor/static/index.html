@@ -257,7 +257,7 @@
             </div>
             <div class="select-actions">
                 <label class="drawer-agrupar-label" title="Mostrar variables agrupadas por categorías o en lista plana">
-                    <input type="checkbox" id="groupVarsCheckbox" checked> <span id="groupVarsLabel">Agrupar</span>
+                    <input type="checkbox" id="groupVarsCheckbox"> <span id="groupVarsLabel">Agrupar</span>
                 </label>
                 <button id="collapseAll" class="btn-small" title="Colapsar todo">&#9660;</button>
                 <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
@@ -448,6 +448,21 @@ web_port = 8080          # Puerto de esta web (solo Python)
                 <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
                 <button id="snapshotBtn" class="btn-small btn-snapshot" title="Crear snapshot TSV (usa el valor de 'Snapshot frames' en Ajustes)">&#128247;</button>
                 <button id="browserToggleBtn" class="btn-small" title="Añadir variables a monitorizar">+</button>
+                <div class="monitor-filter-menu-wrap">
+                    <button id="monitorFilterMenuBtn" class="btn-small" title="Filtro y selección de monitorización">&#9776;</button>
+                    <div id="monitorFilterPanel" class="monitor-filter-panel" style="display:none">
+                        <div id="monitorToolbar" class="monitor-toolbar">
+                            <input type="text" id="monitorFilterInput" class="monitor-filter-input" placeholder="Filtrar variables…" title="Filtrar por nombre">
+                            <button type="button" id="monitorSelectAllBtn" class="btn-small" title="Preseleccionar todas las variables visibles (lote)">Seleccionar todas</button>
+                            <button type="button" id="monitorDeselectAllBtn" class="btn-small" title="Quitar preselección">Deseleccionar todas</button>
+                            <span id="monitorSortSep" class="monitor-toolbar-sep" aria-hidden="true">|</span>
+                            <button type="button" id="monitorSortByNameBtn" class="btn-small" title="Ordenar por nombre">Por nombre</button>
+                            <button type="button" id="monitorSortByGraphBtn" class="btn-small" title="Con gráfico asignado primero, luego sin asignar">Con gráfico primero</button>
+                            <button type="button" id="monitorSortByTsvBtn" class="btn-small" title="Variables en el TSV primero, luego el resto">En TSV primero</button>
+                            <span id="monitorFilterStatus" class="monitor-filter-status" aria-live="polite"></span>
+                        </div>
+                    </div>
+                </div>
                 <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
                 <span id="monitorLoadingIndicator" class="monitor-loading-indicator" style="display:none">Cargando datos…</span>
                 <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
@@ -480,16 +495,6 @@ web_port = 8080          # Puerto de esta web (solo Python)
                     </div>
                 </div>
             </div>
-            <div id="monitorToolbar" class="monitor-toolbar">
-                <input type="text" id="monitorFilterInput" class="monitor-filter-input" placeholder="Filtrar variables… (tsv = solo en grabación)" title="Filtrar por nombre. Escriba «tsv» (o «tsv nombre») para ver solo variables de la grabación TSV">
-                <button type="button" id="monitorSelectAllBtn" class="btn-small" title="Preseleccionar todas las variables visibles (lote)">Seleccionar todas</button>
-                <button type="button" id="monitorDeselectAllBtn" class="btn-small" title="Quitar preselección">Deseleccionar todas</button>
-                <span id="monitorSortSep" class="monitor-toolbar-sep" aria-hidden="true">|</span>
-                <button type="button" id="monitorSortByNameBtn" class="btn-small" title="Ordenar por nombre">Por nombre</button>
-                <button type="button" id="monitorSortByGraphBtn" class="btn-small" title="Con gráfico asignado primero, luego sin asignar">Con gráfico primero</button>
-                <button type="button" id="monitorSortByTsvBtn" class="btn-small" title="Variables en el TSV primero, luego el resto">En TSV primero</button>
-                <span id="monitorFilterStatus" class="monitor-filter-status" aria-live="polite"></span>
-            </div>
             <div id="monitorList" class="monitor-list"></div>
         </section>
         <div id="monitorResizeHandle" class="monitor-resize-handle" role="separator" aria-orientation="vertical" title="Redimensionar panel de monitorización"></div>
@@ -499,6 +504,8 @@ web_port = 8080          # Puerto de esta web (solo Python)
                 <h2 id="colPlotTitle">Gráficos</h2>
                 <div class="plot-controls">
                     <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo y borrar historial de gráficos">&#10227; Reset tiempo</button>
+                    <button id="offlineStepPrevBtn" class="btn-small" title="Retroceder un registro en análisis">&#9664;</button>
+                    <button id="offlineStepNextBtn" class="btn-small" title="Avanzar un registro en análisis">&#9654;</button>
                     <label id="smoothPlotsLabel" title="Ventana de media móvil para suavizar curvas">Suavizado:
                         <select id="smoothPlotsSelect">
                             <option value="1" id="smoothOpt1">No</option>
@@ -536,6 +543,7 @@ web_port = 8080          # Puerto de esta web (solo Python)
             </div>
             <div id="plotArea" class="plot-area" tabindex="0">
                 <div id="plotEmpty" class="plot-empty">Selecciona variables y asígnalas a un gráfico</div>
+                <button id="toggleAdvancedPlotBtn" class="btn-small btn-advanced-plot-toggle" type="button" title="Mostrar u ocultar opciones avanzadas de análisis">Opciones avanzadas</button>
             </div>
             <div id="anomalyPanel" class="anomaly-panel" style="display:none">
                 <div class="anomaly-controls">

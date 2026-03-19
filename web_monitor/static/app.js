@@ -59,6 +59,7 @@
     let recordColumns = [];
     let recordStartTime = null;
     let recordTimerInterval = null;
+    let recordStopFallbackTimer = null;
     let recordSizeBytes = 0;
     let isRecordingStopping = false;
     let pendingRecordingRestart = false;
@@ -80,6 +81,7 @@
     const clearMarkersBtn = document.getElementById("clearMarkersBtn");
     const markerInfoLabel = document.getElementById("markerInfoLabel");
     const anomalyPanel = document.getElementById("anomalyPanel");
+    const toggleAdvancedPlotBtn = document.getElementById("toggleAdvancedPlotBtn");
     const anomalyJumpInput = document.getElementById("anomalyJumpInput");
     const anomalyLoInput = document.getElementById("anomalyLoInput");
     const anomalyHiInput = document.getElementById("anomalyHiInput");
@@ -123,6 +125,8 @@
     const screenshotBtn = document.getElementById("screenshotBtn");
     const resetPlotsBtn = document.getElementById("resetPlotsBtn");
     const resetTimeBtn = document.getElementById("resetTimeBtn");
+    const offlineStepPrevBtn = document.getElementById("offlineStepPrevBtn");
+    const offlineStepNextBtn = document.getElementById("offlineStepNextBtn");
     const pauseBtn = document.getElementById("pauseBtn");
     const offlinePlaybackControls = document.getElementById("offlinePlaybackControls");
     const offlinePlayPauseBtn = document.getElementById("offlinePlayPauseBtn");
@@ -334,6 +338,7 @@
     let notesByTs = [];
     let segmentDraft = { start: null, end: null };
     let offlineSegments = [];
+    let advancedPlotOpen = false;
     let compactMonitorLevel = 0;
     let adaptiveLoadEnabled = true;
     let downsampleMaxPoints = 2000;
@@ -1309,6 +1314,12 @@
         if (advInfoLabel) advInfoLabel.textContent = tr.advInfoLabel || "Adv info";
         const monitorMenuBtnEl = document.getElementById("monitorMenuBtn");
         if (monitorMenuBtnEl) monitorMenuBtnEl.title = tr.monitorMenuTitle;
+        const monitorFilterMenuBtnEl = document.getElementById("monitorFilterMenuBtn");
+        if (monitorFilterMenuBtnEl) {
+            monitorFilterMenuBtnEl.title = currentLang === "en"
+                ? "Monitor filter/selection menu"
+                : "Menú de filtro/selección de monitorización";
+        }
         if (localRecordBtn) {
             localRecordBtn.title = currentLang === "en"
                 ? "Local frontend recording (includes virtual vars)"
@@ -1891,6 +1902,12 @@
             schedulePlotRender();
         });
     }
+    if (offlineStepPrevBtn) {
+        offlineStepPrevBtn.addEventListener("click", () => stepOfflineBySample(-1));
+    }
+    if (offlineStepNextBtn) {
+        offlineStepNextBtn.addEventListener("click", () => stepOfflineBySample(1));
+    }
     if (offlinePlayPauseBtn) {
         offlinePlayPauseBtn.addEventListener("click", () => {
             if (!offlineDataset) return;
@@ -1907,6 +1924,8 @@
             recomputeDeltaByName();
             updateMarkerInfoLabel();
             updateMonitorValues();
+            rebuildMonitorList();
+            schedulePlotRender();
         });
     }
     if (setMarkerBBtn) {
@@ -1915,6 +1934,8 @@
             recomputeDeltaByName();
             updateMarkerInfoLabel();
             updateMonitorValues();
+            rebuildMonitorList();
+            schedulePlotRender();
         });
     }
     if (clearMarkersBtn) {
@@ -1924,7 +1945,14 @@
             deltaByName = {};
             updateMarkerInfoLabel();
             updateMonitorValues();
+            rebuildMonitorList();
             schedulePlotRender();
+        });
+    }
+    if (toggleAdvancedPlotBtn) {
+        toggleAdvancedPlotBtn.addEventListener("click", () => {
+            advancedPlotOpen = !advancedPlotOpen;
+            updateAdvancedPlotPanelVisibility();
         });
     }
     if (runAnomalyScanBtn) {
@@ -2620,12 +2648,38 @@
     const varDrawer = document.getElementById("varDrawer");
     const browserCloseBtn = document.getElementById("browserCloseBtn");
     const colMonitorEl = document.querySelector(".col-monitor");
+    let varDrawerMeasureEl = null;
+
+    function estimateVarDrawerDesiredWidth() {
+        const baseWidth = 300;
+        if (!Array.isArray(knownVarNames) || knownVarNames.length === 0) return baseWidth;
+        let longest = "";
+        for (let i = 0; i < knownVarNames.length; i++) {
+            const n = String(knownVarNames[i] || "");
+            if (n.length > longest.length) longest = n;
+        }
+        if (!longest) return baseWidth;
+        if (!varDrawerMeasureEl) {
+            varDrawerMeasureEl = document.createElement("span");
+            varDrawerMeasureEl.className = "tree-leaf-name";
+            varDrawerMeasureEl.style.position = "fixed";
+            varDrawerMeasureEl.style.left = "-99999px";
+            varDrawerMeasureEl.style.top = "0";
+            varDrawerMeasureEl.style.visibility = "hidden";
+            varDrawerMeasureEl.style.whiteSpace = "nowrap";
+            document.body.appendChild(varDrawerMeasureEl);
+        }
+        varDrawerMeasureEl.textContent = longest;
+        // Texto + checkbox + badge TSV + paddings/márgenes del item.
+        const measured = Math.ceil(varDrawerMeasureEl.getBoundingClientRect().width + 110);
+        return Math.max(280, Math.min(820, measured));
+    }
 
     function positionVarDrawer() {
         if (!varDrawer || !colMonitorEl) return;
         const rect = colMonitorEl.getBoundingClientRect();
         const margin = 8;
-        const desiredWidth = 300;
+        const desiredWidth = estimateVarDrawerDesiredWidth();
         const availableRight = Math.max(220, window.innerWidth - rect.right - margin);
         const width = Math.min(desiredWidth, availableRight);
         const left = Math.min(rect.right + margin, window.innerWidth - width - margin);
@@ -2716,6 +2770,8 @@
 
     const monitorMenuBtn = document.getElementById("monitorMenuBtn");
     const monitorMenuPanel = document.getElementById("monitorMenuPanel");
+    const monitorFilterMenuBtn = document.getElementById("monitorFilterMenuBtn");
+    const monitorFilterPanel = document.getElementById("monitorFilterPanel");
     const monitorColsAddBtn = document.getElementById("monitorColsAddBtn");
     const monitorColsRemoveBtn = document.getElementById("monitorColsRemoveBtn");
     if (monitorMenuBtn && monitorMenuPanel) {
@@ -2723,6 +2779,7 @@
             e.stopPropagation();
             const isVisible = monitorMenuPanel.style.display === "flex";
             monitorMenuPanel.style.display = isVisible ? "none" : "flex";
+            if (monitorFilterPanel && !isVisible) monitorFilterPanel.style.display = "none";
             if (!isVisible) refreshAlarmListPanel();
         });
         document.addEventListener("click", (e) => {
@@ -2738,6 +2795,22 @@
                 refreshAlarmListPanel();
             });
         }
+    }
+    if (monitorFilterMenuBtn && monitorFilterPanel) {
+        monitorFilterMenuBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const isVisible = monitorFilterPanel.style.display === "block";
+            monitorFilterPanel.style.display = isVisible ? "none" : "block";
+            if (monitorMenuPanel && !isVisible) monitorMenuPanel.style.display = "none";
+            if (!isVisible && monitorFilterInput) {
+                try { monitorFilterInput.focus(); } catch (err) {}
+            }
+        });
+        document.addEventListener("click", (e) => {
+            if (!monitorFilterPanel.contains(e.target) && e.target !== monitorFilterMenuBtn) {
+                monitorFilterPanel.style.display = "none";
+            }
+        });
     }
 
     if (monitorColsAddBtn) {
@@ -2976,7 +3049,7 @@
         if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
         if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay") setAppMode(cfg.appMode, { keepData: true });
         const rec = (cfg.offlineRecordingName || "").trim();
-        if (opts.autoLoadOffline && (cfg.appMode === "offline" || cfg.appMode === "replay") && rec) {
+        if (opts.autoLoadOffline && cfg.appMode === "offline" && rec) {
             try {
                 await loadRecordingFromServer(rec, { preserveLayout: true });
             } catch (e) {
@@ -3735,10 +3808,13 @@
         browserListDirty = true;
         varCountEl.textContent = "";
         monitorListEl.innerHTML = "";
-        plotArea.innerHTML = "";
-        if (plotEmpty) {
-            plotEmpty.style.display = "flex";
-            plotArea.appendChild(plotEmpty);
+        if (plotArea) {
+            while (plotArea.firstChild) plotArea.removeChild(plotArea.firstChild);
+            if (plotEmpty) {
+                plotEmpty.style.display = "flex";
+                plotArea.appendChild(plotEmpty);
+            }
+            if (toggleAdvancedPlotBtn) plotArea.appendChild(toggleAdvancedPlotBtn);
         }
         if (anomalyListEl) anomalyListEl.innerHTML = "";
         renderArincBusHealth();
@@ -3768,6 +3844,15 @@
         }
     }
 
+    function updateAdvancedPlotPanelVisibility() {
+        const playback = isPlaybackMode();
+        if (anomalyPanel) anomalyPanel.style.display = (playback && advancedPlotOpen) ? "block" : "none";
+        if (toggleAdvancedPlotBtn) {
+            toggleAdvancedPlotBtn.style.display = playback ? "" : "none";
+            toggleAdvancedPlotBtn.textContent = advancedPlotOpen ? "Ocultar avanzadas" : "Opciones avanzadas";
+        }
+    }
+
     function setModeUi() {
         const offline = isOfflineMode();
         const replay = isReplayMode();
@@ -3787,13 +3872,11 @@
             if (setMarkerBBtn) setMarkerBBtn.style.display = "none";
             if (clearMarkersBtn) clearMarkersBtn.style.display = "none";
             if (markerInfoLabel) markerInfoLabel.style.display = "none";
-            if (anomalyPanel) anomalyPanel.style.display = "none";
         } else {
             if (setMarkerABtn) setMarkerABtn.style.display = "";
             if (setMarkerBBtn) setMarkerBBtn.style.display = "";
             if (clearMarkersBtn) clearMarkersBtn.style.display = "";
             if (markerInfoLabel) markerInfoLabel.style.display = "";
-            if (anomalyPanel) anomalyPanel.style.display = playback ? "block" : "none";
         }
         if (alarmPanel) alarmPanel.style.display = playback ? "none" : "";
         const spanLabel = document.getElementById("offlineWindowSpanLabel");
@@ -3802,6 +3885,8 @@
         if (refreshNamesBtn) refreshNamesBtn.style.display = playback ? "none" : "";
         if (reconnectBtn) reconnectBtn.style.display = playback ? "none" : "";
         if (pauseBtn) pauseBtn.style.display = playback ? "none" : "";
+        if (offlineStepPrevBtn) offlineStepPrevBtn.style.display = offline ? "" : "none";
+        if (offlineStepNextBtn) offlineStepNextBtn.style.display = offline ? "" : "none";
         if (portControl) portControl.style.display = playback ? "none" : "";
         if (resetTimeBtn) resetTimeBtn.style.display = playback ? "none" : "";
         if (sendFileOnFinishCheckbox) {
@@ -3817,6 +3902,7 @@
         const plotVsRefCheckbox = document.getElementById("plotVsRefCheckbox");
         if (plotVsRefWrap) plotVsRefWrap.style.display = replay ? "" : "none";
         if (plotVsRefCheckbox) plotVsRefCheckbox.checked = !!plotVsRef;
+        updateAdvancedPlotPanelVisibility();
         updateOfflineDatasetStatus();
         updateMarkerInfoLabel();
         renderSegmentsUi();
@@ -3829,6 +3915,13 @@
         const desired = mode === "offline" ? "offline" : (mode === "replay" ? "replay" : "live");
         const changed = desired !== appMode;
         appMode = desired;
+        if (desired === "replay") {
+            // Al entrar en replay siempre obligamos a cargar referencia manualmente.
+            offlineDataset = null;
+            offlineRecordingName = "";
+            offlineRecordingGlobalMinTs = null;
+            offlineRecordingGlobalMaxTs = null;
+        }
         setModeUi();
         if (changed) {
             stopOfflinePlayback();
@@ -3843,7 +3936,7 @@
             } else if (desired === "replay") {
                 // Modo híbrido: mantener conexión al backend para tener vars_names + vars_update (C++/SHM).
                 setOfflineStatus();
-                if (!opts.keepData) clearDataBuffers();
+                clearDataBuffers();
                 checkAuthThenStart();
             } else {
                 resetStateForNewTarget();
@@ -4094,6 +4187,30 @@
         applyReplayImpositions(clamped);
     }
 
+    function stepOfflineBySample(direction) {
+        if (!isOfflineMode() || !offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length === 0) return;
+        const dir = direction < 0 ? -1 : 1;
+        stopOfflinePlayback();
+        const samples = offlineDataset.samples;
+        const curTs = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : offlineDataset.minTs;
+        let idx = binarySearchSampleIndex(samples, curTs);
+        idx = Math.max(0, Math.min(samples.length - 1, idx));
+        const tsAtIdx = Number(samples[idx] && samples[idx].ts);
+        const eps = 1e-9;
+        let targetIdx = idx;
+        if (dir > 0) {
+            targetIdx = (Number.isFinite(tsAtIdx) && curTs < (tsAtIdx - eps)) ? idx : (idx + 1);
+        } else {
+            targetIdx = (Number.isFinite(tsAtIdx) && Math.abs(curTs - tsAtIdx) <= eps) ? (idx - 1) : idx;
+        }
+        targetIdx = Math.max(0, Math.min(samples.length - 1, targetIdx));
+        const targetTs = Number(samples[targetIdx] && samples[targetIdx].ts);
+        if (!Number.isFinite(targetTs)) return;
+        applyOfflineTime(targetTs);
+        updateMonitorValues();
+        schedulePlotRender();
+    }
+
     function getReplayImposedValueAtTs(name, ts) {
         if (!name || !Number.isFinite(ts)) return null;
         if (!offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length === 0) return null;
@@ -4204,16 +4321,44 @@
         return Number.isFinite(v) ? v : null;
     }
 
+    function getOfflineScalarValueAtTs(name, ts) {
+        if (!offlineDataset || !Array.isArray(offlineDataset.samples) || offlineDataset.samples.length === 0) return null;
+        if (!name || !Number.isFinite(ts)) return null;
+        const idx = binarySearchSampleIndex(offlineDataset.samples, ts);
+        const s = offlineDataset.samples[idx];
+        if (!s || !Array.isArray(s.data)) return null;
+        const e = s.data.find((it) => it && it.name === name && !Array.isArray(it.value));
+        if (!e) return null;
+        const n = (typeof e.value === "number") ? e.value : Number(e.value);
+        return Number.isFinite(n) ? n : null;
+    }
+
     function recomputeDeltaByName() {
         deltaByName = {};
         if (!Number.isFinite(markerA) || !Number.isFinite(markerB)) return;
         for (const name of monitoredNames) {
             if (isArrayVar(name)) continue;
             const hist = historyCache[name];
-            const vA = getValueAtTs(hist, markerA);
-            const vB = getValueAtTs(hist, markerB);
+            let vA = getValueAtTs(hist, markerA);
+            let vB = getValueAtTs(hist, markerB);
+            if (isPlaybackMode() && (vA == null || vB == null)) {
+                if (vA == null) vA = getOfflineScalarValueAtTs(name, markerA);
+                if (vB == null) vB = getOfflineScalarValueAtTs(name, markerB);
+            }
             if (vA == null || vB == null) continue;
             deltaByName[name] = vB - vA;
+        }
+        if (monitoredOrder.length > 1) {
+            monitoredOrder.sort((a, b) => {
+                const da = Number.isFinite(deltaByName[a]) ? Math.abs(deltaByName[a]) : 0;
+                const db = Number.isFinite(deltaByName[b]) ? Math.abs(deltaByName[b]) : 0;
+                const aChanged = da > 1e-9;
+                const bChanged = db > 1e-9;
+                if (aChanged && !bChanged) return -1;
+                if (!aChanged && bChanged) return 1;
+                if (aChanged && bChanged && db !== da) return db - da;
+                return 0;
+            });
         }
     }
 
@@ -4971,7 +5116,7 @@
 
     let collapsedGroups = new Set();
     let treeInitialized = false;
-    let groupVariables = true; // si false, lista plana sin categorías
+    let groupVariables = false; // por defecto lista plana sin categorías
 
     function buildTree(names) {
         const root = { _children: new Map(), _leaves: [] };
@@ -5033,9 +5178,6 @@
         if (groupVariables) {
             if (!treeInitialized && knownVarNames.length > 0) {
                 treeInitialized = true;
-                const paths = [];
-                collectGroupPaths(tree, "", paths);
-                paths.forEach(p => collapsedGroups.add(p));
             }
         } else {
             // Lista plana: mismo árbol pero sin grupos, solo hojas en la raíz
@@ -5081,6 +5223,7 @@
             el.draggable = true;
             el.addEventListener("dragstart", (e) => {
                 e.dataTransfer.setData("text/plain", name);
+                e.dataTransfer.setData("application/x-var-name", name);
                 e.dataTransfer.effectAllowed = "copy";
             });
             const cb = document.createElement("input");
@@ -5212,6 +5355,7 @@
             el.draggable = true;
             el.addEventListener("dragstart", (e) => {
                 e.dataTransfer.setData("text/plain", name);
+                e.dataTransfer.setData("application/x-var-name", name);
                 e.dataTransfer.effectAllowed = "copy";
             });
 
@@ -5273,8 +5417,14 @@
         groupVariables = groupVarsCheckbox.checked;
         collapseAllBtn.style.display = groupVariables ? "" : "none";
         expandAllBtn.style.display = groupVariables ? "" : "none";
+        if (groupVariables) {
+            collapseAll();
+            return;
+        }
+        collapsedGroups.clear();
         renderBrowserList();
     });
+    groupVarsCheckbox.checked = groupVariables;
     collapseAllBtn.style.display = groupVariables ? "" : "none";
     expandAllBtn.style.display = groupVariables ? "" : "none";
 
@@ -5304,6 +5454,11 @@
         saveConfig();
         renderBrowserList();
         rebuildMonitorList();
+        if (isPlaybackMode() && offlineDataset) {
+            const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : offlineDataset.minTs;
+            applyOfflineTime(tNow);
+        }
+        updateMonitorValues();
     });
 
     // --- Column 2: Monitored variables ---
@@ -5338,6 +5493,33 @@
 
     function getVisibleMonitorNames() {
         return monitoredOrder.filter(n => nameMatchesFilter(n, monitorFilterText));
+    }
+
+    function hasActiveDeltaMarkers() {
+        return Number.isFinite(markerA) && Number.isFinite(markerB);
+    }
+
+    function isDeltaChangedForName(name) {
+        const d = deltaByName[name];
+        return Number.isFinite(d) && Math.abs(d) > 1e-9;
+    }
+
+    function getMonitorRenderOrder() {
+        const order = monitoredOrder.slice();
+        if (!hasActiveDeltaMarkers()) return order;
+        order.sort((a, b) => {
+            const aChanged = isDeltaChangedForName(a);
+            const bChanged = isDeltaChangedForName(b);
+            if (aChanged && !bChanged) return -1;
+            if (!aChanged && bChanged) return 1;
+            if (aChanged && bChanged) {
+                const da = Math.abs(deltaByName[a] || 0);
+                const db = Math.abs(deltaByName[b] || 0);
+                if (db !== da) return db - da;
+            }
+            return 0;
+        });
+        return order;
     }
 
     function buildGraphSelectOptions() {
@@ -5376,7 +5558,8 @@
         existing.forEach(el => { existingMap[el.dataset.name] = el; });
 
         let visibleCount = 0;
-        for (const name of monitoredOrder) {
+        const renderOrder = getMonitorRenderOrder();
+        for (const name of renderOrder) {
             if (!nameMatchesFilter(name, monitorFilterText)) {
                 if (existingMap[name]) {
                     existingMap[name].remove();
@@ -5389,6 +5572,10 @@
             if (existingMap[name]) {
                 const wrap = existingMap[name];
                 wrap.classList.toggle("monitor-item-selected", monitorSelectedNames.has(name));
+                const hasMarkers = hasActiveDeltaMarkers();
+                const changed = hasMarkers && isDeltaChangedForName(name);
+                wrap.classList.toggle("monitor-item-delta-changed", changed);
+                wrap.classList.toggle("monitor-item-delta-unchanged", hasMarkers && !changed);
                 if (!wrap._selectionClickAttached) {
                     wrap._selectionClickAttached = true;
                     wrap.addEventListener("click", (e) => {
@@ -5428,52 +5615,10 @@
                         });
                         lab.appendChild(cb);
                         imposeWrap.appendChild(lab);
-                        const dtWrap = document.createElement("span");
-                        dtWrap.className = "monitor-impose-offsets";
-                        const dtLabel = document.createElement("label");
-                        dtLabel.className = "monitor-offset-label";
-                        dtLabel.textContent = "Δt:";
-                        const dtInput = document.createElement("input");
-                        dtInput.type = "number";
-                        dtInput.className = "monitor-offset-input";
-                        dtInput.step = "any";
-                        dtInput.placeholder = "0";
-                        dtInput.title = "Offset temporal (s)";
-                        dtInput.addEventListener("change", (e) => {
-                            e.stopPropagation();
-                            const v = parseFloat(dtInput.value);
-                            const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                            toApply.forEach(n => { impositionTimeOffset[n] = Number.isFinite(v) ? v : 0; });
-                            saveConfig();
-                        });
-                        const dvLabel = document.createElement("label");
-                        dvLabel.className = "monitor-offset-label";
-                        dvLabel.textContent = "Δv:";
-                        const dvInput = document.createElement("input");
-                        dvInput.type = "number";
-                        dvInput.className = "monitor-offset-input";
-                        dvInput.step = "any";
-                        dvInput.placeholder = "0";
-                        dvInput.title = "Offset numérico";
-                        dvInput.addEventListener("change", (e) => {
-                            e.stopPropagation();
-                            const v = parseFloat(dvInput.value);
-                            const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                            toApply.forEach(n => { impositionValueOffset[n] = Number.isFinite(v) ? v : 0; });
-                            saveConfig();
-                        });
-                        dtLabel.appendChild(dtInput);
-                        dvLabel.appendChild(dvInput);
-                        dtWrap.appendChild(dtLabel);
-                        dtWrap.appendChild(dvLabel);
-                        imposeWrap.appendChild(dtWrap);
                         rowEl.insertBefore(imposeWrap, rowEl.querySelector(".mon-name"));
                     }
                     const cb = imposeWrap && imposeWrap.querySelector(".monitor-impose-cb");
                     if (cb) cb.checked = impositionNames.has(name);
-                    const offsetInputs = imposeWrap && imposeWrap.querySelectorAll(".monitor-offset-input");
-                    if (offsetInputs && offsetInputs[0]) offsetInputs[0].value = impositionTimeOffset[name] != null ? String(impositionTimeOffset[name]) : "";
-                    if (offsetInputs && offsetInputs[1]) offsetInputs[1].value = impositionValueOffset[name] != null ? String(impositionValueOffset[name]) : "";
                 } else {
                     const imposeWrap = wrap.querySelector(".monitor-impose-wrap");
                     if (imposeWrap) imposeWrap.remove();
@@ -5486,6 +5631,10 @@
             wrap.className = "monitor-item-wrap";
             wrap.dataset.name = name;
             if (monitorSelectedNames.has(name)) wrap.classList.add("monitor-item-selected");
+            if (hasActiveDeltaMarkers()) {
+                if (isDeltaChangedForName(name)) wrap.classList.add("monitor-item-delta-changed");
+                else wrap.classList.add("monitor-item-delta-unchanged");
+            }
             wrap.addEventListener("click", (e) => {
                 if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
                 if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
@@ -5544,47 +5693,6 @@
                 });
                 lab.appendChild(imposeCb);
                 imposeWrap.appendChild(lab);
-                const dtWrap = document.createElement("span");
-                dtWrap.className = "monitor-impose-offsets";
-                const dtLabel = document.createElement("label");
-                dtLabel.className = "monitor-offset-label";
-                dtLabel.textContent = "Δt:";
-                const dtInput = document.createElement("input");
-                dtInput.type = "number";
-                dtInput.className = "monitor-offset-input";
-                dtInput.step = "any";
-                dtInput.placeholder = "0";
-                dtInput.title = "Offset temporal (s)";
-                dtInput.value = impositionTimeOffset[name] != null ? String(impositionTimeOffset[name]) : "";
-                dtInput.addEventListener("change", (e) => {
-                    e.stopPropagation();
-                    const v = parseFloat(dtInput.value);
-                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                    toApply.forEach(n => { impositionTimeOffset[n] = Number.isFinite(v) ? v : 0; });
-                    saveConfig();
-                });
-                const dvLabel = document.createElement("label");
-                dvLabel.className = "monitor-offset-label";
-                dvLabel.textContent = "Δv:";
-                const dvInput = document.createElement("input");
-                dvInput.type = "number";
-                dvInput.className = "monitor-offset-input";
-                dvInput.step = "any";
-                dvInput.placeholder = "0";
-                dvInput.title = "Offset numérico";
-                dvInput.value = impositionValueOffset[name] != null ? String(impositionValueOffset[name]) : "";
-                dvInput.addEventListener("change", (e) => {
-                    e.stopPropagation();
-                    const v = parseFloat(dvInput.value);
-                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                    toApply.forEach(n => { impositionValueOffset[n] = Number.isFinite(v) ? v : 0; });
-                    saveConfig();
-                });
-                dtLabel.appendChild(dtInput);
-                dvLabel.appendChild(dvInput);
-                dtWrap.appendChild(dtLabel);
-                dtWrap.appendChild(dvLabel);
-                imposeWrap.appendChild(dtWrap);
                 el.appendChild(imposeWrap);
             }
 
@@ -5602,7 +5710,16 @@
             if (!isArrayVar(name)) {
                 valEl = document.createElement("span");
                 valEl.className = "mon-value";
-                valEl.textContent = "--";
+                const vdInit = varsByName[name];
+                if (vdInit) {
+                    valEl.textContent = formatValue(vdInit.value, vdInit.type, name);
+                } else if (isPlaybackMode() && offlineDataset && isVarInTsv(name)) {
+                    const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : offlineDataset.minTs;
+                    const vAtT = getOfflineScalarValueAtTs(name, tNow);
+                    valEl.textContent = (vAtT == null) ? "--" : formatValue(vAtT, "double", name);
+                } else {
+                    valEl.textContent = "--";
+                }
                 valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
             }
 
@@ -6208,7 +6325,8 @@
             return;
         }
 
-        if (impositionNames.has(name)) {
+        const replayImposed = isReplayMode() && impositionNames.has(name) && isVarInTsv(name);
+        if (replayImposed) {
             const fmtOld = panel.querySelector(".fmt-row");
             if (fmtOld) fmtOld.remove();
             const genOld = panel.querySelector(".gen-row");
@@ -6219,7 +6337,7 @@
         const canUseArincMode = !isArincDerivedName(name) && !isComputed(name);
         if (!canUseArincMode && vf.sal === "arinc429") vf.sal = "dec";
         let fmtRow = panel.querySelector(".fmt-row");
-        if (!impositionNames.has(name) && !fmtRow) {
+        if (!replayImposed && !fmtRow) {
             fmtRow = document.createElement("div");
             fmtRow.className = "fmt-row";
             const fmtOpts = canUseArincMode
@@ -6279,10 +6397,59 @@
             fmtRow.appendChild(salLbl);
             fmtRow.appendChild(salSel);
             panel.appendChild(fmtRow);
-        } else if (fmtRow && !impositionNames.has(name)) {
+        } else if (fmtRow && !replayImposed) {
             const sels = fmtRow.querySelectorAll(".fmt-select");
             if (sels[0]) sels[0].value = vf.ori || "dec";
             if (sels[1]) sels[1].value = vf.sal || "dec";
+        }
+        let imposeOffsetsRow = panel.querySelector(".impose-offsets-row");
+        if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
+            if (!imposeOffsetsRow) {
+                imposeOffsetsRow = document.createElement("div");
+                imposeOffsetsRow.className = "impose-offsets-row";
+                panel.appendChild(imposeOffsetsRow);
+            }
+            imposeOffsetsRow.innerHTML = "";
+            const dtLabel = document.createElement("label");
+            dtLabel.className = "monitor-offset-label";
+            dtLabel.textContent = "Δt:";
+            const dtInput = document.createElement("input");
+            dtInput.type = "number";
+            dtInput.className = "monitor-offset-input";
+            dtInput.step = "any";
+            dtInput.placeholder = "0";
+            dtInput.title = "Offset temporal (s)";
+            dtInput.value = impositionTimeOffset[name] != null ? String(impositionTimeOffset[name]) : "";
+            dtInput.addEventListener("click", (e) => e.stopPropagation());
+            dtInput.addEventListener("change", (e) => {
+                e.stopPropagation();
+                const v = parseFloat(dtInput.value);
+                impositionTimeOffset[name] = Number.isFinite(v) ? v : 0;
+                saveConfig();
+            });
+            dtLabel.appendChild(dtInput);
+            const dvLabel = document.createElement("label");
+            dvLabel.className = "monitor-offset-label";
+            dvLabel.textContent = "Δv:";
+            const dvInput = document.createElement("input");
+            dvInput.type = "number";
+            dvInput.className = "monitor-offset-input";
+            dvInput.step = "any";
+            dvInput.placeholder = "0";
+            dvInput.title = "Offset numérico";
+            dvInput.value = impositionValueOffset[name] != null ? String(impositionValueOffset[name]) : "";
+            dvInput.addEventListener("click", (e) => e.stopPropagation());
+            dvInput.addEventListener("change", (e) => {
+                e.stopPropagation();
+                const v = parseFloat(dvInput.value);
+                impositionValueOffset[name] = Number.isFinite(v) ? v : 0;
+                saveConfig();
+            });
+            dvLabel.appendChild(dvInput);
+            imposeOffsetsRow.appendChild(dtLabel);
+            imposeOffsetsRow.appendChild(dvLabel);
+        } else if (imposeOffsetsRow) {
+            imposeOffsetsRow.remove();
         }
 
         let arincRow = panel.querySelector(".arinc-row");
@@ -6546,7 +6713,7 @@
             }
         }
 
-        if (!impositionNames.has(name)) {
+        if (!replayImposed) {
             let genRow = panel.querySelector(".gen-row");
             const gen = activeGenerators[name];
 
@@ -6588,6 +6755,9 @@
                     buildGenSelector(genRow, name, wrap);
                 }
             }
+        } else {
+            const genRow = panel.querySelector(".gen-row");
+            if (genRow) genRow.remove();
         }
     }
 
@@ -6965,6 +7135,7 @@
         isRecording = false;
         isRecordingStopping = false;
         if (recordTimerInterval) { clearInterval(recordTimerInterval); recordTimerInterval = null; }
+        if (recordStopFallbackTimer) { clearTimeout(recordStopFallbackTimer); recordStopFallbackTimer = null; }
         recordBtn.disabled = false;
         recordBtn.textContent = "\u25CF REC";
         recordBtn.classList.remove("recording");
@@ -7445,8 +7616,18 @@
 
     function onRecordingProgress(msg) {
         if (!isRecording) return;
-        if (msg && Number.isFinite(Number(msg.bytes))) {
-            recordSizeBytes = Math.max(0, Number(msg.bytes));
+        if (msg) {
+            const b = Number(msg.bytes);
+            const s = Number(msg.samples);
+            if (Number.isFinite(b) && b > 0) {
+                recordSizeBytes = Math.max(0, b);
+            } else if (Number.isFinite(s) && s > 0) {
+                // Fallback de estimación cuando backend aún no reporta bytes reales.
+                const cols = Math.max(1, Array.isArray(recordColumns) ? recordColumns.length : 1);
+                const estPerRow = Math.max(24, cols * 14);
+                const est = s * estPerRow;
+                if (est > recordSizeBytes) recordSizeBytes = est;
+            }
             updateRecordTimerDisplay();
         }
     }
@@ -7454,6 +7635,7 @@
     function startRecording() {
         if (isRecordingStopping) return;
         if (monitoredNames.size === 0 || !isLiveMode()) return;
+        if (recordStopFallbackTimer) { clearTimeout(recordStopFallbackTimer); recordStopFallbackTimer = null; }
         sendWsAction({ action: "start_recording" });
         isRecording = true;
         recordColumns = buildRecordColumns();
@@ -7490,6 +7672,19 @@
         recordTimerEl.style.display = "inline";
         recordTimerEl.textContent = "Procesando grabacion...";
         recordBuffer = [];
+        if (recordStopFallbackTimer) clearTimeout(recordStopFallbackTimer);
+        recordStopFallbackTimer = setTimeout(() => {
+            if (!isRecordingStopping) return;
+            isRecording = false;
+            isRecordingStopping = false;
+            pendingRecordingRestart = false;
+            recordBtn.disabled = false;
+            recordBtn.textContent = "\u25CF REC";
+            recordBtn.classList.remove("recording");
+            if (recordTimerEl) recordTimerEl.style.display = "none";
+            showRecordPathToast("Grabación finalizada (timeout de confirmación).", {});
+            recordStopFallbackTimer = null;
+        }, 8000);
     }
 
     function recordSample() {
@@ -7893,9 +8088,11 @@
         });
         plotInstances = {};
 
-        while (plotArea.firstChild && plotArea.firstChild.id !== "plotEmpty") {
-            plotArea.removeChild(plotArea.firstChild);
-        }
+        Array.from(plotArea.children).forEach((child) => {
+            const id = child && child.id ? child.id : "";
+            if (id === "plotEmpty" || id === "toggleAdvancedPlotBtn") return;
+            plotArea.removeChild(child);
+        });
         const frag = document.createDocumentFragment();
 
         graphList.forEach((gid, idx) => {
@@ -7976,6 +8173,9 @@
         });
 
         plotArea.insertBefore(frag, plotEmpty);
+        if (toggleAdvancedPlotBtn && toggleAdvancedPlotBtn.parentElement !== plotArea) {
+            plotArea.appendChild(toggleAdvancedPlotBtn);
+        }
 
         if (plotEmpty) plotEmpty.style.display = graphList.length > 0 ? "none" : "flex";
 
@@ -8211,9 +8411,11 @@
 
             const gIdx = graphList.indexOf(gid);
             const traces = [];
+            let yMin = Infinity;
+            let yMax = -Infinity;
             const useVsRef = plotVsRef && isReplayMode() && offlineDataset && offlineDataset.samples && offlineDataset.samples.length > 0;
 
-            function addTraceFromHist(hist, displayName, colorIdx, dash) {
+            function addTraceFromHist(hist, displayName, rawVarName, colorIdx, dash) {
                 if (!hist || !hist.timestamps || hist.timestamps.length === 0) return;
                 let xs = hist.timestamps.slice();
                 let ys = hist.values.slice();
@@ -8233,13 +8435,19 @@
                 const smoothWindow = Math.max(1, parseInt(document.getElementById("smoothPlotsSelect")?.value, 10) || 1);
                 const ySmooth = smoothWindow > 1 ? movingAverage(ys, smoothWindow) : ys;
                 const ds = downsampleSeries(xs, ySmooth, downsampleMaxPoints);
+                for (let yi = 0; yi < ds.y.length; yi++) {
+                    const yv = Number(ds.y[yi]);
+                    if (!Number.isFinite(yv)) continue;
+                    if (yv < yMin) yMin = yv;
+                    if (yv > yMax) yMax = yv;
+                }
                 traces.push({
                     x: ds.x,
                     y: ds.y,
                     type: "scatter",
                     mode: "lines",
                     name: displayName,
-                    meta: { varName: displayName },
+                    meta: { varName: rawVarName || displayName },
                     line: {
                         color: TRACE_COLORS[colorIdx % TRACE_COLORS.length],
                         width: 1.5,
@@ -8254,12 +8462,13 @@
                 const hist = isArrElem ? arrayElemHistory[name] : historyCache[name];
 
                 if (useVsRef) {
+                    const isImposed = impositionNames.has(name);
                     const refSeries = getRefSeriesFromOfflineDataset(name);
-                    if (refSeries) {
-                        addTraceFromHist(refSeries, name + "_ref", idx, "dash");
+                    if (refSeries && !isImposed) {
+                        addTraceFromHist(refSeries, name + "_ref", name, idx, "dash");
                     }
                     if (hist && hist.timestamps && hist.timestamps.length > 0) {
-                        addTraceFromHist(hist, name + " ✕", idx, null);
+                        addTraceFromHist(hist, name + " ✕", name, idx, null);
                     } else {
                         if (isPlaybackMode()) fetchFullHistoryIfNeeded(name);
                     }
@@ -8268,7 +8477,7 @@
                         if (isPlaybackMode()) fetchFullHistoryIfNeeded(name);
                         return;
                     }
-                    addTraceFromHist(hist, `${name} ✕`, idx, null);
+                    addTraceFromHist(hist, `${name} ✕`, name, idx, null);
                 }
             });
 
@@ -8349,9 +8558,21 @@
 
             const cRect = containerEl.getBoundingClientRect();
             const colors = getPlotLayoutColors();
-            const yAxisCfg = isReplayMode()
+            let yAxisCfg = isReplayMode()
                 ? { gridcolor: colors.gridcolor, zerolinecolor: colors.gridcolor, autorange: true, fixedrange: false }
                 : { gridcolor: colors.gridcolor, zerolinecolor: colors.gridcolor };
+            if (Number.isFinite(yMin) && Number.isFinite(yMax)) {
+                const span = Math.max(1, yMax - yMin);
+                const center = (yMax + yMin) / 2;
+                const pad = span * 0.1;
+                yAxisCfg = {
+                    gridcolor: colors.gridcolor,
+                    zerolinecolor: colors.gridcolor,
+                    range: [center - (span / 2) - pad, center + (span / 2) + pad],
+                    autorange: false,
+                    fixedrange: false,
+                };
+            }
             const layout = {
                 paper_bgcolor: colors.paper_bgcolor,
                 plot_bgcolor: colors.plot_bgcolor,
@@ -8616,6 +8837,27 @@
         }
     });
 
+    function addDroppedVarToMonitorByName(nameRaw) {
+        const name = String(nameRaw || "").trim();
+        if (!name) return false;
+        if (!knownVarNames.includes(name)) return false;
+        if (!monitoredNames.has(name)) {
+            ensureArincBaseMonitored(name);
+            ensureMonitoredName(name);
+            sendMonitored();
+        }
+        browserSelection.delete(name);
+        saveConfig();
+        rebuildMonitorList();
+        if (isPlaybackMode() && offlineDataset) {
+            const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : offlineDataset.minTs;
+            applyOfflineTime(tNow);
+        }
+        updateMonitorValues();
+        renderBrowserList();
+        return true;
+    }
+
     monitorListEl.addEventListener("drop", (e) => {
         if (!e.dataTransfer) return;
         e.preventDefault();
@@ -8654,19 +8896,38 @@
             return;
         }
 
-        const name = e.dataTransfer.getData("text/plain");
-        if (!name) return;
-        if (!knownVarNames.includes(name)) return;
-        if (!monitoredNames.has(name)) {
-            ensureArincBaseMonitored(name);
-            ensureMonitoredName(name);
-            sendMonitored();
-        }
-        browserSelection.delete(name);
-        saveConfig();
-        rebuildMonitorList();
-        renderBrowserList();
+        addDroppedVarToMonitorByName(
+            e.dataTransfer.getData("application/x-var-name") ||
+            e.dataTransfer.getData("text/plain")
+        );
     });
+
+    if (colMonitorEl) {
+        colMonitorEl.addEventListener("dragover", (e) => {
+            if (!e.dataTransfer) return;
+            const isReorder = e.dataTransfer.types.includes("application/x-monitor-reorder");
+            if (isReorder) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            monitorListEl.classList.add("mon-drop-over");
+        });
+        colMonitorEl.addEventListener("dragleave", (e) => {
+            if (!colMonitorEl.contains(e.relatedTarget)) {
+                monitorListEl.classList.remove("mon-drop-over");
+            }
+        });
+        colMonitorEl.addEventListener("drop", (e) => {
+            if (!e.dataTransfer) return;
+            const isReorder = e.dataTransfer.types.includes("application/x-monitor-reorder");
+            if (isReorder) return;
+            e.preventDefault();
+            monitorListEl.classList.remove("mon-drop-over");
+            addDroppedVarToMonitorByName(
+                e.dataTransfer.getData("application/x-var-name") ||
+                e.dataTransfer.getData("text/plain")
+            );
+        });
+    }
 
     async function initialScanAndConnect() {
         if (isOfflineMode()) {
@@ -8711,6 +8972,7 @@
             rebuildKnownVarNamesWithDerived();
             browserListDirty = true;
             renderBrowserList();
+            if (varDrawer && varDrawer.style.display === "flex") positionVarDrawer();
         } else {
             const prev = knownVarNames.join(",");
             rebuildKnownVarNamesWithDerived();
@@ -8718,6 +8980,7 @@
             if (prev !== now) {
                 browserListDirty = true;
                 renderBrowserList();
+                if (varDrawer && varDrawer.style.display === "flex") positionVarDrawer();
             }
         }
     }

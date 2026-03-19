@@ -1983,9 +1983,15 @@ async def websocket_endpoint(ws: WebSocket):
                     if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
                         last_record_progress_send_at = t_snap
                         try:
+                            est_bytes = 0
+                            if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                                try:
+                                    est_bytes = int(os.path.getsize(recording_tmp_path))
+                                except Exception:
+                                    est_bytes = 0
                             await ws.send_json({
                                 "type": "recording_progress",
-                                "bytes": 0,
+                                "bytes": est_bytes,
                                 "samples": recording_rows_written_ref[0],
                             })
                         except Exception:
@@ -2120,7 +2126,7 @@ async def websocket_endpoint(ws: WebSocket):
                                         await ws.send_json({
                                             "type": "recording_progress",
                                             "bytes": int(max(0, recording_size_est_bytes)),
-                                            "samples": len(record_buffer),
+                                            "samples": int(max(0, recording_rows_written)),
                                         })
                                     except Exception:
                                         pass
