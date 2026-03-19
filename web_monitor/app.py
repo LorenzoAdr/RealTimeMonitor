@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 
 import threading
 from queue import Empty, Queue
@@ -2363,26 +2363,49 @@ async def websocket_endpoint(ws: WebSocket):
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Documentación MkDocs (site/ generado por "mkdocs build" en la raíz del proyecto)
-DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "site")
-if os.path.isdir(DOCS_DIR):
-    app.mount("/docs", StaticFiles(directory=DOCS_DIR, html=True), name="docs")
-else:
-    _DOCS_NOT_BUILT_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Documentación</title></head><body style="font-family:sans-serif;padding:2rem;max-width:600px">
-    <h1>Documentación no generada</h1>
-    <p>Para tener la documentación disponible aquí, en la raíz del proyecto ejecute:</p>
-    <pre>pip install mkdocs mkdocs-material\nmkdocs build</pre>
-    <p>Luego reinicie el servidor del monitor. La documentación se servirá en <a href="/docs/">/docs/</a>.</p>
+# Documentación MkDocs: site/ (ES) y site_en/ (EN) en la raíz del proyecto
+_DOCS_ES_DIR = os.path.join(os.path.dirname(__file__), "..", "site")
+_DOCS_EN_DIR = os.path.join(os.path.dirname(__file__), "..", "site_en")
+_DOCS_HAS_ES = os.path.isdir(_DOCS_ES_DIR)
+_DOCS_HAS_EN = os.path.isdir(_DOCS_EN_DIR)
+
+_DOCS_NOT_BUILT_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Documentation</title></head><body style="font-family:sans-serif;padding:2rem;max-width:640px">
+    <h1>Documentation not built</h1>
+    <p>From the project root, run:</p>
+    <pre>pip install mkdocs mkdocs-material
+mkdocs build
+mkdocs build -f mkdocs.en.yml</pre>
+    <p>Then restart the monitor. Spanish will be at <a href="/docs/es/">/docs/es/</a>, English at <a href="/docs/en/">/docs/en/</a>.</p>
     </body></html>"""
+
+
+@app.get("/api/docs_languages", include_in_schema=False)
+async def api_docs_languages():
+    """Which MkDocs site folders exist (for the Docs language picker in the UI)."""
+    return {"es": _DOCS_HAS_ES, "en": _DOCS_HAS_EN}
+
+
+if _DOCS_HAS_ES or _DOCS_HAS_EN:
+    if _DOCS_HAS_ES:
+        app.mount("/docs/es", StaticFiles(directory=_DOCS_ES_DIR, html=True), name="docs_es")
+    if _DOCS_HAS_EN:
+        app.mount("/docs/en", StaticFiles(directory=_DOCS_EN_DIR, html=True), name="docs_en")
+
+    @app.get("/docs", include_in_schema=False)
+    @app.get("/docs/", include_in_schema=False)
+    async def _docs_redirect_root():
+        if _DOCS_HAS_ES:
+            return RedirectResponse(url="/docs/es/", status_code=302)
+        return RedirectResponse(url="/docs/en/", status_code=302)
+
+else:
 
     @app.get("/docs")
     async def _docs_not_built_root():
-        from fastapi.responses import HTMLResponse
         return HTMLResponse(_DOCS_NOT_BUILT_HTML)
 
     @app.get("/docs/{full_path:path}")
     async def _docs_not_built(full_path: str):
-        from fastapi.responses import HTMLResponse
         return HTMLResponse(_DOCS_NOT_BUILT_HTML)
 
 def _find_available_port(host: str, start_port: int, max_offset: int = 10) -> int:

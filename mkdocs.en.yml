@@ -1,0 +1,58 @@
+site_name: VarMonitor
+site_description: Real-time variable monitor documentation
+site_author: VarMonitor
+
+docs_dir: docs_en
+site_dir: site_en
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+  repo_url: https://github.com/LorenzoAdr/RealTimeMonitor
+  repo_name: VarMonitor
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Installation and configuration: setup.md
+  - Backend (Python): backend.md
+  - Frontend: frontend.md
+  - Protocols: protocols.md
+  - Performance: performance.md
+  - C++ integration: cpp-integration.md
+  - Troubleshooting: troubleshooting.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+  - admonition
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html

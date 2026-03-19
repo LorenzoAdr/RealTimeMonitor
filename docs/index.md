@@ -18,4 +18,4 @@ Sistema de monitorización de variables en tiempo real para aplicaciones C++20. 
 
 - [VarMonitor en GitHub](https://github.com/LorenzoAdr/RealTimeMonitor) — código fuente, issues y contribuciones.
 - El [README](../README.md) del repositorio contiene un resumen y la estructura del proyecto.
-- Para generar y ver la documentación localmente: `mkdocs serve` (desde la raíz del repo) y abrir `http://localhost:8000`.
+- Para generar y ver la documentación localmente: `mkdocs serve` (ES) o `mkdocs serve -f mkdocs.en.yml` (EN). Con el monitor en marcha, tras `mkdocs build` y `mkdocs build -f mkdocs.en.yml`, las URLs son **`/docs/es/`** y **`/docs/en/`** (o use el botón **Docs** con selector de idioma).

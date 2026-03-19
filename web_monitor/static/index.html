@@ -59,7 +59,7 @@
             </div>
         </div>
         <div class="header-right">
-            <button id="docsBtn" class="btn-small" type="button" title="Abrir documentación completa">Docs</button>
+            <button id="docsBtn" class="btn-small" type="button" title="Documentación">Docs</button>
             <button id="logBtn" class="btn-small" type="button" title="Registro del servidor (Python y opcionalmente C++)">Log</button>
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <div id="offlineControls" class="offline-controls" style="display:none">
@@ -300,135 +300,26 @@
     <div id="helpOverlay" class="help-overlay" style="display:none">
         <div class="help-modal">
             <div class="help-modal-header">
-                <h2>Guia de uso — VarMonitor</h2>
+                <h2 id="helpModalTitle"></h2>
                 <button id="helpCloseBtn" class="help-close">&times;</button>
             </div>
-            <div class="help-modal-body">
-                <h3>Que es VarMonitor?</h3>
-                <p>Herramienta de monitorizacion en tiempo real de variables de una aplicacion C++. Permite visualizar valores, plotear graficos, configurar alarmas, generar funciones y grabar datos.</p>
+            <div id="helpModalBody" class="help-modal-body"></div>
+        </div>
+    </div>
 
-                <h3>Columna 1 — Variables disponibles</h3>
-                <ul>
-                    <li><b>Arbol de variables</b>: lista jerarquica de todas las variables publicadas por la aplicacion. Se actualiza automaticamente cada 30s o con el boton <b>&#8635;</b>.</li>
-                    <li><b>Filtro</b>: escribe para buscar variables por nombre.</li>
-                    <li><b>&#9660; / &#9654;</b>: colapsar/expandir todos los grupos.</li>
-                    <li><b>Sel. todo / Ninguno</b>: seleccionar o deseleccionar todas las variables visibles.</li>
-                    <li><b>Monitorizar &rarr;</b>: pasar las variables seleccionadas a la columna de monitorizacion.</li>
-                </ul>
-
-                <h3>Columna 2 — Monitorizando</h3>
-                <ul>
-                    <li><b>Valor en directo</b>: cada variable muestra su valor actual actualizado en tiempo real.</li>
-                    <li><b>Doble click en el valor</b>: editar y enviar un nuevo valor a la aplicacion (Enter confirma, Escape cancela).</li>
-                    <li><b>Dropdown (—, G1, G2...)</b>: asignar la variable a un grafico. Selecciona <b>+ Nuevo</b> para crear un grafico nuevo.</li>
-                    <li><b>Click en el nombre</b>: desplegar panel de detalles con min/max, alarmas y generador de funciones.</li>
-                    <li><b>&#9679; REC</b>: grabar valores de las variables monitorizadas a un archivo TSV. Al parar se descarga automaticamente. Maximo 5 minutos por archivo.</li>
-                    <li><b>Quitar sel.</b>: eliminar variables asignadas a graficos de la lista de monitorizacion.</li>
-                    <li><b>&#9888; Clear</b>: eliminar todas las alarmas activas de golpe.</li>
-                    <li><b>&#128190; / &#128194;</b>: exportar/importar la configuracion completa (variables, graficos, alarmas) a un archivo JSON.</li>
-                    <li><b>Reset</b>: limpiar toda la configuracion.</li>
-                </ul>
-
-                <h3>Panel de detalles (al hacer click en nombre)</h3>
-                <ul>
-                    <li><b>Min / Max</b>: estadisticas del historial reciente.</li>
-                    <li><b>+ Alarma</b>: configurar umbrales Lo/Hi. Si el valor sale del rango, se activa una alarma visual y se genera un TSV automatico con los ultimos 10s de datos.</li>
-                    <li><b>Generador</b>: selecciona un tipo de funcion (seno, escalon, rampa, cuadrada, triangular, chirp, pulso, ruido), configura los parametros y pulsa <b>&#9654;</b> para inyectar valores calculados a la variable. <b>&#9632; Stop</b> para detener.</li>
-                </ul>
-
-                <h3>Columna 3 — Graficos</h3>
-                <ul>
-                    <li>Los graficos se crean al asignar variables desde el dropdown de la columna 2.</li>
-                    <li>Si un grafico se queda sin variables asignadas, se elimina automaticamente.</li>
-                    <li><b>&times;</b> en la cabecera del grafico: eliminar ese grafico.</li>
-                    <li><b>&#9654; Play / &#9646;&#9646; Pausa</b>: pausar o reanudar la actualizacion de todos los graficos.</li>
-                    <li><b>&#128247; PNG</b>: capturar todos los graficos visibles como una sola imagen PNG.</li>
-                    <li><b>Buffer visual</b>: segundos de datos mostrados en el grafico y conservados en memoria (10s a 10min o todo). Afecta al tamano de la grafica y al uso de RAM.</li>
-                    <li><b>Crosshair</b>: al pasar el raton, se muestra el valor de todas las trazas en ese instante.</li>
-                    <li><b>Zoom</b>: arrastra un rectangulo sobre el grafico para hacer zoom. Usa la rueda del raton para zoom rapido.</li>
-                    <li><b>Pan</b>: pulsa el boton de pan en la barra de herramientas y arrastra para desplazar la vista.</li>
-                    <li><b>Autoscale / Reset</b>: pulsa el boton de reset en la barra para volver a la vista completa.</li>
-                    <li><b>&#9888; Icono de alarma</b>: las variables con alarmas configuradas muestran un &#9888; junto al nombre en la columna 2, visible incluso colapsado.</li>
-                </ul>
-
-                <h3>Notificaciones de alarmas</h3>
-                <ul>
-                    <li>Si el navegador no esta en primer plano cuando salta una alarma, se envia una <b>notificacion del sistema</b>.</li>
-                    <li>Haz click en la notificacion para volver al monitor. Se requiere aceptar el permiso de notificaciones la primera vez.</li>
-                </ul>
-
-                <h3>Variables computadas</h3>
-                <ul>
-                    <li><b>fx+</b> en la cabecera de Columna 2: crear una variable virtual calculada a partir de otras.</li>
-                    <li>Escribe un nombre y una expresion JS (ej: <code>sensors_temperature - control_pid_kp</code>). Los puntos de los nombres se reemplazan por <code>_</code>.</li>
-                    <li>Se evaluan en tiempo real y se pueden plotear como cualquier variable.</li>
-                </ul>
-
-                <h3>Cabecera</h3>
-                <ul>
-                    <li><b>Instancia</b>: selector de a que proceso C++ se conecta el backend. Las instancias se descubren por sockets Unix en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code> (sin usar red). Por defecto se elige la mas reciente.</li>
-                    <li><b>Rel act</b>: relacion de actualizacion (cada cuantos ciclos del backend se envia <code>vars_update</code> al navegador). 1 = maxima tasa, 5 por defecto.</li>
-                    <li><b>Estado de conexion</b>: indicador verde (conectado) o rojo (desconectado) del WebSocket con el backend Python.</li>
-                </ul>
-
-                <h3>Atajos de teclado</h3>
-                <ul>
-                    <li><b>Espacio</b>: pausar / reanudar graficos</li>
-                    <li><b>R</b>: iniciar / detener grabacion TSV</li>
-                    <li><b>S</b>: capturar screenshot de graficos</li>
-                    <li><b>H</b> o <b>?</b>: abrir / cerrar esta ayuda</li>
-                    <li><b>Escape</b>: cerrar ayuda o descartar banner de alarma</li>
-                </ul>
-
-                <h3>Arquitectura y comunicacion</h3>
-                <p>El sistema tiene tres piezas; entre C++ y Python no hay TCP, solo UDS y memoria compartida (SHM):</p>
-                <ol>
-                    <li><b>Tu aplicacion C++</b> con <code>libvarmonitor</code>: escribe snapshots en SHM cada ciclo y expone un socket Unix (UDS) en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code> para comandos.</li>
-                    <li><b>Backend Python (FastAPI)</b>: se conecta por UDS a la app C++, lee datos en tiempo real desde SHM (semáforo + cola) y sirve esta web. Envia <code>vars_update</code> al navegador por WebSocket.</li>
-                    <li><b>Este navegador</b>: se conecta al backend Python por WebSocket (HTTP en <code>web_port</code>) y recibe los datos en vivo.</li>
-                </ol>
-                <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
-  App C++                  Backend Python              Navegador
-  SHM + UDS  &lt;--sem/lectura--&gt;  ShmReader + UdsBridge   &lt;---WebSocket---&gt;  UI
-  /tmp/varmon-*.sock  &lt;--------UDS (comandos)--------&gt;  (web_port)
-                </pre>
-
-                <h3>Configuracion: varmon.conf</h3>
-                <p>Configuracion en <code>varmon.conf</code>:</p>
-                <pre style="font-size:0.7rem; color:var(--text-dim); line-height:1.4; margin:8px 0;">
-# VarMonitor configuration
-web_port = 8080          # Puerto de esta web (solo Python)
-                </pre>
-                <ul>
-                    <li><b>web_port</b>: puerto donde se sirve esta pagina web.</li>
-                    <li>El C++ expone un socket Unix (UDS) en <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code>. El backend Python descubre instancias y se conecta por UDS.</li>
-                </ul>
-
-                <h3>Flujo de datos en vivo</h3>
-                <p>Los datos van por memoria compartida (SHM) y WebSocket:</p>
-                <ul>
-                    <li>El C++ escribe un snapshot en SHM cada ciclo y avisa con un semáforo. No hay TCP entre C++ y Python.</li>
-                    <li>El backend Python (ShmReader) lee cada snapshot, evalúa alarmas y rellena buffers de grabación. A la tasa indicada por <b>Rel act</b>, envía <code>vars_update</code> al navegador.</li>
-                    <li>El frontend acumula los datos recibidos en un historial local (<code>historyCache</code>) para plotear ventanas de tiempo amplias (buffer visual configurable).</li>
-                </ul>
-
-                <h3>Acceso remoto</h3>
-                <ul>
-                    <li>Para abrir el monitor desde otro PC en la misma red, usa <code>http://&lt;IP-del-servidor&gt;:&lt;web_port&gt;</code> (el puerto donde arranco el backend Python).</li>
-                    <li>La aplicacion C++ debe ejecutarse en la <b>misma maquina</b> que el backend Python: la comunicacion C++–Python es por UDS y SHM (locales).</li>
-                    <li>Entre navegador y backend solo se envian por WebSocket las variables que estan siendo monitorizadas.</li>
-                </ul>
-
-                <h3>Cambiar la ruta de varmon.conf</h3>
-                <ul>
-                    <li>Variable de entorno: <code>VARMON_CONFIG=/ruta/al/archivo.conf</code></li>
-                    <li>En C++: <code>varmon::set_config_path("/ruta/...")</code> antes de <code>start()</code></li>
-                    <li>Por defecto busca <code>./varmon.conf</code> en el directorio de trabajo.</li>
-                    <li>Si no existe, se usan valores por defecto (p. ej. <code>web_port = 8080</code>).</li>
-                </ul>
-
-                <h3>Proyecto en GitHub</h3>
-                <p>Código fuente, issues y más información: <a href="https://github.com/LorenzoAdr/RealTimeMonitor" target="_blank" rel="noopener noreferrer">VarMonitor en GitHub</a>.</p>
+    <div id="docsLangOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal docs-lang-modal">
+            <div class="help-modal-header">
+                <h2 id="docsLangModalTitle"></h2>
+                <button type="button" id="docsLangCloseBtn" class="help-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="docs-lang-body">
+                <p id="docsLangChoose" class="help-intro"></p>
+                <div class="docs-lang-buttons">
+                    <button type="button" id="docsOpenEsBtn" class="btn-primary">Español</button>
+                    <button type="button" id="docsOpenEnBtn" class="btn-primary">English</button>
+                </div>
+                <p id="docsLangNotBuilt" class="docs-lang-not-built" style="display:none"></p>
             </div>
         </div>
     </div>
@@ -444,54 +335,54 @@ web_port = 8080          # Puerto de esta web (solo Python)
     <main>
         <section class="col col-monitor">
             <div class="col-header col-monitor-header">
-                <h2 id="colMonitorTitle">Monitorizando</h2>
-                <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
-                <button id="snapshotBtn" class="btn-small btn-snapshot" title="Crear snapshot TSV (usa el valor de 'Snapshot frames' en Ajustes)">&#128247;</button>
-                <button id="browserToggleBtn" class="btn-small" title="Añadir variables a monitorizar">+</button>
-                <div class="monitor-filter-menu-wrap">
-                    <button id="monitorFilterMenuBtn" class="btn-small" title="Filtro y selección de monitorización">&#9776;</button>
-                    <div id="monitorFilterPanel" class="monitor-filter-panel" style="display:none">
-                        <div id="monitorToolbar" class="monitor-toolbar">
-                            <input type="text" id="monitorFilterInput" class="monitor-filter-input" placeholder="Filtrar variables…" title="Filtrar por nombre">
-                            <button type="button" id="monitorSelectAllBtn" class="btn-small" title="Preseleccionar todas las variables visibles (lote)">Seleccionar todas</button>
-                            <button type="button" id="monitorDeselectAllBtn" class="btn-small" title="Quitar preselección">Deseleccionar todas</button>
-                            <span id="monitorSortSep" class="monitor-toolbar-sep" aria-hidden="true">|</span>
-                            <button type="button" id="monitorSortByNameBtn" class="btn-small" title="Ordenar por nombre">Por nombre</button>
-                            <button type="button" id="monitorSortByGraphBtn" class="btn-small" title="Con gráfico asignado primero, luego sin asignar">Con gráfico primero</button>
-                            <button type="button" id="monitorSortByTsvBtn" class="btn-small" title="Variables en el TSV primero, luego el resto">En TSV primero</button>
-                            <span id="monitorFilterStatus" class="monitor-filter-status" aria-live="polite"></span>
+                <div class="col-monitor-header-top">
+                    <h2 id="colMonitorTitle">Monitorizando</h2>
+                    <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
+                    <button id="snapshotBtn" class="btn-small btn-snapshot" title="Crear snapshot TSV (usa el valor de 'Snapshot frames' en Ajustes)">&#128247;</button>
+                    <button id="browserToggleBtn" class="btn-small" title="Añadir variables a monitorizar">+</button>
+                    <button type="button" id="monitorFilterMenuBtn" class="btn-small btn-monitor-filter-toggle" title="Filtro y selección de monitorización" aria-expanded="false" aria-controls="monitorFilterPanel">&#9776;</button>
+                    <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
+                    <span id="monitorLoadingIndicator" class="monitor-loading-indicator" style="display:none">Cargando datos…</span>
+                    <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
+                    <div id="monitorMenuPanel" class="monitor-menu-panel" style="display:none">
+                        <div class="monitor-menu-row">
+                            <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
+                            <button id="localRecordBtn" class="btn-small" title="Grabar en local desde frontend (incluye virtuales)">● Rec local</button>
+                            <button id="resetConfigBtn" class="btn-small" title="Eliminar toda la configuración">Reset</button>
+                        </div>
+                        <label class="settings-adv-checkbox">Compactado monitor:
+                            <input type="range" id="compactMonitorSlider" min="0" max="100" step="1" value="0" title="Más a la derecha = monitor más compacto">
+                        </label>
+                        <div class="monitor-menu-row">
+                            <button id="expandAllMonBtn" class="btn-small" title="Desplegar paneles de todas las variables monitorizadas">Desplegar todo</button>
+                            <button id="collapseAllMonBtn" class="btn-small" title="Colapsar paneles de todas las variables monitorizadas">Colapsar todo</button>
+                        </div>
+                        <label id="hideLevelsLabel">Niveles:
+                            <select id="hideLevelsInput">
+                                <option value="0">0</option>
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                            </select>
+                        </label>
+                        <div id="alarmPanel" class="monitor-alarm-panel">
+                            <div class="alarm-list-header">Alarmas</div>
+                            <div id="alarmList" class="alarm-list"></div>
+                            <button id="alarmClearAllBtn" class="btn-small btn-danger">Eliminar todas</button>
                         </div>
                     </div>
                 </div>
-                <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
-                <span id="monitorLoadingIndicator" class="monitor-loading-indicator" style="display:none">Cargando datos…</span>
-                <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
-                <div id="monitorMenuPanel" class="monitor-menu-panel" style="display:none">
-                    <div class="monitor-menu-row">
-                        <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
-                        <button id="localRecordBtn" class="btn-small" title="Grabar en local desde frontend (incluye virtuales)">● Rec local</button>
-                        <button id="resetConfigBtn" class="btn-small" title="Eliminar toda la configuración">Reset</button>
-                    </div>
-                    <label class="settings-adv-checkbox">Compactado monitor:
-                        <input type="range" id="compactMonitorSlider" min="0" max="100" step="1" value="0" title="Más a la derecha = monitor más compacto">
-                    </label>
-                    <div class="monitor-menu-row">
-                        <button id="expandAllMonBtn" class="btn-small" title="Desplegar paneles de todas las variables monitorizadas">Desplegar todo</button>
-                        <button id="collapseAllMonBtn" class="btn-small" title="Colapsar paneles de todas las variables monitorizadas">Colapsar todo</button>
-                    </div>
-                    <label id="hideLevelsLabel">Niveles:
-                        <select id="hideLevelsInput">
-                            <option value="0">0</option>
-                            <option value="1">1</option>
-                            <option value="2">2</option>
-                            <option value="3">3</option>
-                            <option value="4">4</option>
-                        </select>
-                    </label>
-                    <div id="alarmPanel" class="monitor-alarm-panel">
-                        <div class="alarm-list-header">Alarmas</div>
-                        <div id="alarmList" class="alarm-list"></div>
-                        <button id="alarmClearAllBtn" class="btn-small btn-danger">Eliminar todas</button>
+                <div id="monitorFilterPanel" class="monitor-filter-expand" style="display:none" role="region" aria-label="Filtro y orden de la lista de monitorización">
+                    <div id="monitorToolbar" class="monitor-toolbar monitor-toolbar-inline">
+                        <input type="text" id="monitorFilterInput" class="monitor-filter-input" placeholder="Filtrar variables…" title="Filtrar por nombre">
+                        <button type="button" id="monitorSelectAllBtn" class="btn-small" title="Preseleccionar todas las variables visibles (lote)">Seleccionar todas</button>
+                        <button type="button" id="monitorDeselectAllBtn" class="btn-small" title="Quitar preselección">Deseleccionar todas</button>
+                        <span id="monitorSortSep" class="monitor-toolbar-sep" aria-hidden="true">|</span>
+                        <button type="button" id="monitorSortByNameBtn" class="btn-small" title="Ordenar por nombre">Por nombre</button>
+                        <button type="button" id="monitorSortByGraphBtn" class="btn-small" title="Con gráfico asignado primero, luego sin asignar">Con gráfico primero</button>
+                        <button type="button" id="monitorSortByTsvBtn" class="btn-small" title="Variables en el TSV primero, luego el resto">En TSV primero</button>
+                        <span id="monitorFilterStatus" class="monitor-filter-status" aria-live="polite"></span>
                     </div>
                 </div>
             </div>

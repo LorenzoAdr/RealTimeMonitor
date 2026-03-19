@@ -10,7 +10,9 @@
         "#38bdf8", "#fb923c", "#a78bfa", "#34d399", "#f97316",
         "#e879f9", "#22d3ee", "#facc15", "#818cf8", "#fb7185",
     ];
-    const MAX_GRAPHS = 8;
+    const MAX_GRAPH_COLUMNS = 3;
+    const MAX_GRAPH_ROWS = 3;
+    const MAX_GRAPHS = MAX_GRAPH_COLUMNS * MAX_GRAPH_ROWS;
     const DEFAULT_OFFLINE_FULL_LOAD_MAX_MB = 40;
     const DEFAULT_OFFLINE_PREVIEW_MB = 2;
     const DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_ROWS = 10000;
@@ -38,8 +40,11 @@
     /** Nombres de variables que están en el TSV cargado (scalares y bases de array); vacío si no hay dataset. */
     let varNamesInTsv = new Set();
     let varGraphAssignment = {};
+    let seriesColorByName = {};
+    let seriesHueByName = {};
     let historyCache = {};
     let graphList = [];
+    let graphColumns = [];
     let plotInstances = {};
 
     let arrayElemAssignment = {};
@@ -1096,6 +1101,12 @@
             sendFileOnFinishLabel: "Enviar fichero al terminar",
             recordPathLabel: "Guardado en:",
             advInfoLabel: "Adv info",
+            docsTitle: "Abrir documentación completa (MkDocs)",
+            docsModalTitle: "Documentación",
+            docsModalChoose: "Elija el idioma. Se abrirá en una pestaña nueva.",
+            docsLangEs: "Español",
+            docsLangEn: "English",
+            docsNotBuiltMsg: "No hay documentación generada. En la raíz del proyecto ejecute: mkdocs build  y  mkdocs build -f mkdocs.en.yml  luego reinicie el servidor.",
         },
         en: {
             colBrowserTitle: "Available variables",
@@ -1177,8 +1188,96 @@
             sendFileOnFinishLabel: "Send file when finished",
             recordPathLabel: "Saved at:",
             advInfoLabel: "Adv info",
+            docsTitle: "Open full documentation (MkDocs)",
+            docsModalTitle: "Documentation",
+            docsModalChoose: "Choose a language. Opens in a new tab.",
+            docsLangEs: "Spanish",
+            docsLangEn: "English",
+            docsNotBuiltMsg: "Documentation is not built. From the project root run: mkdocs build  and  mkdocs build -f mkdocs.en.yml  then restart the server.",
         }
     };
+
+    I18N.es.helpGuideTitle = "Guía de uso — VarMonitor";
+    I18N.es.helpGuideHtml = `
+<p class="help-intro">VarMonitor muestra y, en vivo, modifica variables publicadas por tu aplicación C++. El backend Python usa <strong>SHM</strong> y <strong>UDS</strong> frente al proceso C++; el navegador habla con Python por HTTP/WebSocket. Hay <strong>tres modos</strong> (selector <strong>Modo</strong> en cabecera), cada uno con capacidades distintas.</p>
+
+<h3 class="help-mode-title">1. Modo Live (tiempo real)</h3>
+<ul>
+<li><strong>Datos en vivo</strong>: WebSocket conectado; valores y gráficos se alimentan del C++ vía backend.</li>
+<li><strong>Cabecera</strong>: instancia UDS (<code>/tmp/varmon-&lt;usuario&gt;-&lt;pid&gt;.sock</code>), <strong>Rel act</strong> (cada cuántos ciclos se envía <code>vars_update</code>), estado de conexión.</li>
+<li><strong>Variables</strong>: botón <strong>+</strong> abre el cajón; lista <strong>plana</strong> por defecto; <strong>Agrupar</strong> muestra árbol (al activarlo, grupos colapsados por defecto). Arrastra al panel de monitor o usa <strong>+ Monitorizar</strong>.</li>
+<li><strong>Monitorización</strong>: botón <strong>☰</strong> expande la barra del monitor con filtro, selección por lotes y ordenación. Doble clic en el valor para escribir en C++ (donde el tipo lo permita). Clic en el nombre: detalles (min/max, alarmas, generador, formato).</li>
+<li><strong>Gráficos</strong>: arrastra variables a un gráfico. Sin gráficos, toda el área es zona de creación. Con gráficos: rejilla hasta <strong>3 columnas × 3 filas</strong> (9 gráficos). <strong>Nueva columna</strong> a la derecha; fila inferior <strong>Abajo C1/C2/C3</strong> añade fila en esa columna. Cada traza tiene color propio; el mismo color resalta la fila en monitorización.</li>
+<li><strong>REC / snapshot / PNG</strong>, pausa de gráficos, buffer visual (ajustes), variables computadas <strong>fx+</strong>, exportar/importar JSON, alarmas y notificaciones del sistema.</li>
+</ul>
+
+<h3 class="help-mode-title">2. Modo Análisis (offline)</h3>
+<ul>
+<li><strong>Sin datos en vivo del C++</strong> para la sesión de análisis: trabajas sobre un <strong>TSV</strong> cargado (local o del servidor). No hay conexión WebSocket de datos en este modo.</li>
+<li><strong>Carga y reproducción</strong>: barra temporal, velocidad, Play/Pausa. Flechas <strong>◀ / ▶</strong> junto a Suavizado: avance/retroceso <strong>muestra a muestra</strong>.</li>
+<li><strong>Marcadores A y B</strong>: comparación entre instantes; la lista de monitor puede reordenarse por magnitud de cambio.</li>
+<li><strong>Gráficos</strong>: mismas herramientas de zoom/pan; clic en la curva puede posicionar el tiempo en análisis.</li>
+<li><strong>Opciones avanzadas</strong> (esquina inferior derecha de la zona de gráficos): anomalías, segmentos, notas, informe PDF, etc. (ocultas por defecto).</li>
+</ul>
+
+<h3 class="help-mode-title">3. Modo Replay (híbrido TSV + C++)</h3>
+<ul>
+<li><strong>WebSocket activo</strong> y además una <strong>grabación TSV de referencia</strong>: al entrar en Replay se limpia la referencia anterior; debes <strong>cargar el archivo manualmente</strong>.</li>
+<li><strong>Listado de variables</strong>: unión de nombres del TSV y del catálogo del backend; etiqueta verde <strong>TSV</strong> en el navegador. Puedes buscar con la palabra <code>tsv</code> en los filtros donde esté soportado.</li>
+<li><strong>Imposición</strong>: solo variables presentes en el TSV. Si marcas <strong>imponer</strong>, el valor se toma del TSV (con offsets Δt/Δv en el panel de detalles) y se bloquean actualizaciones SHM para esa señal en la vista. Si no impones, la variable se comporta como en Live.</li>
+<li><strong>Gráficos</strong>: eje X acotado al rango temporal del TSV; opción de trazar frente a referencia donde aplique. Controles de monitor específicos (p. ej. ordenación “En TSV primero”) solo en Replay.</li>
+</ul>
+
+<h3 class="help-mode-title">Referencia común</h3>
+<ul>
+<li><strong>Atajos</strong>: Espacio (pausa gráficos), R (REC), S (captura PNG), H o ? (esta ayuda), Escape (cerrar).</li>
+<li><strong>Arquitectura</strong>: C++ ↔ Python (UDS + SHM); navegador ↔ Python (HTTP + WebSocket en <code>web_port</code>).</li>
+<li><strong>varmon.conf</strong>: p. ej. <code>web_port</code>. Ruta alternativa: <code>VARMON_CONFIG</code> o <code>varmon::set_config_path</code> en C++.</li>
+<li><strong>Acceso remoto al navegador</strong>: <code>http://&lt;IP&gt;:&lt;web_port&gt;</code>. El binario C++ y el backend Python deben estar en la <strong>misma máquina</strong> (UDS/SHM locales).</li>
+</ul>
+<p class="help-footer"><a href="https://github.com/LorenzoAdr/RealTimeMonitor" target="_blank" rel="noopener noreferrer">VarMonitor en GitHub</a></p>
+`;
+
+    I18N.en.helpGuideTitle = "User guide — VarMonitor";
+    I18N.en.helpGuideHtml = `
+<p class="help-intro">VarMonitor displays and, in real time, edits variables published by your C++ application. The Python backend uses <strong>SHM</strong> and <strong>UDS</strong> to the C++ process; the browser talks to Python over HTTP/WebSocket. There are <strong>three modes</strong> (the <strong>Mode</strong> selector in the header), each with different capabilities.</p>
+
+<h3 class="help-mode-title">1. Live mode</h3>
+<ul>
+<li><strong>Live data</strong>: WebSocket connected; values and plots are driven by the C++ process through the backend.</li>
+<li><strong>Header</strong>: UDS instance (<code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code>), <strong>Rel act</strong> (how often <code>vars_update</code> is sent), connection status.</li>
+<li><strong>Variables</strong>: <strong>+</strong> opens the drawer; <strong>flat</strong> list by default; <strong>Group</strong> shows a tree (when enabled, groups start collapsed). Drag to the monitor column or use <strong>+ Monitor</strong>.</li>
+<li><strong>Monitoring</strong>: <strong>☰</strong> expands the monitor header bar with filter, batch selection, and sorting. Double-click the value to write to C++ (where the type allows). Click the name for details (min/max, alarms, generator, format).</li>
+<li><strong>Plots</strong>: drag variables onto a plot. With no plots, the whole area is a drop target. With plots: grid up to <strong>3 columns × 3 rows</strong> (9 plots). <strong>New column</strong> on the right; bottom row <strong>Below C1/C2/C3</strong> adds a row in that column. Each trace has its own color; the same color highlights the row in the monitor list.</li>
+<li><strong>REC / snapshot / PNG</strong>, plot pause, visual buffer (settings), computed variables <strong>fx+</strong>, JSON export/import, alarms and system notifications.</li>
+</ul>
+
+<h3 class="help-mode-title">2. Analysis mode (offline)</h3>
+<ul>
+<li><strong>No live C++ stream</strong> for this session: you work from a loaded <strong>TSV</strong> (local or server). There is no WebSocket data connection in this mode.</li>
+<li><strong>Load and playback</strong>: time scrubber, speed, Play/Pause. <strong>◀ / ▶</strong> next to Smoothing: step <strong>sample by sample</strong>.</li>
+<li><strong>A and B markers</strong>: compare two instants; the monitor list can reorder by change magnitude.</li>
+<li><strong>Plots</strong>: same zoom/pan tools; clicking the curve can seek time in analysis.</li>
+<li><strong>Advanced options</strong> (bottom-right of the plot area): anomalies, segments, notes, PDF report, etc. (collapsed by default).</li>
+</ul>
+
+<h3 class="help-mode-title">3. Replay mode (TSV + C++ hybrid)</h3>
+<ul>
+<li><strong>WebSocket stays on</strong> plus a <strong>reference TSV</strong>: entering Replay clears the previous reference; you must <strong>load a file manually</strong>.</li>
+<li><strong>Variable list</strong>: union of TSV names and backend catalog; green <strong>TSV</strong> badge in the browser. You can filter with the word <code>tsv</code> where supported.</li>
+<li><strong>Imposition</strong>: only variables that exist in the TSV. If <strong>impose</strong> is checked, values come from the TSV (with Δt/Δv offsets in the detail panel) and SHM updates for that signal are blocked in the UI. If not imposed, the variable behaves like Live.</li>
+<li><strong>Plots</strong>: X axis spans the TSV time range; optional plot vs reference where applicable. Replay-only monitor controls (e.g. “TSV first” sort).</li>
+</ul>
+
+<h3 class="help-mode-title">Common reference</h3>
+<ul>
+<li><strong>Shortcuts</strong>: Space (toggle plot pause), R (REC), S (PNG capture), H or ? (this help), Escape (close).</li>
+<li><strong>Architecture</strong>: C++ ↔ Python (UDS + SHM); browser ↔ Python (HTTP + WebSocket on <code>web_port</code>).</li>
+<li><strong>varmon.conf</strong>: e.g. <code>web_port</code>. Alternate path: <code>VARMON_CONFIG</code> or <code>varmon::set_config_path</code> in C++.</li>
+<li><strong>Remote browser access</strong>: <code>http://&lt;IP&gt;:&lt;web_port&gt;</code>. The C++ binary and Python backend must run on the <strong>same host</strong> (local UDS/SHM).</li>
+</ul>
+<p class="help-footer"><a href="https://github.com/LorenzoAdr/RealTimeMonitor" target="_blank" rel="noopener noreferrer">VarMonitor on GitHub</a></p>
+`;
 
     function getPlotLayoutColors() {
         const isLight = currentTheme === "light";
@@ -1332,8 +1431,17 @@
         document.querySelectorAll(".plot-slot-header .plot-slot-title").forEach((el, i) => {
             el.textContent = " " + tr.graphTitle + " " + (i + 1);
         });
-        const addSlot = document.getElementById("plotAddSlot");
-        if (addSlot) addSlot.textContent = tr.newGraphDropText;
+        document.querySelectorAll(".plot-add-slot").forEach((el) => {
+            if (el.classList.contains("plot-add-slot-right")) {
+                el.textContent = currentLang === "en" ? "New column" : "Nueva columna";
+            } else if (el.classList.contains("plot-add-slot-under-col")) {
+                const idx = Number(el.dataset.colIndex);
+                const n = Number.isFinite(idx) ? (idx + 1) : "";
+                el.textContent = currentLang === "en" ? `Below C${n}` : `Abajo C${n}`;
+            } else {
+                el.textContent = tr.newGraphDropText;
+            }
+        });
 
         // Actualizar texto del boton de pausa segun estado
         if (pauseBtn) {
@@ -1344,6 +1452,24 @@
                 ? (tr.offlinePlaybackPause || "⏸ Pause")
                 : (tr.offlinePlaybackPlay || "▶ Play");
         }
+
+        const helpModalTitle = document.getElementById("helpModalTitle");
+        const helpModalBody = document.getElementById("helpModalBody");
+        if (helpModalTitle) helpModalTitle.textContent = tr.helpGuideTitle || tr.helpTitle || "VarMonitor";
+        if (helpModalBody && tr.helpGuideHtml) helpModalBody.innerHTML = tr.helpGuideHtml;
+
+        const docsBtnEl = document.getElementById("docsBtn");
+        if (docsBtnEl && tr.docsTitle) docsBtnEl.title = tr.docsTitle;
+        const docsLangModalTitle = document.getElementById("docsLangModalTitle");
+        const docsLangChoose = document.getElementById("docsLangChoose");
+        const docsLangNotBuilt = document.getElementById("docsLangNotBuilt");
+        if (docsLangModalTitle) docsLangModalTitle.textContent = tr.docsModalTitle || "Docs";
+        if (docsLangChoose) docsLangChoose.textContent = tr.docsModalChoose || "";
+        const docsOpenEsBtn = document.getElementById("docsOpenEsBtn");
+        const docsOpenEnBtn = document.getElementById("docsOpenEnBtn");
+        if (docsOpenEsBtn && tr.docsLangEs) docsOpenEsBtn.textContent = tr.docsLangEs;
+        if (docsOpenEnBtn && tr.docsLangEn) docsOpenEnBtn.textContent = tr.docsLangEn;
+        if (docsLangNotBuilt && tr.docsNotBuiltMsg) docsLangNotBuilt.textContent = tr.docsNotBuiltMsg;
     }
 
     function applyMonitorColumns() {
@@ -1438,6 +1564,7 @@
             varGraphAssignment: varGraphAssignment,
             arrayElemAssignment: arrayElemAssignment,
             graphList: graphList.slice(),
+            graphColumns: graphColumns.map((col) => col.slice()),
             monitorColumnsCount,
             monitorPaneWidthPx,
             hideLevels,
@@ -1455,6 +1582,8 @@
             varGraphAssignment = (s.varGraphAssignment && typeof s.varGraphAssignment === "object") ? { ...s.varGraphAssignment } : {};
             arrayElemAssignment = (s.arrayElemAssignment && typeof s.arrayElemAssignment === "object") ? { ...s.arrayElemAssignment } : {};
             graphList = Array.isArray(s.graphList) ? s.graphList.slice() : [];
+            graphColumns = Array.isArray(s.graphColumns) ? s.graphColumns.map((col) => Array.isArray(col) ? col.slice() : []) : [];
+            normalizeGraphLayout();
             if (typeof s.monitorColumnsCount === "number") monitorColumnsCount = Math.max(1, Math.min(3, s.monitorColumnsCount));
             monitorPaneWidthPx = (typeof s.monitorPaneWidthPx === "number" && Number.isFinite(s.monitorPaneWidthPx)) ? s.monitorPaneWidthPx : null;
             if (typeof s.hideLevels === "number") hideLevels = s.hideLevels;
@@ -1552,6 +1681,7 @@
                 monitored: monitoredOrder.slice(),
                 graphs: varGraphAssignment,
                 graphList: graphList,
+                graphColumns: graphColumns.map((col) => col.slice()),
                 timeWindow: timeWindowSelect.value,
                 smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
                 instance: portSelect ? portSelect.value : "",
@@ -1583,6 +1713,7 @@
                 impositionTimeOffset: { ...impositionTimeOffset },
                 impositionValueOffset: { ...impositionValueOffset },
                 plotVsRef: !!plotVsRef,
+                seriesColors: { ...seriesColorByName },
             }));
             maybePushLayoutHistory();
         } catch (e) { /* quota exceeded or private mode */ }
@@ -1605,6 +1736,10 @@
             if (Array.isArray(cfg.graphList)) {
                 graphList = cfg.graphList;
             }
+            if (Array.isArray(cfg.graphColumns)) {
+                graphColumns = cfg.graphColumns.map((col) => Array.isArray(col) ? col.slice() : []);
+            }
+            normalizeGraphLayout();
             if (cfg.timeWindow) {
                 timeWindowSelect.value = cfg.timeWindow;
                 const v = parseInt(cfg.timeWindow, 10);
@@ -1643,6 +1778,10 @@
                 }
             }
             if (cfg.varFormat && typeof cfg.varFormat === "object") varFormat = normalizeVarFormatConfig(cfg.varFormat);
+            if (cfg.seriesColors && typeof cfg.seriesColors === "object") {
+                seriesColorByName = { ...cfg.seriesColors };
+                seriesHueByName = {};
+            }
             if (cfg.arrayElemAssignment && typeof cfg.arrayElemAssignment === "object") arrayElemAssignment = cfg.arrayElemAssignment;
             if (cfg.lang) {
                 currentLang = cfg.lang;
@@ -1714,11 +1853,14 @@
         varGraphAssignment = {};
         historyCache = {};
         graphList = [];
+        graphColumns = [];
         alarms = {};
         activeAlarms.clear();
         computedVars = [];
         computedHistories = {};
         varFormat = {};
+        seriesColorByName = {};
+        seriesHueByName = {};
         arrayElemAssignment = {};
         arrayElemHistory = {};
         monitorPaneWidthPx = null;
@@ -2415,9 +2557,69 @@
         helpOverlay.style.display = "flex";
     });
     const docsBtn = document.getElementById("docsBtn");
-    if (docsBtn) {
-        docsBtn.addEventListener("click", () => {
-            window.open("/docs/", "_blank", "noopener,noreferrer");
+    const docsLangOverlay = document.getElementById("docsLangOverlay");
+    const docsLangCloseBtn = document.getElementById("docsLangCloseBtn");
+    const docsOpenEsBtn = document.getElementById("docsOpenEsBtn");
+    const docsOpenEnBtn = document.getElementById("docsOpenEnBtn");
+    const docsLangNotBuilt = document.getElementById("docsLangNotBuilt");
+
+    function closeDocsLangModal() {
+        if (docsLangOverlay) docsLangOverlay.style.display = "none";
+    }
+
+    async function refreshDocsLangAvailability() {
+        const tr = I18N[currentLang] || I18N.es;
+        let es = false;
+        let en = false;
+        try {
+            const r = await fetch("/api/docs_languages");
+            if (r.ok) {
+                const j = await r.json();
+                es = !!j.es;
+                en = !!j.en;
+            }
+        } catch (err) {
+            console.warn("docs_languages:", err);
+        }
+        if (docsOpenEsBtn) {
+            docsOpenEsBtn.style.display = es ? "" : "none";
+            docsOpenEsBtn.disabled = !es;
+        }
+        if (docsOpenEnBtn) {
+            docsOpenEnBtn.style.display = en ? "" : "none";
+            docsOpenEnBtn.disabled = !en;
+        }
+        if (docsLangNotBuilt) {
+            const none = !es && !en;
+            docsLangNotBuilt.style.display = none ? "block" : "none";
+            if (none && tr.docsNotBuiltMsg) docsLangNotBuilt.textContent = tr.docsNotBuiltMsg;
+        }
+    }
+
+    if (docsBtn && docsLangOverlay) {
+        docsBtn.addEventListener("click", async () => {
+            docsLangOverlay.style.display = "flex";
+            await refreshDocsLangAvailability();
+        });
+    }
+    if (docsLangCloseBtn) {
+        docsLangCloseBtn.addEventListener("click", closeDocsLangModal);
+    }
+    if (docsLangOverlay) {
+        docsLangOverlay.addEventListener("click", (e) => {
+            if (e.target === docsLangOverlay) closeDocsLangModal();
+        });
+    }
+    if (docsOpenEsBtn) {
+        docsOpenEsBtn.addEventListener("click", () => {
+            window.open("/docs/es/", "_blank", "noopener,noreferrer");
+            closeDocsLangModal();
+        });
+    }
+    if (docsOpenEnBtn) {
+        docsOpenEnBtn.addEventListener("click", () => {
+            window.open("/docs/en/", "_blank", "noopener,noreferrer");
+            closeDocsLangModal();
         });
     }
     document.getElementById("helpCloseBtn").addEventListener("click", () => {
@@ -2779,7 +2981,10 @@
             e.stopPropagation();
             const isVisible = monitorMenuPanel.style.display === "flex";
             monitorMenuPanel.style.display = isVisible ? "none" : "flex";
-            if (monitorFilterPanel && !isVisible) monitorFilterPanel.style.display = "none";
+            if (monitorFilterPanel && !isVisible) {
+                monitorFilterPanel.style.display = "none";
+                if (monitorFilterMenuBtn) monitorFilterMenuBtn.setAttribute("aria-expanded", "false");
+            }
             if (!isVisible) refreshAlarmListPanel();
         });
         document.addEventListener("click", (e) => {
@@ -2801,6 +3006,7 @@
             e.stopPropagation();
             const isVisible = monitorFilterPanel.style.display === "block";
             monitorFilterPanel.style.display = isVisible ? "none" : "block";
+            monitorFilterMenuBtn.setAttribute("aria-expanded", isVisible ? "false" : "true");
             if (monitorMenuPanel && !isVisible) monitorMenuPanel.style.display = "none";
             if (!isVisible && monitorFilterInput) {
                 try { monitorFilterInput.focus(); } catch (err) {}
@@ -2809,6 +3015,7 @@
         document.addEventListener("click", (e) => {
             if (!monitorFilterPanel.contains(e.target) && e.target !== monitorFilterMenuBtn) {
                 monitorFilterPanel.style.display = "none";
+                monitorFilterMenuBtn.setAttribute("aria-expanded", "false");
             }
         });
     }
@@ -2937,6 +3144,8 @@
             monitored: monitoredOrder.slice(),
             graphs: varGraphAssignment,
             graphList: graphList,
+            graphColumns: graphColumns.map((col) => col.slice()),
+            seriesColors: { ...seriesColorByName },
             timeWindow: timeWindowSelect.value,
             smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
             instance: portSelect ? portSelect.value : "",
@@ -2982,6 +3191,12 @@
         }
         if (cfg.graphs && typeof cfg.graphs === "object") varGraphAssignment = cfg.graphs;
         if (Array.isArray(cfg.graphList)) graphList = cfg.graphList;
+        if (Array.isArray(cfg.graphColumns)) graphColumns = cfg.graphColumns.map((col) => Array.isArray(col) ? col.slice() : []);
+        if (cfg.seriesColors && typeof cfg.seriesColors === "object") {
+            seriesColorByName = { ...cfg.seriesColors };
+            seriesHueByName = {};
+        }
+        normalizeGraphLayout();
         if (cfg.timeWindow) {
             timeWindowSelect.value = cfg.timeWindow;
             const v = parseInt(cfg.timeWindow, 10);
@@ -3825,6 +4040,7 @@
         monitoredOrder = [];
         varGraphAssignment = {};
         graphList = [];
+        graphColumns = [];
         arrayElemAssignment = {};
         alarms = {};
         activeAlarms.clear();
@@ -5099,6 +5315,64 @@
         return v.toFixed(4);
     }
 
+    function hslToHex(h, s, l) {
+        const hue = ((Number(h) % 360) + 360) % 360;
+        const sat = Math.max(0, Math.min(100, Number(s))) / 100;
+        const lig = Math.max(0, Math.min(100, Number(l))) / 100;
+        const c = (1 - Math.abs(2 * lig - 1)) * sat;
+        const hp = hue / 60;
+        const x = c * (1 - Math.abs((hp % 2) - 1));
+        let r = 0, g = 0, b = 0;
+        if (hp >= 0 && hp < 1) { r = c; g = x; b = 0; }
+        else if (hp < 2) { r = x; g = c; b = 0; }
+        else if (hp < 3) { r = 0; g = c; b = x; }
+        else if (hp < 4) { r = 0; g = x; b = c; }
+        else if (hp < 5) { r = x; g = 0; b = c; }
+        else { r = c; g = 0; b = x; }
+        const m = lig - c / 2;
+        const toHex = (v) => {
+            const n = Math.round((v + m) * 255);
+            return Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
+        };
+        return "#" + toHex(r) + toHex(g) + toHex(b);
+    }
+
+    function ensureSeriesColor(name, forceNew = false) {
+        const key = String(name || "").trim();
+        if (!key) return TRACE_COLORS[0];
+        if (!forceNew && seriesColorByName[key]) return seriesColorByName[key];
+        if (forceNew) {
+            delete seriesColorByName[key];
+            delete seriesHueByName[key];
+        }
+        const usedHues = Object.entries(seriesHueByName)
+            .filter(([n]) => n !== key)
+            .map(([, h]) => Number(h))
+            .filter((h) => Number.isFinite(h));
+        let pickedHue = null;
+        for (let i = 0; i < 80; i++) {
+            const h = Math.floor(Math.random() * 360);
+            const farEnough = usedHues.every((uh) => {
+                const d = Math.abs(h - uh);
+                return Math.min(d, 360 - d) >= 22;
+            });
+            if (!farEnough) continue;
+            pickedHue = h;
+            break;
+        }
+        if (!Number.isFinite(pickedHue)) {
+            pickedHue = Math.floor(Math.random() * 360);
+        }
+        const color = hslToHex(pickedHue, 78, 58);
+        seriesColorByName[key] = color;
+        seriesHueByName[key] = pickedHue;
+        return color;
+    }
+
+    function getSeriesColor(name) {
+        return ensureSeriesColor(name, false);
+    }
+
     // --- History polling ---
 
     function isArrayElem(name) { return name.includes("[") && name.endsWith("]"); }
@@ -5655,11 +5929,10 @@
                 ensureNewGraphDropTarget();
             });
             el.addEventListener("dragend", () => {
-                const addSlot = document.getElementById("plotAddSlot");
-                if (addSlot) {
-                    addSlot.classList.remove("plot-add-over");
-                    addSlot.remove();
-                }
+                plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
+                    slot.classList.remove("plot-add-over");
+                    slot.style.display = "none";
+                });
                 if (graphList.length === 0 && plotEmpty) {
                     plotEmpty.classList.remove("plot-add-over");
                     if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
@@ -5883,11 +6156,10 @@
                 ensureNewGraphDropTarget();
             };
             const onDragEnd = () => {
-                const addSlot = document.getElementById("plotAddSlot");
-                if (addSlot) {
-                    addSlot.classList.remove("plot-add-over");
-                    addSlot.remove();
-                }
+                plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
+                    slot.classList.remove("plot-add-over");
+                    slot.style.display = "none";
+                });
                 if (graphList.length === 0 && plotEmpty) {
                     plotEmpty.classList.remove("plot-add-over");
                     if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
@@ -6552,11 +6824,10 @@
                     ensureNewGraphDropTarget();
                 });
                 row.addEventListener("dragend", () => {
-                    const addSlot = document.getElementById("plotAddSlot");
-                    if (addSlot) {
-                        addSlot.classList.remove("plot-add-over");
-                        addSlot.remove();
-                    }
+                    plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
+                        slot.classList.remove("plot-add-over");
+                        slot.style.display = "none";
+                    });
                     if (graphList.length === 0 && plotEmpty) {
                         plotEmpty.classList.remove("plot-add-over");
                         if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
@@ -6591,8 +6862,10 @@
                         addGraph();
                         const newGid = graphList[graphList.length - 1];
                         varGraphAssignment[dName] = newGid;
+                        ensureSeriesColor(dName, true);
                     } else {
                         varGraphAssignment[dName] = sel.value || "";
+                        if (sel.value) ensureSeriesColor(dName, true);
                         pruneEmptyGraphs();
                     }
                     if (isPlaybackMode() && sel.value && sel.value !== "__new__") {
@@ -7445,12 +7718,9 @@
             const name = el.dataset.name;
             const g = varGraphAssignment[name] || "";
             if (g) {
-                const idx = graphList.indexOf(g);
-                if (idx >= 0) {
-                    const c = GRAPH_ACCENT[idx % GRAPH_ACCENT.length];
-                    el.style.borderColor = c;
-                    el.style.backgroundColor = c + "1a";
-                }
+                const c = getSeriesColor(name);
+                el.style.borderColor = c;
+                el.style.backgroundColor = c + "1a";
             }
             const icon = el.querySelector(".mon-alarm-icon");
             if (icon) icon.style.display = alarms[name] ? "" : "none";
@@ -7962,23 +8232,106 @@
     }
 
     function nextGraphId() {
-        for (let i = 1; i <= MAX_GRAPHS + 10; i++) {
+        for (let i = 1; i <= MAX_GRAPHS + 20; i++) {
             const id = "g" + i;
             if (!graphList.includes(id)) return id;
         }
         return "g" + (graphList.length + 1);
     }
 
+    function flattenGraphColumns() {
+        const flat = [];
+        const seen = new Set();
+        for (const col of graphColumns) {
+            if (!Array.isArray(col)) continue;
+            for (const gid of col) {
+                if (!gid || seen.has(gid)) continue;
+                seen.add(gid);
+                flat.push(gid);
+            }
+        }
+        return flat;
+    }
+
+    function normalizeGraphLayout() {
+        // Normalizar IDs válidos (únicos) y capacidad global.
+        const orderedIds = [];
+        const seenInput = new Set();
+        for (const gid of Array.isArray(graphList) ? graphList : []) {
+            if (!gid || seenInput.has(gid)) continue;
+            seenInput.add(gid);
+            orderedIds.push(gid);
+            if (orderedIds.length >= MAX_GRAPHS) break;
+        }
+        const validSet = new Set(orderedIds);
+
+        // Importante: preservar la topología existente de columnas y filas
+        // (no reempaquetar), para que "derecha" siga significando "nueva columna".
+        const normalizedCols = [];
+        const seenPlaced = new Set();
+        if (Array.isArray(graphColumns)) {
+            for (const rawCol of graphColumns) {
+                if (normalizedCols.length >= MAX_GRAPH_COLUMNS) break;
+                if (!Array.isArray(rawCol)) continue;
+                const col = [];
+                for (const gid of rawCol) {
+                    if (!validSet.has(gid) || seenPlaced.has(gid)) continue;
+                    col.push(gid);
+                    seenPlaced.add(gid);
+                    if (col.length >= MAX_GRAPH_ROWS) break;
+                }
+                if (col.length > 0) normalizedCols.push(col);
+            }
+        }
+
+        // Si vienen IDs en graphList que no están en columnas, anexarlos sin
+        // romper la topología existente (rellenando al final).
+        for (const gid of orderedIds) {
+            if (seenPlaced.has(gid)) continue;
+            let col = normalizedCols[normalizedCols.length - 1];
+            if (!col || col.length >= MAX_GRAPH_ROWS) {
+                if (normalizedCols.length >= MAX_GRAPH_COLUMNS) break;
+                col = [];
+                normalizedCols.push(col);
+            }
+            col.push(gid);
+            seenPlaced.add(gid);
+        }
+
+        graphColumns = normalizedCols;
+        graphList = flattenGraphColumns();
+    }
+
+    function addGraphAt(mode, columnIndex) {
+        normalizeGraphLayout();
+        if (graphList.length >= MAX_GRAPHS) return null;
+        const gid = nextGraphId();
+        if (mode === "right") {
+            if (graphColumns.length >= MAX_GRAPH_COLUMNS) return null;
+            graphColumns.push([gid]);
+        } else {
+            if (graphColumns.length === 0) graphColumns.push([]);
+            let targetCol = Number.isFinite(columnIndex) ? Math.max(0, Math.min(graphColumns.length - 1, columnIndex)) : (graphColumns.length - 1);
+            if (!Array.isArray(graphColumns[targetCol])) graphColumns[targetCol] = [];
+            // Inserción inferior estricta: solo en la columna objetivo.
+            // Si está llena, no se crea gráfica en otra columna automáticamente.
+            if (graphColumns[targetCol].length >= MAX_GRAPH_ROWS) return null;
+            graphColumns[targetCol].push(gid);
+        }
+        graphList = flattenGraphColumns();
+        return gid;
+    }
+
     function addGraph() {
-        if (graphList.length >= MAX_GRAPHS) return;
-        graphList.push(nextGraphId());
+        const gid = addGraphAt("bottom", graphColumns.length - 1);
+        if (!gid) return;
         saveConfig();
         rebuildPlotArea();
         rebuildMonitorList();
         renderPlots();
     }
 
-    function handleNewGraphDrop(name) {
+    function handleNewGraphDrop(name, opts = {}) {
         if (!name) return;
         const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
         for (const n of namesToAssign) {
@@ -7989,17 +8342,21 @@
         }
         if (namesToAssign.length) sendMonitored();
         if (graphList.length >= MAX_GRAPHS) return;
-        addGraph();
-        const newGid = graphList[graphList.length - 1];
+        const mode = opts.mode === "right" ? "right" : "bottom";
+        const newGid = addGraphAt(mode, opts.columnIndex);
+        if (!newGid) return;
         for (const n of namesToAssign) {
             if (isArrayElem(n)) {
                 arrayElemAssignment[n] = newGid;
+                ensureSeriesColor(n, true);
             } else {
                 varGraphAssignment[n] = newGid;
+                ensureSeriesColor(n, true);
                 if (isPlaybackMode()) fetchFullHistoryIfNeeded(n);
             }
             browserSelection.delete(n);
         }
+        rebuildPlotArea();
         pruneEmptyGraphs();
         rebuildMonitorList();
         saveConfig();
@@ -8007,70 +8364,45 @@
     }
 
     function ensureNewGraphDropTarget() {
-        if (graphList.length >= MAX_GRAPHS) return;
-
-        // Sin gráficos: toda el área de gráficos es zona de drop (plotEmpty ocupa todo)
-        if (graphList.length === 0) {
-            if (!plotEmpty._dropZoneAttached) {
-                plotEmpty._dropZoneAttached = true;
-                plotEmpty.ondragover = (e) => {
-                    if (!e.dataTransfer) return;
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = "copy";
-                    plotEmpty.classList.add("plot-add-over");
-                    if (!plotEmpty.dataset.defaultText) plotEmpty.dataset.defaultText = plotEmpty.textContent;
-                    plotEmpty.textContent = (I18N[currentLang] || I18N.es).newGraphDropText;
-                };
-                plotEmpty.ondragleave = () => {
-                    plotEmpty.classList.remove("plot-add-over");
-                    if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
-                };
-                plotEmpty.ondrop = (e) => {
-                    if (!e.dataTransfer) return;
-                    e.preventDefault();
-                    plotEmpty.classList.remove("plot-add-over");
-                    if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
-                    const name = e.dataTransfer.getData("text/plain");
-                    handleNewGraphDrop(name);
-                };
-            }
-            plotEmpty.style.display = "flex";
-            return;
+        plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
+            slot.style.display = slot.dataset.addEnabled === "1" ? "flex" : "none";
+        });
+        if (!plotEmpty._dropZoneAttached) {
+            plotEmpty._dropZoneAttached = true;
+            plotEmpty.ondragover = (e) => {
+                if (!e.dataTransfer) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                plotEmpty.classList.add("plot-add-over");
+                if (!plotEmpty.dataset.defaultText) plotEmpty.dataset.defaultText = plotEmpty.textContent;
+                plotEmpty.textContent = (I18N[currentLang] || I18N.es).newGraphDropText;
+            };
+            plotEmpty.ondragleave = () => {
+                plotEmpty.classList.remove("plot-add-over");
+                if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
+            };
+            plotEmpty.ondrop = (e) => {
+                if (!e.dataTransfer) return;
+                e.preventDefault();
+                plotEmpty.classList.remove("plot-add-over");
+                if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
+                const name = e.dataTransfer.getData("text/plain");
+                handleNewGraphDrop(name, { mode: "bottom", columnIndex: 0 });
+            };
         }
-
-        // Con gráficos: franja "suelte aquí" como hasta ahora
-        let addSlot = document.getElementById("plotAddSlot");
-        if (!addSlot) {
-            addSlot = document.createElement("div");
-            addSlot.id = "plotAddSlot";
-            addSlot.className = "plot-add-slot";
-            addSlot.textContent = (I18N[currentLang] || I18N.es).newGraphDropText;
-            plotArea.appendChild(addSlot);
-        }
-        addSlot.style.display = "flex";
-
-        addSlot.ondragover = (e) => {
-            if (!e.dataTransfer) return;
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "copy";
-            addSlot.classList.add("plot-add-over");
-        };
-        addSlot.ondragleave = () => {
-            addSlot.classList.remove("plot-add-over");
-        };
-        addSlot.ondrop = (e) => {
-            if (!e.dataTransfer) return;
-            e.preventDefault();
-            addSlot.classList.remove("plot-add-over");
-            const name = e.dataTransfer.getData("text/plain");
-            handleNewGraphDrop(name);
-        };
     }
 
     function removeGraph(gid) {
-        graphList = graphList.filter(g => g !== gid);
+        normalizeGraphLayout();
+        graphColumns = graphColumns
+            .map((col) => col.filter((g) => g !== gid))
+            .filter((col) => col.length > 0);
+        graphList = flattenGraphColumns();
         for (const name of monitoredNames) {
             if (varGraphAssignment[name] === gid) varGraphAssignment[name] = "";
+        }
+        for (const [eName, g] of Object.entries(arrayElemAssignment)) {
+            if (g === gid) delete arrayElemAssignment[eName];
         }
         const containerEl = document.getElementById("plotContainer_" + gid);
         if (containerEl && plotInstances[gid]) Plotly.purge(containerEl);
@@ -8082,6 +8414,7 @@
     }
 
     function rebuildPlotArea() {
+        normalizeGraphLayout();
         Object.keys(plotInstances).forEach((gid) => {
             const el = document.getElementById("plotContainer_" + gid);
             if (el) Plotly.purge(el);
@@ -8093,101 +8426,193 @@
             if (id === "plotEmpty" || id === "toggleAdvancedPlotBtn") return;
             plotArea.removeChild(child);
         });
-        const frag = document.createDocumentFragment();
+        const tr = I18N[currentLang] || I18N.es;
+        const totalGraphs = graphList.length;
+        const canAddMore = totalGraphs < MAX_GRAPHS;
 
-        graphList.forEach((gid, idx) => {
-            const slot = document.createElement("div");
-            slot.id = "plotSlot_" + gid;
-            slot.className = "plot-slot";
-            slot.style.display = "flex";
+        // Sin gráficos: no insertar grid vacío (ocuparía flex:1 y dejaría plotEmpty a media altura).
+        if (totalGraphs === 0) {
+            if (toggleAdvancedPlotBtn && toggleAdvancedPlotBtn.parentElement !== plotArea) {
+                plotArea.appendChild(toggleAdvancedPlotBtn);
+            }
+            if (plotEmpty) plotEmpty.style.display = "flex";
+            return;
+        }
 
-            const header = document.createElement("div");
-            header.className = "plot-slot-header";
+        const grid = document.createElement("div");
+        grid.id = "plotGrid";
+        grid.className = "plot-grid";
+        const mainRow = document.createElement("div");
+        mainRow.className = "plot-grid-main";
 
-            const dot = document.createElement("span");
-            dot.className = "plot-dot";
-            dot.style.backgroundColor = GRAPH_ACCENT[idx % GRAPH_ACCENT.length];
+        graphColumns.forEach((col, colIdx) => {
+            const colEl = document.createElement("div");
+            colEl.className = "plot-column";
+            colEl.dataset.colIndex = String(colIdx);
 
-            const label = document.createElement("span");
-            label.className = "plot-slot-title";
-            const tr = I18N[currentLang] || I18N.es;
-            label.textContent = " " + tr.graphTitle + " " + (idx + 1);
+            col.forEach((gid) => {
+                const idx = graphList.indexOf(gid);
+                const slot = document.createElement("div");
+                slot.id = "plotSlot_" + gid;
+                slot.className = "plot-slot";
+                slot.style.display = "flex";
 
-            const removeBtn = document.createElement("button");
-            removeBtn.className = "btn-plot-remove";
-            removeBtn.textContent = "\u00D7";
-            removeBtn.title = (I18N[currentLang] || I18N.es).removeGraphTitle;
-            removeBtn.addEventListener("click", () => removeGraph(gid));
+                const header = document.createElement("div");
+                header.className = "plot-slot-header";
 
-            header.appendChild(dot);
-            header.appendChild(label);
-            header.appendChild(removeBtn);
+                const dot = document.createElement("span");
+                dot.className = "plot-dot";
+                dot.style.backgroundColor = GRAPH_ACCENT[Math.max(0, idx) % GRAPH_ACCENT.length];
 
-            const container = document.createElement("div");
-            container.className = "plot-container";
-            container.id = "plotContainer_" + gid;
+                const label = document.createElement("span");
+                label.className = "plot-slot-title";
+                label.textContent = " " + tr.graphTitle + " " + (Math.max(0, idx) + 1);
 
-            slot.appendChild(header);
-            slot.appendChild(container);
-            frag.appendChild(slot);
+                const removeBtn = document.createElement("button");
+                removeBtn.className = "btn-plot-remove";
+                removeBtn.textContent = "\u00D7";
+                removeBtn.title = tr.removeGraphTitle;
+                removeBtn.addEventListener("click", () => removeGraph(gid));
 
-            // Drag & drop: soltar variables en un grafico concreto
-            slot.addEventListener("dragover", (e) => {
+                header.appendChild(dot);
+                header.appendChild(label);
+                header.appendChild(removeBtn);
+
+                const container = document.createElement("div");
+                container.className = "plot-container";
+                container.id = "plotContainer_" + gid;
+
+                slot.appendChild(header);
+                slot.appendChild(container);
+                colEl.appendChild(slot);
+
+                slot.addEventListener("dragover", (e) => {
+                    if (!e.dataTransfer) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "copy";
+                    slot.classList.add("plot-drop-over");
+                });
+                slot.addEventListener("dragleave", () => {
+                    slot.classList.remove("plot-drop-over");
+                });
+                slot.addEventListener("drop", (e) => {
+                    if (!e.dataTransfer) return;
+                    e.preventDefault();
+                    slot.classList.remove("plot-drop-over");
+                    const name = e.dataTransfer.getData("text/plain");
+                    if (!name) return;
+                    const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
+                    for (const n of namesToAssign) {
+                        if (!monitoredNames.has(n) && !isArrayElem(n) && !isArincDerivedName(n)) {
+                            ensureArincBaseMonitored(n);
+                            ensureMonitoredName(n);
+                        }
+                    }
+                    if (namesToAssign.length) sendMonitored();
+                    for (const n of namesToAssign) {
+                        if (isArrayElem(n)) {
+                            arrayElemAssignment[n] = gid;
+                            ensureSeriesColor(n, true);
+                        } else {
+                            varGraphAssignment[n] = gid;
+                            ensureSeriesColor(n, true);
+                            if (isPlaybackMode()) fetchFullHistoryIfNeeded(n);
+                        }
+                        browserSelection.delete(n);
+                    }
+                    pruneEmptyGraphs();
+                    rebuildMonitorList();
+                    saveConfig();
+                    schedulePlotRender();
+                });
+            });
+
+            mainRow.appendChild(colEl);
+        });
+
+        if (canAddMore && graphColumns.length > 0 && graphColumns.length < MAX_GRAPH_COLUMNS) {
+            const addRight = document.createElement("div");
+            addRight.className = "plot-add-slot plot-add-slot-right";
+            addRight.dataset.addEnabled = "1";
+            addRight.textContent = "Nueva columna";
+            addRight.addEventListener("dragover", (e) => {
                 if (!e.dataTransfer) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "copy";
-                slot.classList.add("plot-drop-over");
+                addRight.classList.add("plot-add-over");
             });
-            slot.addEventListener("dragleave", () => {
-                // Cualquier salida limpia el estado visual
-                slot.classList.remove("plot-drop-over");
-            });
-            slot.addEventListener("drop", (e) => {
+            addRight.addEventListener("dragleave", () => addRight.classList.remove("plot-add-over"));
+            addRight.addEventListener("drop", (e) => {
                 if (!e.dataTransfer) return;
                 e.preventDefault();
-                slot.classList.remove("plot-drop-over");
+                e.stopPropagation();
+                if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+                addRight.classList.remove("plot-add-over");
                 const name = e.dataTransfer.getData("text/plain");
-                if (!name) return;
-                const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
-                for (const n of namesToAssign) {
-                    if (!monitoredNames.has(n) && !isArrayElem(n) && !isArincDerivedName(n)) {
-                        ensureArincBaseMonitored(n);
-                        ensureMonitoredName(n);
-                    }
-                }
-                if (namesToAssign.length) sendMonitored();
-                for (const n of namesToAssign) {
-                    if (isArrayElem(n)) {
-                        arrayElemAssignment[n] = gid;
-                    } else {
-                        varGraphAssignment[n] = gid;
-                        if (isPlaybackMode()) fetchFullHistoryIfNeeded(n);
-                    }
-                    browserSelection.delete(n);
-                }
-                pruneEmptyGraphs();
-                rebuildMonitorList();
-                saveConfig();
-                schedulePlotRender();
+                handleNewGraphDrop(name, { mode: "right" });
             });
-        });
+            mainRow.appendChild(addRight);
+        }
 
-        plotArea.insertBefore(frag, plotEmpty);
+        grid.appendChild(mainRow);
+
+        if (canAddMore && graphColumns.length > 0) {
+            const bottomRow = document.createElement("div");
+            bottomRow.className = "plot-add-bottom-row";
+            graphColumns.forEach((col, colIdx) => {
+                const addBottom = document.createElement("div");
+                addBottom.className = "plot-add-slot plot-add-slot-bottom plot-add-slot-under-col";
+                addBottom.dataset.colIndex = String(colIdx);
+                addBottom.textContent = `Abajo C${colIdx + 1}`;
+                if (col.length >= MAX_GRAPH_ROWS) {
+                    addBottom.dataset.addEnabled = "0";
+                    addBottom.style.display = "none";
+                } else {
+                    addBottom.dataset.addEnabled = "1";
+                    addBottom.addEventListener("dragover", (e) => {
+                        if (!e.dataTransfer) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "copy";
+                        addBottom.classList.add("plot-add-over");
+                    });
+                    addBottom.addEventListener("dragleave", () => addBottom.classList.remove("plot-add-over"));
+                    addBottom.addEventListener("drop", (e) => {
+                        if (!e.dataTransfer) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+                        addBottom.classList.remove("plot-add-over");
+                        const name = e.dataTransfer.getData("text/plain");
+                        handleNewGraphDrop(name, { mode: "bottom", columnIndex: colIdx });
+                    });
+                }
+                bottomRow.appendChild(addBottom);
+            });
+            if (graphColumns.length < MAX_GRAPH_COLUMNS) {
+                const spacer = document.createElement("div");
+                spacer.className = "plot-add-bottom-spacer";
+                bottomRow.appendChild(spacer);
+            }
+            grid.appendChild(bottomRow);
+        }
+
+        plotArea.insertBefore(grid, plotEmpty);
         if (toggleAdvancedPlotBtn && toggleAdvancedPlotBtn.parentElement !== plotArea) {
             plotArea.appendChild(toggleAdvancedPlotBtn);
         }
 
         if (plotEmpty) plotEmpty.style.display = graphList.length > 0 ? "none" : "flex";
-
-        const addSlot = document.getElementById("plotAddSlot");
-        if (addSlot) addSlot.remove();
     }
 
     function pruneEmptyGraphs() {
+        normalizeGraphLayout();
         const empty = graphList.filter(gid => getVarsForGraph(gid).length === 0);
         if (empty.length === 0) return;
         for (const gid of empty) {
-            graphList = graphList.filter(g => g !== gid);
+            graphColumns = graphColumns
+                .map((col) => col.filter((g) => g !== gid))
+                .filter((col) => col.length > 0);
+            graphList = flattenGraphColumns();
             const cEl = document.getElementById("plotContainer_" + gid);
             if (cEl && plotInstances[gid]) Plotly.purge(cEl);
             delete plotInstances[gid];
@@ -8415,7 +8840,7 @@
             let yMax = -Infinity;
             const useVsRef = plotVsRef && isReplayMode() && offlineDataset && offlineDataset.samples && offlineDataset.samples.length > 0;
 
-            function addTraceFromHist(hist, displayName, rawVarName, colorIdx, dash) {
+            function addTraceFromHist(hist, displayName, rawVarName, dash) {
                 if (!hist || !hist.timestamps || hist.timestamps.length === 0) return;
                 let xs = hist.timestamps.slice();
                 let ys = hist.values.slice();
@@ -8449,7 +8874,7 @@
                     name: displayName,
                     meta: { varName: rawVarName || displayName },
                     line: {
-                        color: TRACE_COLORS[colorIdx % TRACE_COLORS.length],
+                        color: getSeriesColor(rawVarName || displayName),
                         width: 1.5,
                         shape: smoothWindow > 1 ? "linear" : "hv",
                         dash: dash || null,
@@ -8465,10 +8890,10 @@
                     const isImposed = impositionNames.has(name);
                     const refSeries = getRefSeriesFromOfflineDataset(name);
                     if (refSeries && !isImposed) {
-                        addTraceFromHist(refSeries, name + "_ref", name, idx, "dash");
+                        addTraceFromHist(refSeries, name + "_ref", name, "dash");
                     }
                     if (hist && hist.timestamps && hist.timestamps.length > 0) {
-                        addTraceFromHist(hist, name + " ✕", name, idx, null);
+                        addTraceFromHist(hist, name + " ✕", name, null);
                     } else {
                         if (isPlaybackMode()) fetchFullHistoryIfNeeded(name);
                     }
@@ -8477,7 +8902,7 @@
                         if (isPlaybackMode()) fetchFullHistoryIfNeeded(name);
                         return;
                     }
-                    addTraceFromHist(hist, `${name} ✕`, name, idx, null);
+                    addTraceFromHist(hist, `${name} ✕`, name, null);
                 }
             });
 
@@ -9096,6 +9521,10 @@
 
         if (e.key === "Escape") {
             if (helpOverlay.style.display === "flex") { helpOverlay.style.display = "none"; return; }
+            if (docsLangOverlay && docsLangOverlay.style.display === "flex") {
+                closeDocsLangModal();
+                return;
+            }
             dismissAlarmBanner();
             return;
         }

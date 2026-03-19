@@ -1,0 +1,46 @@
+# Frontend
+
+The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `index.html`, `app.js` (main logic) and `style.css`. It uses **Plotly.js** for charts.
+
+## General structure of app.js
+
+- **IIFE**: All code runs inside an anonymous function on load to avoid polluting the global scope.
+- **Global state** (variables in the IIFE scope): `monitoredNames`, `monitoredOrder`, `varGraphAssignment`, `arrayElemAssignment`, `graphList`, `historyCache`, `arrayElemHistory`, `plotInstances`, `alarms`, `computedVars`, `appMode`, `offlineDataset`, etc.
+- **Initialization**: At the end of the script, `loadConfig()`, `pruneArincDerivedFromMonitored()`, `applyTheme()`, `applyLanguage()`, then event listeners, plot area `ResizeObserver`, and `rebuildPlotArea()`. No React/Vue; plain DOM and callbacks.
+
+## Three columns
+
+1. **Column 1 (variable browser)**: Known variables (`knownVarNames`), filter, optional grouping, checkboxes to add to "monitor" or select for drag. Drag & drop to column 2 or onto a chart.
+2. **Column 2 (monitor)**: Live variables with current value. Order from `monitoredOrder`. Each row can assign the variable to a chart (`varGraphAssignment[name] = gid`). Monitored variables are sent to the backend via WebSocket (`monitored`).
+3. **Column 3 (charts)**: Plotly area. Slots per chart (`graphList`: IDs `g1`, `g2`, ...). Each slot has `#plotContainer_<gid>`. Variables assigned to a chart come from `varGraphAssignment` and `arrayElemAssignment`; **getVarsForGraph(gid)** returns names for that `gid`.
+
+## Live data flow (WebSocket)
+
+- On connect, the frontend sends the monitored list (`monitored`) and the backend sends `vars_update` snapshots.
+- The message handler updates `historyCache` and `arrayElemHistory`, then calls **schedulePlotRender()**.
+- **schedulePlotRender()**: If not paused and throttle allows (adaptive load), queues **requestAnimationFrame** → **renderPlots()**.
+
+## Charts: key functions
+
+- **rebuildPlotArea()**: Purge Plotly from existing containers, clear the area (except `#plotEmpty`), for each `gid` in `graphList` create a slot (header + `#plotContainer_<gid>`). Insert slots before `plotEmpty`. If there is at least one chart, hide `plotEmpty` so the grid fills height; if none, show `plotEmpty` (drop zone for new chart).
+- **renderPlots()**: For each `gid`, get variables with **getVarsForGraph(gid)**, build traces from `historyCache` / `arrayElemHistory` (time window from `timeWindowSelect`), optional smoothing, then `Plotly.newPlot` or `Plotly.react`. Updates `plotEmpty` visibility and render stats. **Second paint after F5**: the first time `renderPlots()` finishes with `graphList.length > 0`, schedule one extra **schedulePlotRender()** at 500 ms (`__plotSecondPaintScheduled`) so curves redraw once WebSocket data has arrived.
+- **getVarsForGraph(gid)**: Names assigned to `gid`: entries in `monitoredNames` with `varGraphAssignment[name] === gid`, plus ARINC-derived names pointing to `gid`, plus `arrayElemAssignment` entries for `gid`.
+
+## Persistence (localStorage)
+
+- **saveConfig()** / **loadConfig()**: Store and load under `varmon_config` monitored list, `varGraphAssignment`, `graphList`, time window, theme, language, mode (live/offline/replay), recording paths, etc. On load, `rebuildPlotArea()` runs at end of init so chart slots exist immediately.
+
+## Modes: live, analysis and hybrid replay
+
+- **Live**: Data via WebSocket from the backend (SHM/UDS). UDS instance selector, Rel act (`update_ratio`), recording, alarms.
+- **Offline (analysis)**: Load TSV recordings (server or local file). Frontend requests time windows via API (`/api/recordings/{filename}/window` or `window_batch`) and fills `historyCache` / `arrayElemHistory`. `offlineDataset`, `offlineRecordingName`, segments, scrubber and playback controls are specific to this mode.
+- **Replay (hybrid)**: WebSocket stays on for `vars_names`/`vars_update` from SHM while using a TSV as a time reference. Variable list is the union of backend + TSV. Only TSV variables marked **impose** continuously write to SHM from TSV values (with `Δt`/`Δv` offsets); non-imposed TSV variables behave like normal SHM variables.
+
+## Chart resize
+
+- A **ResizeObserver** watches `#plotArea`. On size change, **Plotly.relayout** each chart container to current `getBoundingClientRect()`.
+
+## Shortcuts and more
+
+- Keyboard: Escape (close overlays), Space (pause/resume charts), Ctrl+Z / Ctrl+Y (undo/redo layout), R (record), S (screenshot), etc.
+- Advanced admin: overlay with config paths, recordings, server state; "Save changes" applies `web_port` and `web_port_scan_max` (`/api/admin/runtime_config`). Port fields highlight green until saved.

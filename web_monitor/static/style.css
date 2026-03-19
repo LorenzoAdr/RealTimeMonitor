@@ -628,8 +628,20 @@ main {
 
 .col-monitor-header {
     position: relative;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    gap: 0;
+}
+
+.col-monitor-header-top {
+    display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    position: relative;
 }
 
 .monitor-loading-indicator {
@@ -646,24 +658,19 @@ main {
     margin-left: auto;
 }
 
-.monitor-filter-menu-wrap {
-    position: relative;
-    display: inline-flex;
+/* Filtro de monitor: segunda fila de la cabecera (no panel flotante) */
+.monitor-filter-expand {
+    width: 100%;
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+    margin-top: 6px;
 }
 
-.monitor-filter-panel {
-    position: absolute;
-    top: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin-top: 4px;
-    padding: 8px 10px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
-    z-index: 100;
-    width: min(260px, calc(100vw - 32px));
+.btn-monitor-filter-toggle[aria-expanded="true"] {
+    background: rgba(108, 140, 255, 0.22);
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 .monitor-menu-panel {
@@ -1230,14 +1237,12 @@ main {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
 }
-.monitor-filter-panel .monitor-toolbar {
-    padding: 0;
+.monitor-filter-expand .monitor-toolbar.monitor-toolbar-inline {
+    padding: 2px 0 0;
     border-bottom: none;
     background: transparent;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
 }
+
 .monitor-filter-input {
     flex: 1 1 140px;
     min-width: 120px;
@@ -1249,20 +1254,17 @@ main {
     background: var(--bg);
     color: var(--text);
 }
-.monitor-filter-panel .monitor-filter-input {
-    flex: 1 1 auto;
+
+.monitor-filter-expand .monitor-filter-input {
+    flex: 1 1 160px;
     max-width: none;
-    width: 100%;
+    min-width: 100px;
 }
-.monitor-filter-panel .btn-small {
-    width: 100%;
-}
-.monitor-filter-panel .monitor-toolbar-sep {
-    display: none;
-    margin: 0;
-}
-.monitor-filter-panel .monitor-filter-status {
-    text-align: left;
+
+.monitor-filter-expand .monitor-filter-status {
+    flex: 1 1 120px;
+    text-align: right;
+    min-width: 0;
 }
 .monitor-filter-input::placeholder { color: var(--text-dim); }
 .monitor-toolbar-sep {
@@ -1899,6 +1901,40 @@ body.monitor-compact .stats-panel {
     position: relative;
 }
 
+.plot-grid {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 6px;
+}
+
+.plot-grid-main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.plot-add-bottom-row {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.plot-column {
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
 .btn-advanced-plot-toggle {
     position: absolute;
     right: 10px;
@@ -1913,9 +1949,10 @@ body.monitor-compact .stats-panel {
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    border-bottom: 1px solid var(--border);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
 }
-.plot-slot:last-child { border-bottom: none; }
 
 .plot-slot-header {
     font-size: 0.7rem;
@@ -1935,8 +1972,8 @@ body.monitor-compact .stats-panel {
 }
 
 .plot-add-slot {
-    margin: 10px 6px;
-    padding: 10px 14px;
+    margin: 0;
+    padding: 8px 10px;
     border-radius: 6px;
     border: 1px dashed var(--accent);
     background: rgba(0, 200, 255, 0.06);
@@ -1948,6 +1985,32 @@ body.monitor-compact .stats-panel {
     align-items: center;
     justify-content: center;
     cursor: copy;
+    min-height: 42px;
+    text-align: center;
+}
+
+.plot-add-slot-bottom {
+    flex: 0 0 auto;
+}
+
+.plot-add-slot-under-col {
+    flex: 1 1 0%;
+    min-width: 0;
+}
+
+.plot-add-slot-right {
+    flex: 0 0 130px;
+    min-width: 100px;
+    min-height: 0;
+    white-space: normal;
+    position: relative;
+    z-index: 3;
+}
+
+.plot-add-bottom-spacer {
+    flex: 0 0 130px;
+    min-width: 100px;
+    pointer-events: none;
 }
 
 .plot-add-slot.plot-add-over {
@@ -2477,6 +2540,48 @@ body.monitor-compact .stats-panel {
     letter-spacing: 0.3px;
 }
 .help-modal-body h3:first-child { margin-top: 0; }
+.help-modal-body .help-intro {
+    margin-bottom: 12px;
+    color: var(--text);
+    font-size: 0.84rem;
+    line-height: 1.55;
+}
+.help-modal-body .help-mode-title {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+}
+.help-modal-body .help-footer {
+    margin-top: 18px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 0.78rem;
+}
+
+/* Selector de idioma de documentación MkDocs */
+.docs-lang-modal {
+    max-width: 440px;
+    width: min(92vw, 440px);
+}
+.docs-lang-body {
+    padding: 16px 20px 22px;
+}
+.docs-lang-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 4px;
+}
+.docs-lang-buttons .btn-primary {
+    flex: 1 1 140px;
+    min-width: 120px;
+    justify-content: center;
+}
+.docs-lang-not-built {
+    margin: 8px 0 0;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+}
 .help-modal-body p { margin-bottom: 8px; }
 .help-modal-body ul {
     margin: 0 0 8px;

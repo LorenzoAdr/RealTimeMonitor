@@ -75,9 +75,17 @@ Para generar y ver esta documentación en HTML:
 
 ```bash
 pip install mkdocs mkdocs-material
-mkdocs serve
+mkdocs serve              # español (preview en http://localhost:8000)
+mkdocs serve -f mkdocs.en.yml   # inglés
 ```
 
-Abrir `http://localhost:8000`.
+Para generar los sitios estáticos que sirve el monitor:
 
-**Desde el propio monitor**: Si genera la documentación con `mkdocs build` (en la raíz del proyecto) y luego arranca el servidor del monitor, la documentación quedará servida en `/docs/`. En la cabecera del monitor hay un botón **Docs** que abre la documentación en una nueva pestaña.
+```bash
+mkdocs build              # salida en site/  → URL /docs/es/
+mkdocs build -f mkdocs.en.yml   # salida en site_en/  → URL /docs/en/
+```
+
+También puede usar el objetivo CMake `docs` (desde `build/`: `make docs`), que ejecuta ambos builds.
+
+**Desde el propio monitor**: Tras `mkdocs build` y `mkdocs build -f mkdocs.en.yml`, reinicie el servidor. La documentación queda en **`/docs/es/`** (español) y **`/docs/en/`** (inglés). La petición a **`/docs`** o **`/docs/`** redirige a `/docs/es/`. El botón **Docs** de la cabecera abre un selector de idioma y luego la guía MkDocs en una pestaña nueva.

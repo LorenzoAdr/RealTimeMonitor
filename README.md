@@ -1,91 +1,103 @@
-# VarMonitor - Monitor de Variables en Tiempo Real
+# VarMonitor — Real-time variable monitor
 
-Sistema de monitorización de variables en tiempo real para aplicaciones C++20. La comunicación entre la aplicación C++ y el monitor web usa **Unix Domain Sockets (UDS)** y **memoria compartida (SHM)** con semáforos POSIX. Interfaz web para visualización, gráficos, alarmas, grabación TSV y más.
+Real-time variable monitoring for C++20 applications. Communication between your C++ app and the web monitor uses **Unix Domain Sockets (UDS)** and **shared memory (SHM)** with POSIX semaphores. Web UI for visualization, charts, alarms, TSV recording, and more.
 
-## Documentación completa
+> **Spanish:** detailed docs in Spanish live under [`docs/`](docs/); this README is in English for the default GitHub landing page.
 
-La documentación detallada (arquitectura, protocolos UDS/SHM, backend Python, frontend, integración C++, resolución de problemas) está en el directorio **docs/** y se puede generar y consultar con [MkDocs](https://www.mkdocs.org/):
+## Full documentation
+
+Detailed docs are in **[docs/](docs/)** (Spanish) and **[docs_en/](docs_en/)** (English), built with [MkDocs](https://www.mkdocs.org/):
 
 ```bash
 pip install mkdocs mkdocs-material
-mkdocs serve
+mkdocs serve                    # Spanish preview
+mkdocs serve -f mkdocs.en.yml   # English preview
 ```
 
-Abrir **http://localhost:8000** para navegar por la documentación.
+Static build for the web monitor:
 
-- [Arquitectura](docs/architecture.md) — Componentes, flujo de datos, descubrimiento de instancias, tasas visual e interna.
-- [Instalación y configuración](docs/setup.md) — Requisitos, instalación rápida, `varmon.conf`.
-- [Backend (Python)](docs/backend.md) — Rutas, WebSocket, UdsBridge, ShmReader, alarmas y grabación.
-- [Frontend](docs/frontend.md) — Estructura de `app.js`, columnas, gráficos Plotly, estado y persistencia.
-- [Protocolos](docs/protocols.md) — Formato UDS, comandos, layout SHM, alarmas y grabación.
-- [Integración C++](docs/cpp-integration.md) — Enlazar libvarmonitor, uso básico, macros.
-- [Resolución de problemas](docs/troubleshooting.md) — WSL/semáforos, "no conecta", gráficos vacíos.
+```bash
+mkdocs build
+mkdocs build -f mkdocs.en.yml
+```
+
+Outputs: `site/` → **`/docs/es/`**, `site_en/` → **`/docs/en/`**. The monitor’s **Docs** button opens a language picker.
+
+**English (Markdown in repo):**
+
+- [Architecture](docs_en/architecture.md) — Components, data flow, instance discovery, visual vs internal rates.
+- [Installation and configuration](docs_en/setup.md) — Requirements, quick install, `varmon.conf`.
+- [Backend (Python)](docs_en/backend.md) — Routes, WebSocket, UdsBridge, ShmReader, alarms and recording.
+- [Frontend](docs_en/frontend.md) — `app.js` structure, columns, Plotly charts, state and persistence.
+- [Protocols](docs_en/protocols.md) — UDS format, commands, SHM layout, alarms and recording.
+- [C++ integration](docs_en/cpp-integration.md) — Linking libvarmonitor, basic usage, macros.
+- [Troubleshooting](docs_en/troubleshooting.md) — WSL/semaphores, connection issues, empty charts.
 
 ---
 
-## Instalación rápida
+## Quick install
 
 ```bash
-# 1. Instalar dependencias
+# 1. Install dependencies
 chmod +x scripts/setup.sh
 ./scripts/setup.sh
 
-# 2. Compilar
+# 2. Build
 mkdir -p build && cd build
 cmake .. && make -j$(nproc)
 
-# 3. Lanzar el servidor demo (C++)
+# 3. Run the demo server (C++)
 ./demo_app/demo_server
 
-# 4. En otra terminal, lanzar el monitor web (Python)
+# 4. In another terminal, run the web monitor (Python)
 cd web_monitor
 source .venv/bin/activate
 python app.py
 
-# 5. Abrir http://localhost:8080
+# 5. Open http://localhost:8080
 ```
 
-## Configuración: varmon.conf
+## Configuration: varmon.conf
 
-Ejemplo mínimo:
+Minimal example:
 
 ```
 web_port = 8080
 ```
 
-Opcional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**.
+Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**.
 
-- **shm_max_vars** (entero, defecto 2048): máximo de variables que caben en el segmento SHM. Si monitorizas más variables que este valor, solo las primeras reciben valor; el resto muestran "--". Tamaño del segmento ≈ 32 + shm_max_vars×137 bytes (ej. 2048 → ~274 KiB). Debe coincidir en C++ y Python; **reinicia el proceso C++ y el backend Python** tras cambiarlo.
+- **shm_max_vars** (integer, default 2048): maximum variables that fit in the SHM segment. If you monitor more than this, only the first get values; the rest show "--". Segment size ≈ 32 + shm_max_vars×137 bytes (e.g. 2048 → ~274 KiB). Must match in C++ and Python; **restart the C++ process and the Python backend** after changing it.
 
-Ruta del archivo: variable de entorno `VARMON_CONFIG` o en C++ `varmon::set_config_path(...)`.
+Config file path: environment variable `VARMON_CONFIG` or in C++ `varmon::set_config_path(...)`.
 
-## Integración en tu proyecto C++
+## Integrating into your C++ project
 
 ```cmake
 add_subdirectory(libvarmonitor)
-target_link_libraries(tu_app PRIVATE varmonitor)
+target_link_libraries(your_app PRIVATE varmonitor)
 ```
 
 ```cpp
 #include <var_monitor.hpp>
 
 varmon::VarMonitor monitor;
-monitor.register_var("sensors.temperatura", &temperatura);
-monitor.start(100);  // 100 ms entre muestreos; arranca UDS y SHM
+monitor.register_var("sensors.temperature", &temperature);
+monitor.start(100);  // 100 ms between samples; starts UDS and SHM
 
-// En tu lazo de control (ej. 100 Hz):
+// In your control loop (e.g. 100 Hz):
 monitor.write_shm_snapshot();
 ```
 
-Con macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
+With macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
 
-## Funcionalidades del monitor web
+## Web monitor features
 
-- Tres columnas: variables disponibles, monitor en vivo, gráficos.
-- Modos **Live**, **Análisis** y **Replay híbrido** (TSV + SHM/C++ con imposición selectiva por variable).
-- Gráficos dinámicos (Plotly), alarmas Hi/Lo, grabación TSV (backend), notificaciones, variables computadas, guardar/cargar configuración, acceso remoto por web_port, atajos de teclado (R grabación, S screenshot, etc.).
+- Three columns: available variables, live monitor, charts.
+- **Live**, **Analysis**, and **hybrid Replay** modes (TSV + SHM/C++ with per-variable imposition).
+- Dynamic charts (Plotly), Hi/Lo alarms, TSV recording (backend), notifications, computed variables, save/load settings, remote access via `web_port`, keyboard shortcuts (R record, S screenshot, etc.).
 
-## Estructura del proyecto
+## Project layout
 
 ```
 monitor/
@@ -93,8 +105,9 @@ monitor/
 ├── libvarmonitor/       # C++: VarMonitor, shm_publisher, uds_server
 ├── demo_app/
 ├── web_monitor/         # Python FastAPI, UdsBridge, ShmReader
-│   ├── recordings/     # TSV de grabaciones y alarmas (generado)
+│   ├── recordings/      # TSV recordings and alarms (generated)
 │   └── static/
-├── docs/                # Documentación (MkDocs)
+├── docs/                # MkDocs documentation (Spanish)
+├── docs_en/             # MkDocs documentation (English)
 └── scripts/
 ```

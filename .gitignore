@@ -22,3 +22,4 @@ web_monitor/server_state/sessions/
 
 # MkDocs build output
 site/
+site_en/

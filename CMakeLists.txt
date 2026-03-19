@@ -20,6 +20,7 @@ else()
 endif()
 add_custom_target(docs
     COMMAND "${MKDOCS_PYTHON}" -m mkdocs build
+    COMMAND "${MKDOCS_PYTHON}" -m mkdocs build -f mkdocs.en.yml
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Generando documentación con MkDocs en site/"
+    COMMENT "Generando documentación MkDocs en site/ (ES) y site_en/ (EN)"
 )
