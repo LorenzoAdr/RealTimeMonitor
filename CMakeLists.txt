@@ -7,6 +7,7 @@ option(VARMON_ENABLED "Enable variable monitor (set OFF for zero-overhead no-ops
 option(VARMON_BUILD_DEMO "Build demo application" ON)
 
 add_subdirectory(libvarmonitor)
+add_subdirectory(varmon_sidecar)
 
 if(VARMON_BUILD_DEMO)
     add_subdirectory(demo_app)

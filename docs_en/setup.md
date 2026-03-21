@@ -37,8 +37,9 @@ Minimal example:
 web_port = 8080
 ```
 
-Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, `log_buffer_size`, `log_file_cpp`, **`shm_max_vars`**.
+Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, `log_buffer_size`, `log_file_cpp`, **`shm_max_vars`**, **`visual_buffer_sec`**.
 
+- **visual_buffer_sec** (integer, default 10, range 1–7200): default visual buffer seconds in the browser when no `timeWindow` is stored in `localStorage`. Exposed in `GET /api/connection_info`; larger values increase client RAM use.
 - **shm_max_vars** (integer, default 2048): maximum variables that fit in the SHM segment (C++ and Python). If you monitor more than this limit, only the first ones get values; the rest show "--" in the UI. Segment size = 32 + shm_max_vars×137 bytes (e.g. 2048 → ~274 KiB, 5120 → ~686 KiB). **Must match in C++ and Python**; after changing it, **restart the C++ process and the Python backend** so both use the new limit.
 - **log_buffer_size** (integer, default 5000): max lines the backend keeps in memory for the built-in log viewer (between 100 and 50000).
 - **log_file_cpp** (path): if set, the log viewer can also show C++ process output. Redirect stderr to a file (e.g. `./my_app 2> /tmp/varmon_cpp.log`) and set `log_file_cpp = /tmp/varmon_cpp.log`. In the UI, use source "C++" or "Both".

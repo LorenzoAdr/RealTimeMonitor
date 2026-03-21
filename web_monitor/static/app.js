@@ -51,7 +51,6 @@
 
     let arrayElemAssignment = {};
     let arrayElemHistory = {};
-    const ARRAY_HIST_MAX = 2000;
 
     let plotRafPending = false;
     /** En live: purgar Plotly cada N repintados para soltar retención interna (react acumula). */
@@ -146,6 +145,23 @@
     const monitorSortByGraphBtn = document.getElementById("monitorSortByGraphBtn");
     const monitorSortByTsvBtn = document.getElementById("monitorSortByTsvBtn");
     const timeWindowSelect = document.getElementById("timeWindow");
+
+    /** Segundos de ventana del buffer visual (cabecera): fuente única para recorte de historial y eje X en live. */
+    function getEffectiveHistWindowSec() {
+        if (timeWindowSelect) {
+            const w = parseInt(timeWindowSelect.value, 10);
+            if (Number.isFinite(w) && w > 0) return w;
+        }
+        const sec = Number.isFinite(localHistMaxSec) && localHistMaxSec > 0 ? localHistMaxSec : DEFAULT_LOCAL_HIST_MAX_SEC;
+        return sec;
+    }
+
+    /** Tope de muestras en RAM por serie antes del recorte temporal (~120 pts/s × buffer visual). */
+    function maxLivePlotSamplesBudget() {
+        const sec = getEffectiveHistWindowSec();
+        return Math.min(64000, Math.max(400, Math.ceil(sec * 120)));
+    }
+
     const plotEmpty = document.getElementById("plotEmpty");
     const plotArea = document.getElementById("plotArea");
     const recordBtn = document.getElementById("recordBtn");
@@ -339,7 +355,6 @@
     const GEN_RATE_MS = 50;
     let computedVars = [];
     let computedHistories = {};
-    const COMPUTED_MAX_HISTORY = 1000;
     let varFormat = {};  // { name: { ori: "dec", sal: "dec" } }
     let currentLang = "es";
     let currentTheme = "dark";
@@ -649,9 +664,11 @@
                     const h = arrayElemHistory[name];
                     h.timestamps.push(now);
                     h.values.push(val);
-                    if (h.timestamps.length > ARRAY_HIST_MAX) {
-                        h.timestamps.shift();
-                        h.values.shift();
+                    const _bud = maxLivePlotSamplesBudget();
+                    if (h.timestamps.length > _bud) {
+                        const trim = Math.floor(_bud * 0.75);
+                        h.timestamps = h.timestamps.slice(-trim);
+                        h.values = h.values.slice(-trim);
                     }
                     const arrVd = varsByName[arrName];
                     if (arrVd && Array.isArray(arrVd.value) && arrIdx >= 0 && arrIdx < arrVd.value.length) {
@@ -665,9 +682,11 @@
                         const h = historyCache[name];
                         h.timestamps.push(now);
                         h.values.push(val);
-                        if (h.timestamps.length > (localHistMaxSec || DEFAULT_LOCAL_HIST_MAX_SEC) * 100) {
-                            h.timestamps.shift();
-                            h.values.shift();
+                        const _budG = maxLivePlotSamplesBudget();
+                        if (h.timestamps.length > _budG) {
+                            const trimG = Math.floor(_budG * 0.75);
+                            h.timestamps = h.timestamps.slice(-trimG);
+                            h.values = h.values.slice(-trimG);
                         }
                     }
                 }
@@ -792,9 +811,11 @@
                     if (needsScalarPlotHistory(cv.name)) {
                         hist.timestamps.push(now);
                         hist.values.push(num);
-                        if (hist.timestamps.length > COMPUTED_MAX_HISTORY) {
-                            hist.timestamps.shift();
-                            hist.values.shift();
+                        const _budC = maxLivePlotSamplesBudget();
+                        if (hist.timestamps.length > _budC) {
+                            const trimC = Math.floor(_budC * 0.75);
+                            hist.timestamps = hist.timestamps.slice(-trimC);
+                            hist.values = hist.values.slice(-trimC);
                         }
                         historyCache[cv.name] = hist;
                     } else {
@@ -1126,6 +1147,8 @@
             statusDisconnected: "Desconectado",
             statusNoInstances: "No hay instancias VarMonitor (UDS)",
             graphTitle: "Gráfico",
+            plotPendingData: "Esperando datos del servidor…",
+            plotPendingHistory: "Cargando historial de la serie…",
             newGraphDropText: "Nuevo gráfico: suelta aquí para crear uno",
             removeGraphTitle: "Eliminar gráfico",
             monitorMenuTitle: "Más opciones",
@@ -1213,6 +1236,8 @@
             statusDisconnected: "Disconnected",
             statusNoInstances: "No VarMonitor instances (UDS)",
             graphTitle: "Plot",
+            plotPendingData: "Waiting for server data…",
+            plotPendingHistory: "Loading series history…",
             newGraphDropText: "New plot: drop here to create one",
             removeGraphTitle: "Remove plot",
             monitorMenuTitle: "More options",
@@ -3833,7 +3858,12 @@
     pauseBtn.addEventListener("click", () => {
         plotsPaused = !plotsPaused;
         updatePauseBtn();
-        if (!plotsPaused) schedulePlotRender();
+        if (!plotsPaused) {
+            // Tras pausa larga (p. ej. alarma), el tope adaptativo puede dejar nextAllowedRenderAt
+            // en el futuro y schedulePlotRender() no encola RAF hasta otro vars_update.
+            nextAllowedRenderAt = 0;
+            schedulePlotRender();
+        }
     });
     updatePauseBtn();
 
@@ -3915,6 +3945,37 @@
                 }
                 if (data && typeof data.update_ratio_max === "number" && intervalInput) {
                     intervalInput.max = Math.max(1, data.update_ratio_max);
+                }
+                if (data && typeof data.visual_buffer_sec === "number" && timeWindowSelect) {
+                    const s = Math.max(1, Math.min(7200, Math.floor(data.visual_buffer_sec)));
+                    if (defaultVisualBufferInput) defaultVisualBufferInput.value = String(s);
+                    let hasSavedTimeWindow = false;
+                    try {
+                        const raw = localStorage.getItem(STORAGE_KEY);
+                        if (raw) {
+                            const c = JSON.parse(raw);
+                            hasSavedTimeWindow = c && (c.timeWindow != null || c.historyBuffer != null);
+                        }
+                    } catch (e) { /* ignore */ }
+                    if (!hasSavedTimeWindow) {
+                        let closest = timeWindowSelect.options[0]?.value || String(s);
+                        let bestDiff = Infinity;
+                        for (let i = 0; i < timeWindowSelect.options.length; i++) {
+                            const opt = timeWindowSelect.options[i];
+                            const val = Number(opt.value);
+                            if (!Number.isFinite(val) || val <= 0) continue;
+                            const d = Math.abs(val - s);
+                            if (d < bestDiff) {
+                                bestDiff = d;
+                                closest = opt.value;
+                            }
+                        }
+                        timeWindowSelect.value = closest;
+                        const sec = parseInt(closest, 10);
+                        localHistMaxSec = (Number.isFinite(sec) && sec > 0) ? sec : DEFAULT_LOCAL_HIST_MAX_SEC;
+                        if (isLiveMode()) trimLocalHistory();
+                        schedulePlotRender();
+                    }
                 }
                 updateMultiInstanceWarning();
                 return data;
@@ -5085,7 +5146,7 @@
     async function refreshServerRecordings() {
         if (!recordingSelect) return;
         try {
-            const resp = await fetch("/api/recordings");
+            const resp = await fetch("/api/recordings?_=" + Date.now(), { cache: "no-store" });
             if (!resp.ok) throw new Error("no recordings");
             const data = await resp.json();
             const tr = I18N[currentLang] || I18N.es;
@@ -7884,8 +7945,6 @@
             const reasons = triggered.map(t => `[LOCAL] ${t.reason}`).join(" | ");
             sendAlarmNotification(reasons);
             showAlarmBanner(reasons);
-            plotsPaused = true;
-            updatePauseBtn();
         }
     }
 
@@ -7947,8 +8006,6 @@
         const reasons = triggered.map(t => t.reason).join(" | ");
         sendAlarmNotification(reasons);
         showAlarmBanner(reasons);
-        plotsPaused = true;
-        updatePauseBtn();
     }
 
     function onAlarmClearedFromBackend(names) {
@@ -8009,6 +8066,7 @@
         const path = (msg.path || msg.filename || "").trim();
         const text = path ? path : (msg.message || "Grabación finalizada.");
         showRecordPathToast(text, { filename: msg.filename || "" });
+        void refreshServerRecordings();
         if (msg.file_base64) {
             try {
                 const bin = atob(msg.file_base64);
@@ -8043,6 +8101,7 @@
     function onAlarmRecordingReady(msg) {
         const path = msg.path || msg.filename || "";
         showRecordPathToast(path, { filename: msg.filename || "" });
+        void refreshServerRecordings();
         if (msg.file_base64) {
             try {
                 const bin = atob(msg.file_base64);
@@ -8071,10 +8130,6 @@
 
         setTimeout(() => {
             generateAlarmTsv(triggerNames);
-
-            plotsPaused = true;
-            updatePauseBtn();
-
             showAlarmBanner(reasons);
         }, AUTO_TSV_DELAY_MS);
     }
@@ -9177,7 +9232,16 @@
             }
         }
         saveConfig();
+        // Primer gráfico: el layout flex aún no ha medido; la carga adaptativa puede bloquear el siguiente frame;
+        // un Plotly.newPlot sin trazas dejaba la caja vacía hasta un resize (p. ej. al añadir/quitar otro gráfico).
+        nextAllowedRenderAt = 0;
         schedulePlotRender();
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                nextAllowedRenderAt = 0;
+                schedulePlotRender();
+            });
+        });
     }
 
     function ensureNewGraphDropTarget() {
@@ -9602,7 +9666,7 @@
         const tRender0 = performance.now();
         plotLiveRenderCount++;
         const livePlotlyHardRefresh = isLiveMode() && graphList.length > 0 && (plotLiveRenderCount % PLOT_LIVE_PURGE_EVERY === 0);
-        const windowSec = parseInt(timeWindowSelect.value);
+        const windowSec = getEffectiveHistWindowSec();
         const activeSlots = [];
         // Origen = mínimo timestamp real en los datos mostrados, para que al recortar el buffer
         // el eje X no salte (siempre 0 = borde izquierdo de lo que hay).
@@ -9868,12 +9932,26 @@
             };
 
             if (!plotInstances[gid]) {
+                if (traces.length === 0 && varsInGraph.length > 0) {
+                    containerEl.innerHTML = "";
+                    const ph = document.createElement("div");
+                    ph.className = "plot-pending-data";
+                    const tr = I18N[currentLang] || I18N.es;
+                    ph.textContent = isLiveMode()
+                        ? (tr.plotPendingData || "…")
+                        : (tr.plotPendingHistory || tr.plotPendingData || "…");
+                    containerEl.appendChild(ph);
+                    continue;
+                }
                 Plotly.newPlot(containerEl, traces, layout, config);
                 plotInstances[gid] = true;
                 attachSharedZoomHandler(containerEl, gid);
                 attachLegendRemoveHandler(containerEl);
                 attachOfflineClickSeekHandler(containerEl);
             } else if (livePlotlyHardRefresh) {
+                if (traces.length === 0 && varsInGraph.length > 0) {
+                    continue;
+                }
                 try {
                     Plotly.purge(containerEl);
                 } catch (e) { /* ignore */ }
@@ -9886,6 +9964,9 @@
                 attachLegendRemoveHandler(containerEl);
                 attachOfflineClickSeekHandler(containerEl);
             } else {
+                if (traces.length === 0 && varsInGraph.length > 0) {
+                    continue;
+                }
                 Plotly.react(containerEl, traces, layout, config);
                 attachSharedZoomHandler(containerEl, gid);
                 attachLegendRemoveHandler(containerEl);
@@ -9921,13 +10002,17 @@
         // Tras F5 el primer render puede ser sin datos; forzar un segundo pintado cuando ya haya llegado algo.
         if (graphList.length > 0 && !window.__plotSecondPaintScheduled) {
             window.__plotSecondPaintScheduled = true;
-            setTimeout(() => { schedulePlotRender(); }, 500);
+            setTimeout(() => {
+                nextAllowedRenderAt = 0;
+                schedulePlotRender();
+            }, 500);
         }
     }
 
     timeWindowSelect.addEventListener("change", () => {
         const v = parseInt(timeWindowSelect.value, 10);
         localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : DEFAULT_LOCAL_HIST_MAX_SEC;
+        if (defaultVisualBufferInput) defaultVisualBufferInput.value = String(localHistMaxSec);
         if (isLiveMode()) trimLocalHistory();
         saveConfig();
         schedulePlotRender();
@@ -10320,6 +10405,7 @@
         data = injectBrowserHeapTelemetryIntoVarsUpdate(data);
         let appendHistory = opts.appendHistory !== false;
         const needHistBuffers = liveModeNeedsHistoryBuffers();
+        const hadHistoryBuffersBefore = !!lastLiveHistoryNeed;
         if (isLiveMode() && appendHistory && !needHistBuffers) {
             appendHistory = false;
         }
@@ -10339,6 +10425,9 @@
         // Primer gráfico en vivo tras solo monitorizar: estado limpio de historial (sin arrastre raro).
         if (isLiveMode() && lastLiveHistoryNeed === false && needHistBuffers) {
             purgeHistoryCacheWithoutPlot();
+        }
+        if (needHistBuffers && !hadHistoryBuffersBefore) {
+            nextAllowedRenderAt = 0;
         }
         lastLiveHistoryNeed = needHistBuffers;
         const forcedTs = (typeof opts.timestamp === "number" && Number.isFinite(opts.timestamp)) ? opts.timestamp : null;
@@ -10463,7 +10552,10 @@
             e.preventDefault();
             plotsPaused = !plotsPaused;
             updatePauseBtn();
-            if (!plotsPaused) schedulePlotRender();
+            if (!plotsPaused) {
+                nextAllowedRenderAt = 0;
+                schedulePlotRender();
+            }
             return;
         }
         const k = e.key.toLowerCase();

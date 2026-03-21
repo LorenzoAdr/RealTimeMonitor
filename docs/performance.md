@@ -52,7 +52,7 @@ Ver [Protocolos — Sistema de actualización de variables monitorizadas](protoc
 
 ### Buffer visual e historial
 
-- El historial en el frontend (`historyCache`) tiene un **buffer visual** configurable: se retiene una ventana de tiempo limitada para las series. Los datos fuera de esa ventana pueden descartarse o no enviarse, evitando crecimiento ilimitado de memoria en el cliente.
+- El historial en el frontend (`historyCache`) usa la misma ventana que el selector **Buffer visual** de la cabecera (y el valor avanzado “Buffer visual por defecto”): recorte por tiempo, presupuesto de muestras proporcional a esos segundos, y eje X de los gráficos en vivo. El servidor puede fijar un valor inicial con `visual_buffer_sec` en `varmon.conf` (véase `docs/setup.md`) cuando el usuario no tiene preferencia guardada.
 
 ---
 

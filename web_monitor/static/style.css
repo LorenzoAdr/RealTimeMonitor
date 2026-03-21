@@ -2185,6 +2185,19 @@ body.monitor-compact .stats-panel {
     position: relative;
 }
 
+.plot-pending-data {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 72px;
+    padding: 0.5rem;
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    opacity: 0.85;
+}
+
 .btn-plot-remove {
     margin-left: auto;
     background: none;

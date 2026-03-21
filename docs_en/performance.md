@@ -49,6 +49,6 @@ See [Protocols — Monitored variable update system](protocols.md#monitored-vari
 
 ### Visual buffer and history
 
-- Frontend `historyCache` uses a configurable **visual buffer**: limited time window; older data can be dropped to cap memory.
+- Frontend `historyCache` follows the same window as the header **Visual buffer** control (and the advanced default): time-based trimming, a sample budget scaled to those seconds, and live chart X range. The server can set an initial default via `visual_buffer_sec` in `varmon.conf` (see `docs_en/setup.md`) when the user has no saved preference.
 
 Together, these allow many variables and high update rates without saturating the machine or network.

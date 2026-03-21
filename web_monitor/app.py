@@ -7,7 +7,10 @@ import logging
 import json
 import os
 import resource
+import shutil
+import signal
 import socket
+import subprocess
 import sys
 import time
 import urllib.request
@@ -45,6 +48,14 @@ DEFAULTS = {
     "shm_parse_max_hz": 40,
     # Snapshots en cola reader→drain (0 = ilimitada; >0 = FIFO acotada, put bloquea si llena = backpressure).
     "shm_queue_max_size": 512,
+    # Ventana por defecto del buffer visual (s); el frontend la aplica si no hay preferencia guardada.
+    "visual_buffer_sec": 10,
+    # Grabación: python (hilo escritor) | sidecar_cpp (binario nativo leyendo el mismo SHM; requiere SHM activo).
+    "recording_backend": "python",
+    # Ruta al ejecutable varmon_sidecar (vacío = VARMON_SIDECAR_BIN, PATH, o build típico).
+    "recording_sidecar_bin": "",
+    # Alarmas con variables SHM: sidecar_cpp (buffer + TSV + eval en C++, polling SHM) | python (legado).
+    "alarms_backend": "sidecar_cpp",
 }
 
 CONFIG_ABS_PATH = ""
@@ -84,7 +95,18 @@ def load_config() -> dict:
                     cfg[key] = max(0.0, min(5000.0, float(val)))
                 elif key == "shm_queue_max_size":
                     cfg[key] = max(0, min(100000, int(val)))
-                elif key in ("lan_ip", "bind_host", "auth_password", "server_state_dir", "log_file_cpp"):
+                elif key == "visual_buffer_sec":
+                    cfg[key] = max(1, min(7200, int(val)))
+                elif key in (
+                    "lan_ip",
+                    "bind_host",
+                    "auth_password",
+                    "server_state_dir",
+                    "log_file_cpp",
+                    "recording_backend",
+                    "recording_sidecar_bin",
+                    "alarms_backend",
+                ):
                     cfg[key] = val
         CONFIG_ABS_PATH = os.path.abspath(path)
         print(f"[VarMonitor Web] Config cargada desde {CONFIG_ABS_PATH}")
@@ -452,6 +474,8 @@ TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
 SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
 ALARM_BUFFER_SEC = 2.2  # ~1 s previos + ~1 s posteriores al contexto de disparo (TSV con snapshot completo)
 ALARM_UDS_POLL_SEC = 0.2  # Sin monitor pero con alarmas: get_var solo sobre nombres en alarma (evita snapshots SHM masivos)
+# SHM muy rápido puede acumular decenas de miles de filas en la ventana; el TSV síncrono bloquearía el bucle asyncio minutos.
+MAX_ALARM_TSV_ROWS = 8000
 
 # Variables sintéticas (solo backend / UI); no existen en C++. Aparecen en el catálogo y en vars_update si están monitorizadas.
 VARMON_TELEMETRY_NAMES: tuple[str, ...] = (
@@ -637,6 +661,72 @@ def _ensure_recordings_dir():
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 
+def _shm_subscription_real_names(monitored_names: set[str], alarms_config: dict) -> list[str]:
+    """Nombres que deben publicarse en SHM: monitorizadas ∪ variables con alarma (excl. telemetría sintética)."""
+    out: set[str] = {n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET}
+    for k in alarms_config:
+        if k not in VARMON_TELEMETRY_NAME_SET:
+            out.add(k)
+    return sorted(out)
+
+
+def _alarms_sidecar_eligible(alarms_config: dict) -> bool:
+    """El sidecar de alarmas solo cubre reglas sobre variables SHM (no telemetría sintética)."""
+    if not alarms_config:
+        return False
+    for k in alarms_config:
+        if k in VARMON_TELEMETRY_NAME_SET:
+            return False
+    return True
+
+
+def _write_sidecar_alarms_tsv(path: str, alarms_config: dict) -> int:
+    """TSV para varmon_sidecar: name, lo, hi, hys, delay_ms (campo vacío = sin límite). Devuelve nº de reglas SHM."""
+    n = 0
+    with open(path, "w", encoding="utf-8") as f:
+        for name in sorted(alarms_config.keys()):
+            if name in VARMON_TELEMETRY_NAME_SET:
+                continue
+            cfg = alarms_config.get(name)
+            if not isinstance(cfg, dict):
+                continue
+            lo, hi = cfg.get("lo"), cfg.get("hi")
+            hys, delay_ms = cfg.get("hys"), cfg.get("delayMs")
+
+            def cell(v) -> str:
+                if v is None:
+                    return ""
+                if isinstance(v, bool):
+                    return "1" if v else "0"
+                return str(v)
+
+            f.write(f"{name}\t{cell(lo)}\t{cell(hi)}\t{cell(hys)}\t{cell(delay_ms)}\n")
+            n += 1
+    return n
+
+
+def _resolve_recording_sidecar_bin(config: dict) -> str | None:
+    """Ruta al ejecutable varmon_sidecar (Linux)."""
+    envp = (os.environ.get("VARMON_SIDECAR_BIN") or "").strip()
+    if envp and os.path.isfile(envp) and os.access(envp, os.X_OK):
+        return envp
+    cfgp = (config.get("recording_sidecar_bin") or "").strip()
+    if cfgp and os.path.isfile(cfgp) and os.access(cfgp, os.X_OK):
+        return cfgp
+    which = shutil.which("varmon_sidecar")
+    if which:
+        return which
+    base = os.path.dirname(os.path.abspath(__file__))
+    for rel in (
+        os.path.join(base, "..", "build-sidecar", "varmon_sidecar", "varmon_sidecar"),
+        os.path.join(base, "..", "build", "varmon_sidecar", "varmon_sidecar"),
+    ):
+        cand = os.path.abspath(rel)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def _ensure_state_dirs():
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
     os.makedirs(SESSIONS_DIR, exist_ok=True)
@@ -705,7 +795,11 @@ def _save_runtime_config_overrides(updates: dict) -> None:
 
 
 def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]], var_names: list[str] | None = None) -> None:
-    """Escribe snapshots a TSV (tabuladores). Arrays expandidos en columnas: name_0, name_1, ..."""
+    """Escribe snapshots a TSV (tabuladores). Arrays expandidos en columnas: name_0, name_1, ...
+
+    Antes: por cada nombre de variable se escaneaba cada fila entera → ~O(n_vars × n_filas × n_vars).
+    Ahora: un pase para anchos máximos + el mismo camino rápido que la grabación por fila.
+    """
     if not snapshots:
         return
     t0 = float(snapshots[0][0])
@@ -713,45 +807,81 @@ def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]
         names_set = set()
         for _, data in snapshots:
             for e in data:
-                names_set.add(e["name"])
+                if isinstance(e, dict) and e.get("name") is not None:
+                    names_set.add(e["name"])
         var_names = sorted(names_set)
-    # Para cada variable: si en algún snapshot es lista, columnas name_0, name_1, ... (max len)
-    col_spec: list[tuple[str, int]] = []  # (name, size): size 1 = escalar, >1 = array con size columnas
-    for name in var_names:
-        max_len = 1
-        for _, data in snapshots:
-            for e in data:
-                if e["name"] != name:
-                    continue
-                v = e.get("value")
-                if isinstance(v, (list, tuple)):
-                    max_len = max(max_len, len(v))
-                break
-        col_spec.append((name, max_len))
-    # Cabecera: time_s \t col1 \t col2 \t ... (arrays: name_0, name_1, ...)
-    header_parts = ["time_s"]
-    for name, size in col_spec:
-        if size <= 1:
-            header_parts.append(name)
-        else:
-            header_parts.extend(f"{name}_{i}" for i in range(size))
-    with open(filepath, "w") as f:
-        f.write("\t".join(header_parts) + "\n")
+    col_spec = _build_col_spec_max_over_snapshots(snapshots, var_names)
+    row_layout = _record_row_layout(col_spec)
+    with open(filepath, "w", buffering=1024 * 1024) as f:
+        _write_record_header_stream(f, col_spec)
         for t, data in snapshots:
-            name_to_val = {e["name"]: e.get("value", "") for e in data}
             t_rel = max(0.0, float(t) - t0)
-            row_parts = [f"{t_rel:.6f}"]
-            for name, size in col_spec:
-                v = name_to_val.get(name, "")
-                if size <= 1:
-                    row_parts.append(str(v))
-                else:
-                    if isinstance(v, (list, tuple)):
-                        for i in range(size):
-                            row_parts.append(str(v[i]) if i < len(v) else "")
-                    else:
-                        row_parts.extend([str(v)] + [""] * (size - 1))
-            f.write("\t".join(row_parts) + "\n")
+            _write_record_row_stream(f, t_rel, data, col_spec, row_layout)
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except (OSError, AttributeError):
+            pass
+
+
+def _finalize_alarm_recording_sync(
+    buf_snap: list,
+    buf_now: list,
+    recordings_dir: str,
+    send_file_on_finish: bool,
+) -> tuple[str, str, str | None] | None:
+    """Fusiona buffers, recorta filas, escribe TSV y opcionalmente codifica el fichero. Ejecutar vía asyncio.to_thread."""
+    import base64
+    from datetime import datetime
+
+    by_t: dict[float, list] = {}
+    for t, data in buf_snap:
+        try:
+            tf = float(t)
+        except (TypeError, ValueError):
+            continue
+        by_t[tf] = data
+    for t, data in buf_now:
+        try:
+            tf = float(t)
+        except (TypeError, ValueError):
+            continue
+        by_t[tf] = data
+    buf = [(tk, by_t[tk]) for tk in sorted(by_t.keys())]
+    if not buf:
+        return None
+    if len(buf) > MAX_ALARM_TSV_ROWS:
+        dropped = len(buf) - MAX_ALARM_TSV_ROWS
+        buf = buf[-MAX_ALARM_TSV_ROWS:]
+        print(
+            f"[VarMonitor Web] TSV alarma: recortadas {dropped} filas antiguas (máx {MAX_ALARM_TSV_ROWS})",
+            flush=True,
+        )
+    os.makedirs(recordings_dir, exist_ok=True)
+    fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+    path = os.path.join(recordings_dir, fn)
+    var_names = sorted(set(e["name"] for _, data in buf for e in data))
+    if not var_names:
+        var_names = ["time_s"]
+    _write_snapshots_tsv(path, buf, var_names)
+    file_b64: str | None = None
+    if send_file_on_finish:
+        try:
+            with open(path, "rb") as f:
+                file_b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            pass
+    return (path, fn, file_b64)
+
+
+def _file_read_base64_sync(path: str) -> str | None:
+    import base64
+
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return None
 
 
 def _estimate_record_header_bytes(var_names: list[str], snapshot: list[dict] | None = None) -> int:
@@ -826,6 +956,25 @@ def _build_record_col_spec(var_names: list[str], snapshot: list[dict]) -> list[t
         else:
             spec.append((name, 1))
     return spec
+
+
+def _build_col_spec_max_over_snapshots(
+    snapshots: list[tuple[float, list[dict]]],
+    var_names: list[str],
+) -> list[tuple[str, int]]:
+    """Máximo ancho de array por variable: una pasada por todas las celdas (O(n_filas × n_celdas_por_fila))."""
+    max_len: dict[str, int] = dict.fromkeys(var_names, 1)
+    for _, data in snapshots:
+        for e in data:
+            if not isinstance(e, dict):
+                continue
+            n = e.get("name")
+            if n not in max_len:
+                continue
+            v = e.get("value")
+            if isinstance(v, (list, tuple)) and len(v) > max_len[n]:
+                max_len[n] = len(v)
+    return [(name, max_len[name]) for name in var_names]
 
 
 def _write_record_header_stream(f, col_spec: list[tuple[str, int]]) -> int:
@@ -1044,7 +1193,10 @@ async def api_recordings():
     except Exception:
         rows = []
     rows.sort(key=lambda x: -x["mtime"])
-    return {"recordings": rows}
+    return JSONResponse(
+        {"recordings": rows},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 def _resolve_browse_path(relative_path: str) -> Path | None:
@@ -2041,6 +2193,7 @@ async def api_connection_info(request: Request):
         "uptime_seconds": uptime,
         "cycle_interval_ms": _config.get("cycle_interval_ms", 100),
         "update_ratio_max": _config.get("update_ratio_max", 100),
+        "visual_buffer_sec": max(1, min(7200, int(_config.get("visual_buffer_sec", 10)))),
     }
     try:
         out["current_user"] = getpass.getuser()
@@ -2127,6 +2280,17 @@ async def websocket_endpoint(ws: WebSocket):
     recording_write_queue: Queue | None = None
     recording_writer_thread: threading.Thread | None = None
     recording_rows_written_ref: list[int] | None = None
+    recording_sidecar_proc: subprocess.Popen | None = None
+    recording_sidecar_names_path: str | None = None
+    recording_sidecar_status_path: str | None = None
+    recording_sidecar_alarms_path: str | None = None
+    recording_sidecar_alarm_exit_path: str | None = None
+    recording_sidecar_alarm_delegate: bool = False
+    alarm_sidecar_proc: subprocess.Popen | None = None
+    alarm_sidecar_events_path: str | None = None
+    alarm_sidecar_names_path: str | None = None
+    alarm_sidecar_alarms_path: str | None = None
+    alarm_sidecar_events_off: int = 0
 
     # Conexión solo por UDS
     query_uds = ws.query_params.get("uds_path")
@@ -2210,6 +2374,9 @@ async def websocket_endpoint(ws: WebSocket):
     last_alarm_uds_poll_at = 0.0
 
     async def _notify_alarm_events(cleared: list[str], triggered: list[dict]) -> None:
+        # Copia al entrar (antes de cualquier await): tras alarm_cleared el bucle puede drenar SHM
+        # y vaciar el deque antes de alarm_triggered / tarea diferida.
+        buf_snap = list(alarm_buffer)
         if cleared:
             try:
                 await ws.send_json({"type": "alarm_cleared", "names": cleared})
@@ -2225,28 +2392,31 @@ async def websocket_endpoint(ws: WebSocket):
         async def _send_alarm_file_later():
             await asyncio.sleep(1.0)
             buf_now = list(alarm_buffer)
-            if not buf_now:
+            try:
+                result = await asyncio.to_thread(
+                    _finalize_alarm_recording_sync,
+                    buf_snap,
+                    buf_now,
+                    RECORDINGS_DIR,
+                    send_file_on_finish,
+                )
+            except Exception as e:
+                print(f"[VarMonitor Web] Error escribiendo TSV de alarma: {e}", flush=True)
                 return
-            _ensure_recordings_dir()
-            from datetime import datetime
-            fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
-            path = os.path.join(RECORDINGS_DIR, fn)
-            var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
-            if not var_names:
-                var_names = ["time_s"]
-            _write_snapshots_tsv(path, buf_now, var_names)
-            msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
-            if send_file_on_finish:
-                try:
-                    with open(path, "rb") as f:
-                        import base64
-                        msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
-                except Exception:
-                    pass
+            if not result:
+                print(
+                    "[VarMonitor Web] Aviso: no se escribe TSV de alarma (sin muestras tras fusionar disparo + ventana 1 s)",
+                    flush=True,
+                )
+                return
+            path, fn, file_b64 = result
+            msg: dict = {"type": "alarm_recording_ready", "path": path, "filename": fn}
+            if file_b64 is not None:
+                msg["file_base64"] = file_b64
             try:
                 await ws.send_json(msg)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[VarMonitor Web] No se pudo enviar alarm_recording_ready al cliente: {e}", flush=True)
 
         asyncio.create_task(_send_alarm_file_later())
 
@@ -2285,66 +2455,113 @@ async def websocket_endpoint(ws: WebSocket):
                 latest_snapshot = [v for v in snapshot if (v.get("name") or "") in mn]
             else:
                 latest_snapshot = snapshot
-            if alarms_config:
+            _sidecar_alarm_delegate_active = bool(
+                recording_sidecar_alarm_delegate and recording and recording_sidecar_proc is not None
+            )
+            alarms_backend_sc = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower() == "sidecar_cpp"
+            alarm_sidecar_live = bool(
+                alarms_backend_sc
+                and alarm_sidecar_proc is not None
+                and alarm_sidecar_proc.poll() is None
+            )
+            delegate_shm_alarms = bool(alarm_sidecar_live and _alarms_sidecar_eligible(alarms_config))
+            alarms_eval_cfg = alarms_config
+            if _sidecar_alarm_delegate_active:
+                alarms_eval_cfg = {
+                    k: v
+                    for k, v in alarms_config.items()
+                    if k in VARMON_TELEMETRY_NAME_SET
+                }
+            elif delegate_shm_alarms:
+                alarms_eval_cfg = {}
+            if alarms_config and not delegate_shm_alarms:
                 alarm_buffer.append((t_snap, snapshot))
                 cutoff = t_snap - ALARM_BUFFER_SEC
                 while alarm_buffer and alarm_buffer[0][0] < cutoff:
                     alarm_buffer.popleft()
-            if alarms_config:
+            if alarms_eval_cfg:
                 prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
-                    snapshot, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                    snapshot, alarms_eval_cfg, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
                 )
                 await _notify_alarm_events(cleared, triggered)
             if recording:
-                if recording_t0 is None:
-                    recording_t0 = t_snap
-                t_rel = 0.0 if (recording_rows_written_ref and recording_rows_written_ref[0] == 0) else max(0.0, t_snap - float(recording_t0))
-                if recording_write_queue is not None:
-                    recording_write_queue.put((t_rel, snapshot))
-                    if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
+                if recording_sidecar_proc is not None:
+                    if (t_snap - last_record_progress_send_at) >= 0.5:
                         last_record_progress_send_at = t_snap
                         try:
                             est_bytes = 0
+                            samples = 0
                             if recording_tmp_path and os.path.isfile(recording_tmp_path):
                                 try:
                                     est_bytes = int(os.path.getsize(recording_tmp_path))
-                                except Exception:
+                                except OSError:
                                     est_bytes = 0
+                            sp = recording_sidecar_status_path
+                            if sp and os.path.isfile(sp):
+                                try:
+                                    with open(sp, encoding="utf-8") as sf:
+                                        line = (sf.readline() or "").strip()
+                                    if line.isdigit():
+                                        samples = int(line)
+                                except OSError:
+                                    pass
                             await ws.send_json({
                                 "type": "recording_progress",
                                 "bytes": est_bytes,
-                                "samples": recording_rows_written_ref[0],
+                                "samples": samples,
                             })
                         except Exception:
                             pass
                 else:
-                    if recording_tmp_fp is None:
-                        _ensure_recordings_dir()
-                        recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
-                        recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
-                    if recording_col_spec is None:
-                        names = recording_var_names or sorted(set(e["name"] for e in snapshot))
-                        recording_col_spec = _build_record_col_spec(names, snapshot)
-                        recording_row_layout = _record_row_layout(recording_col_spec)
-                    if not recording_header_estimated and recording_col_spec:
-                        recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
-                        recording_header_estimated = True
-                    if recording_col_spec:
-                        t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
-                        recording_size_est_bytes += _write_record_row_stream(
-                            recording_tmp_fp, t_rel_local, snapshot, recording_col_spec, recording_row_layout
-                        )
-                        recording_rows_written += 1
-                    if (t_snap - last_record_progress_send_at) >= 0.5:
-                        last_record_progress_send_at = t_snap
-                        try:
-                            await ws.send_json({
-                                "type": "recording_progress",
-                                "bytes": int(max(0, recording_size_est_bytes)),
-                                "samples": recording_rows_written,
-                            })
-                        except Exception:
-                            pass
+                    if recording_t0 is None:
+                        recording_t0 = t_snap
+                    t_rel = 0.0 if (recording_rows_written_ref and recording_rows_written_ref[0] == 0) else max(0.0, t_snap - float(recording_t0))
+                    if recording_write_queue is not None:
+                        recording_write_queue.put((t_rel, snapshot))
+                        if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
+                            last_record_progress_send_at = t_snap
+                            try:
+                                est_bytes = 0
+                                if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                                    try:
+                                        est_bytes = int(os.path.getsize(recording_tmp_path))
+                                    except Exception:
+                                        est_bytes = 0
+                                await ws.send_json({
+                                    "type": "recording_progress",
+                                    "bytes": est_bytes,
+                                    "samples": recording_rows_written_ref[0],
+                                })
+                            except Exception:
+                                pass
+                    else:
+                        if recording_tmp_fp is None:
+                            _ensure_recordings_dir()
+                            recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                            recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
+                        if recording_col_spec is None:
+                            names = recording_var_names or sorted(set(e["name"] for e in snapshot))
+                            recording_col_spec = _build_record_col_spec(names, snapshot)
+                            recording_row_layout = _record_row_layout(recording_col_spec)
+                        if not recording_header_estimated and recording_col_spec:
+                            recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
+                            recording_header_estimated = True
+                        if recording_col_spec:
+                            t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
+                            recording_size_est_bytes += _write_record_row_stream(
+                                recording_tmp_fp, t_rel_local, snapshot, recording_col_spec, recording_row_layout
+                            )
+                            recording_rows_written += 1
+                        if (t_snap - last_record_progress_send_at) >= 0.5:
+                            last_record_progress_send_at = t_snap
+                            try:
+                                await ws.send_json({
+                                    "type": "recording_progress",
+                                    "bytes": int(max(0, recording_size_est_bytes)),
+                                    "samples": recording_rows_written,
+                                })
+                            except Exception:
+                                pass
 
         while True:
             batch: list = []
@@ -2369,11 +2586,11 @@ async def websocket_endpoint(ws: WebSocket):
                 await _handle_snapshot_item(snapshot_item)
 
     def update_shm_read_pause() -> None:
-        """Sin monitor ni grabación: no parsear SHM (las alarmas sin monitor usan get_var acotado en el bucle principal)."""
+        """Sin monitor, grabación ni alarmas: no parsear SHM (ahorra CPU/RAM). Con alarmas activas hace falta SHM a tasa C++."""
         nonlocal latest_snapshot
         if not shm_reader:
             return
-        idle = not monitored_names and not recording
+        idle = not monitored_names and not recording and not alarms_config
         shm_reader.set_reads_paused(bool(idle))
         # Grabación y alarmas: sin tope Hz (cada snapshot que entrega el lector SHM). Solo UI usa shm_parse_max_hz.
         shm_reader.set_full_parse_rate(bool(alarms_config or recording))
@@ -2389,10 +2606,291 @@ async def websocket_endpoint(ws: WebSocket):
         ws.app.state.ws_monitored_counts = {}
     ws.app.state.ws_monitored_counts[ws_id] = len(monitored_names)
 
+    def _stop_alarm_sidecar() -> None:
+        nonlocal alarm_sidecar_proc, alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path
+        nonlocal alarm_sidecar_events_off
+        if alarm_sidecar_proc is not None:
+            p = alarm_sidecar_proc
+            alarm_sidecar_proc = None
+            try:
+                p.send_signal(signal.SIGTERM)
+                p.wait(timeout=4)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        for aux in (alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path):
+            if aux and os.path.isfile(aux):
+                try:
+                    os.remove(aux)
+                except OSError:
+                    pass
+        alarm_sidecar_events_path = None
+        alarm_sidecar_names_path = None
+        alarm_sidecar_alarms_path = None
+        alarm_sidecar_events_off = 0
+
+    def _try_start_alarm_sidecar() -> None:
+        nonlocal alarm_sidecar_proc, alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path
+        nonlocal alarm_sidecar_events_off
+        _stop_alarm_sidecar()
+        ab = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower()
+        if ab != "sidecar_cpp" or not shm_reader or not alarms_config or not info:
+            return
+        if not info.get("shm_name") or not info.get("sem_name"):
+            return
+        if not _alarms_sidecar_eligible(alarms_config):
+            return
+        bin_path = _resolve_recording_sidecar_bin(_config)
+        if not bin_path or not os.path.isfile(bin_path):
+            print("[VarMonitor Web] Alarmas sidecar: ejecutable no encontrado; se usan alarmas en Python.", flush=True)
+            return
+        _ensure_recordings_dir()
+        ev_path = os.path.join(RECORDINGS_DIR, f".alarm_ev_{ws_id}_{int(time.time() * 1000)}.ndjson")
+        names_path = os.path.join(RECORDINGS_DIR, f".alarm_names_{ws_id}_{int(time.time() * 1000)}.txt")
+        al_path = os.path.join(RECORDINGS_DIR, f".alarm_rules_{ws_id}_{int(time.time() * 1000)}.tsv")
+        try:
+            if os.path.isfile(ev_path):
+                os.remove(ev_path)
+        except OSError:
+            pass
+        sub = _shm_subscription_real_names(monitored_names, alarms_config)
+        try:
+            with open(names_path, "w", encoding="utf-8") as nf:
+                for n in sub:
+                    nf.write(n + "\n")
+        except OSError as e:
+            print(f"[VarMonitor Web] No se pudo escribir names-file alarm sidecar: {e}", flush=True)
+            return
+        n_rules = _write_sidecar_alarms_tsv(al_path, alarms_config)
+        if n_rules <= 0:
+            try:
+                os.remove(names_path)
+            except OSError:
+                pass
+            return
+        shm_max = int(_config.get("shm_max_vars", 2048))
+        args = [
+            bin_path,
+            "--alarm-monitor",
+            "--shm-name",
+            str(info["shm_name"]),
+            "--sem-name",
+            str(info["sem_name"]),
+            "--names-file",
+            names_path,
+            "--alarms-file",
+            al_path,
+            "--alarm-events-file",
+            ev_path,
+            "--alarm-output-dir",
+            RECORDINGS_DIR,
+            "--max-vars",
+            str(shm_max),
+        ]
+        try:
+            alarm_sidecar_proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            alarm_sidecar_events_path = ev_path
+            alarm_sidecar_names_path = names_path
+            alarm_sidecar_alarms_path = al_path
+            alarm_sidecar_events_off = 0
+            print(f"[VarMonitor Web] Alarmas SHM delegadas al sidecar (eventos: {ev_path})", flush=True)
+        except Exception as e:
+            print(f"[VarMonitor Web] No se pudo arrancar alarm-sidecar: {e}", flush=True)
+            _stop_alarm_sidecar()
+
+    def _read_alarm_sidecar_event_lines() -> list[dict]:
+        nonlocal alarm_sidecar_events_off
+        path = alarm_sidecar_events_path
+        if not path or not os.path.isfile(path):
+            return []
+        out: list[dict] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                f.seek(alarm_sidecar_events_off)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    alarm_sidecar_events_off = f.tell()
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+        return out
+
+    async def _drain_alarm_sidecar_events() -> None:
+        evs = await asyncio.to_thread(_read_alarm_sidecar_event_lines)
+        for ev in evs:
+            k = ev.get("kind")
+            if k == "cleared":
+                try:
+                    await ws.send_json({"type": "alarm_cleared", "names": ev.get("names") or []})
+                except Exception:
+                    pass
+            elif k == "triggered":
+                tr = ev.get("triggered")
+                if isinstance(tr, list) and tr:
+                    try:
+                        await ws.send_json({"type": "alarm_triggered", "triggered": tr})
+                    except Exception:
+                        pass
+            elif k == "ready":
+                path_ready = ev.get("path") or ""
+                fn_ready = ev.get("filename") or ""
+                msg_rd: dict = {"type": "alarm_recording_ready", "path": path_ready, "filename": fn_ready}
+                if send_file_on_finish and path_ready and os.path.isfile(path_ready):
+                    b64 = await asyncio.to_thread(_file_read_base64_sync, path_ready)
+                    if b64 is not None:
+                        msg_rd["file_base64"] = b64
+                try:
+                    await ws.send_json(msg_rd)
+                except Exception:
+                    pass
+
+    async def _finalize_recording_after_sidecar_exit(alarm_payload: dict | None) -> None:
+        """Sidecar terminó solo (p. ej. alarma): cerrar TSV, notificar y limpiar sin SIGTERM."""
+        nonlocal recording, recording_sidecar_proc, recording_sidecar_status_path, recording_sidecar_names_path
+        nonlocal recording_sidecar_alarms_path, recording_sidecar_alarm_exit_path, recording_sidecar_alarm_delegate
+        nonlocal recording_tmp_fp, recording_tmp_path, recording_rows_written, recording_size_est_bytes
+        nonlocal recording_header_estimated, last_record_progress_send_at, recording_col_spec, recording_row_layout
+        nonlocal recording_t0, record_buffer, recording_var_names
+        recording = False
+        recording_sidecar_alarm_delegate = False
+        recording_sidecar_proc = None
+        rows_done = 0
+        stp = recording_sidecar_status_path
+        if stp and os.path.isfile(stp):
+            try:
+                with open(stp, encoding="utf-8") as sf:
+                    first = (sf.readline() or "").strip()
+                if first.isdigit():
+                    rows_done = int(first)
+            except (OSError, ValueError):
+                rows_done = 0
+        if rows_done <= 0 and recording_tmp_path and os.path.isfile(recording_tmp_path):
+            try:
+                with open(recording_tmp_path, "rb") as rf:
+                    rows_done = max(0, rf.read().count(b"\n") - 1)
+            except OSError:
+                rows_done = 0
+        recording_rows_written = rows_done
+        for aux in (
+            recording_sidecar_status_path,
+            recording_sidecar_names_path,
+            recording_sidecar_alarms_path,
+            recording_sidecar_alarm_exit_path,
+        ):
+            if aux and os.path.isfile(aux):
+                try:
+                    os.remove(aux)
+                except OSError:
+                    pass
+        recording_sidecar_status_path = None
+        recording_sidecar_names_path = None
+        recording_sidecar_alarms_path = None
+        recording_sidecar_alarm_exit_path = None
+        if recording_tmp_fp is not None:
+            try:
+                recording_tmp_fp.flush()
+            except Exception:
+                pass
+            try:
+                recording_tmp_fp.close()
+            except Exception:
+                pass
+        recording_tmp_fp = None
+        path_saved, fn_saved, size_saved = _finalize_recording_temp_file(recording_tmp_path, recording_rows_written)
+        if not path_saved and record_buffer:
+            path_saved, fn_saved, size_saved = _flush_record_buffer_to_tsv(record_buffer, recording_var_names)
+        recording_tmp_path = None
+        if alarm_payload and isinstance(alarm_payload, dict):
+            nm = alarm_payload.get("name")
+            if nm is not None:
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "alarm_triggered",
+                            "triggered": [
+                                {
+                                    "name": str(nm),
+                                    "reason": str(alarm_payload.get("reason") or ""),
+                                    "value": alarm_payload.get("value"),
+                                }
+                            ],
+                        }
+                    )
+                except Exception:
+                    pass
+        msg: dict = {"type": "record_finished", "path": path_saved or "", "filename": fn_saved or ""}
+        if path_saved:
+            msg["size_bytes"] = int(size_saved if size_saved > 0 else max(0, recording_size_est_bytes))
+        if path_saved and send_file_on_finish:
+            try:
+                with open(path_saved, "rb") as f:
+                    import base64
+
+                    msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+            except Exception:
+                pass
+        if not path_saved:
+            msg["message"] = "No se registraron datos (¿C++ con SHM activo?)."
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
+        record_buffer.clear()
+        recording_var_names = None
+        recording_size_est_bytes = 0
+        recording_header_estimated = False
+        last_record_progress_send_at = 0.0
+        recording_col_spec = None
+        recording_row_layout = None
+        recording_rows_written = 0
+        recording_t0 = None
+        update_shm_read_pause()
+        _try_start_alarm_sidecar()
+
+    ws_close_detail: str | None = None
     try:
         while True:
             try:
                 now = time.monotonic()
+
+                if alarm_sidecar_proc is not None:
+                    if alarm_sidecar_proc.poll() is not None:
+                        print(
+                            "[VarMonitor Web] Aviso: alarm-sidecar terminó; alarmas en Python hasta el próximo set_alarms.",
+                            flush=True,
+                        )
+                        _stop_alarm_sidecar()
+                    elif alarm_sidecar_events_path:
+                        await _drain_alarm_sidecar_events()
+
+                if recording and recording_sidecar_proc is not None:
+                    if recording_sidecar_proc.poll() is not None:
+                        alarm_payload = None
+                        aep = recording_sidecar_alarm_exit_path
+                        if aep and os.path.isfile(aep):
+                            try:
+                                with open(aep, encoding="utf-8") as af:
+                                    alarm_payload = json.load(af)
+                            except Exception:
+                                alarm_payload = None
+                        await _finalize_recording_after_sidecar_exit(alarm_payload)
+                        continue
 
                 catalog_idle = not monitored_names and not recording
                 refresh_iv = names_refresh_interval_idle if catalog_idle else names_refresh_interval
@@ -2422,6 +2920,7 @@ async def websocket_endpoint(ws: WebSocket):
                     and alarms_config
                     and not monitored_names
                     and not recording
+                    and shm_reader.reads_paused()
                     and (now - last_alarm_uds_poll_at >= ALARM_UDS_POLL_SEC)
                 ):
                     last_alarm_uds_poll_at = now
@@ -2556,7 +3055,7 @@ async def websocket_endpoint(ws: WebSocket):
                     ))
                 )
                 if ws_already_closed:
-                    print(f"[VarMonitor Web] WebSocket cerrado mientras se enviaban datos (C++ {connection_label}).", flush=True)
+                    ws_close_detail = ws_close_detail or "cliente cerró mientras se enviaban datos"
                     break
                 print(f"[VarMonitor Web] WebSocket error (C++ {connection_label}): {e}", flush=True)
                 import traceback
@@ -2588,13 +3087,15 @@ async def websocket_endpoint(ws: WebSocket):
                     monitored_names = set(cmd.get("names", []))
                     force_full_vars_update = True
                     ws.app.state.ws_monitored_counts[ws_id] = len(monitored_names)
-                    # Fase 2: suscripción SHM para que C++ solo escriba estas vars
+                    # SHM: monitorizadas ∪ alarmas (si no, las alarmas solo verían get_var lento o nada en SHM).
                     try:
-                        sub_real = [n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET]
+                        sub_real = _shm_subscription_real_names(monitored_names, alarms_config)
                         await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
                     except Exception:
                         pass
                     update_shm_read_pause()
+                    if alarms_config:
+                        _try_start_alarm_sidecar()
                 # Historial en vivo eliminado: se mantiene solo vía SHM y grabaciones TSV.
                 elif action == "set_var":
                     sn = cmd.get("name") or ""
@@ -2635,10 +3136,17 @@ async def websocket_endpoint(ws: WebSocket):
                                     "hys": v.get("hys"),
                                     "delayMs": v.get("delayMs"),
                                 }
+                    try:
+                        sub_real = _shm_subscription_real_names(monitored_names, alarms_config)
+                        await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
+                    except Exception:
+                        pass
                     update_shm_read_pause()
+                    _try_start_alarm_sidecar()
                 elif action == "set_send_file_on_finish":
                     send_file_on_finish = bool(cmd.get("value", False))
                 elif action == "start_recording":
+                    _stop_alarm_sidecar()
                     recording = True
                     record_buffer.clear()
                     recording_var_names = list(monitored_names) if monitored_names else None
@@ -2649,6 +3157,33 @@ async def websocket_endpoint(ws: WebSocket):
                     recording_row_layout = None
                     recording_rows_written = 0
                     recording_t0 = None
+                    if recording_sidecar_proc is not None:
+                        p0 = recording_sidecar_proc
+                        recording_sidecar_proc = None
+                        try:
+                            p0.send_signal(signal.SIGTERM)
+                            p0.wait(timeout=5)
+                        except Exception:
+                            try:
+                                p0.kill()
+                            except Exception:
+                                pass
+                    for aux in (
+                        recording_sidecar_status_path,
+                        recording_sidecar_names_path,
+                        recording_sidecar_alarms_path,
+                        recording_sidecar_alarm_exit_path,
+                    ):
+                        if aux and os.path.isfile(aux):
+                            try:
+                                os.remove(aux)
+                            except OSError:
+                                pass
+                    recording_sidecar_status_path = None
+                    recording_sidecar_names_path = None
+                    recording_sidecar_alarms_path = None
+                    recording_sidecar_alarm_exit_path = None
+                    recording_sidecar_alarm_delegate = False
                     if recording_writer_thread is not None:
                         if recording_write_queue:
                             recording_write_queue.put(None)
@@ -2668,7 +3203,110 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             pass
                     recording_tmp_path = None
-                    if shm_reader and shm_queue is not None:
+                    rb = (_config.get("recording_backend") or "python").strip().lower()
+                    want_sidecar = (
+                        rb == "sidecar_cpp"
+                        and shm_reader is not None
+                        and shm_queue is not None
+                        and info
+                        and info.get("shm_name")
+                        and info.get("sem_name")
+                    )
+                    if want_sidecar:
+                        bin_path = _resolve_recording_sidecar_bin(_config)
+                        if not bin_path:
+                            recording = False
+                            await ws.send_json({
+                                "type": "error",
+                                "message": "Grabación sidecar: ejecutable no encontrado. Use VARMON_SIDECAR_BIN, recording_sidecar_bin en varmon.conf o varmon_sidecar en el PATH.",
+                            })
+                        else:
+                            _ensure_recordings_dir()
+                            recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                            recording_sidecar_status_path = recording_tmp_path + ".stat"
+                            names_path = os.path.join(
+                                RECORDINGS_DIR, f".recording_names_{os.getpid()}_{int(time.time() * 1000)}.txt"
+                            )
+                            recording_sidecar_names_path = names_path
+                            recording_sidecar_alarms_path = None
+                            recording_sidecar_alarm_exit_path = None
+                            recording_sidecar_alarm_delegate = False
+                            nv = list(monitored_names) if monitored_names else []
+                            recording_var_names = nv if nv else None
+                            try:
+                                with open(names_path, "w", encoding="utf-8") as nf:
+                                    for n in nv:
+                                        nf.write(n + "\n")
+                                if alarms_config:
+                                    alarms_tsv = recording_tmp_path + ".alarms.tsv"
+                                    n_al = _write_sidecar_alarms_tsv(alarms_tsv, alarms_config)
+                                    if n_al > 0:
+                                        recording_sidecar_alarms_path = alarms_tsv
+                                        recording_sidecar_alarm_exit_path = recording_tmp_path + ".alarm_exit"
+                                        recording_sidecar_alarm_delegate = True
+                                shm_max = int(_config.get("shm_max_vars", 2048))
+                                args = [
+                                    bin_path,
+                                    "--shm-name",
+                                    str(info["shm_name"]),
+                                    "--sem-name",
+                                    str(info["sem_name"]),
+                                    "--output",
+                                    recording_tmp_path,
+                                    "--names-file",
+                                    names_path,
+                                    "--max-vars",
+                                    str(shm_max),
+                                    "--status-file",
+                                    recording_sidecar_status_path,
+                                ]
+                                if recording_sidecar_alarms_path and recording_sidecar_alarm_exit_path:
+                                    args.extend(
+                                        [
+                                            "--alarms-file",
+                                            recording_sidecar_alarms_path,
+                                            "--alarm-exit-file",
+                                            recording_sidecar_alarm_exit_path,
+                                        ]
+                                    )
+                                recording_sidecar_proc = subprocess.Popen(
+                                    args,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    close_fds=True,
+                                )
+                                if recording_sidecar_alarm_delegate:
+                                    print(
+                                        f"[VarMonitor Web] Grabación sidecar C++ (alarmas en sidecar → parada automática): {bin_path}",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(f"[VarMonitor Web] Grabación sidecar C++: {bin_path}", flush=True)
+                            except Exception as e:
+                                recording = False
+                                recording_sidecar_proc = None
+                                recording_tmp_path = None
+                                recording_sidecar_status_path = None
+                                recording_sidecar_names_path = None
+                                ap = recording_sidecar_alarms_path
+                                aex = recording_sidecar_alarm_exit_path
+                                recording_sidecar_alarms_path = None
+                                recording_sidecar_alarm_exit_path = None
+                                recording_sidecar_alarm_delegate = False
+                                for aux in (ap, aex):
+                                    if aux and os.path.isfile(aux):
+                                        try:
+                                            os.remove(aux)
+                                        except OSError:
+                                            pass
+                                if os.path.isfile(names_path):
+                                    try:
+                                        os.remove(names_path)
+                                    except OSError:
+                                        pass
+                                await ws.send_json({"type": "error", "message": f"No se pudo arrancar el sidecar: {e}"})
+                    elif shm_reader and shm_queue is not None:
                         _ensure_recordings_dir()
                         recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
                         recording_write_queue = Queue()
@@ -2679,14 +3317,64 @@ async def websocket_endpoint(ws: WebSocket):
                             daemon=True,
                         )
                         recording_writer_thread.start()
-                    try:
-                        await ws.send_json({"type": "recording_progress", "bytes": 0, "samples": 0})
-                    except Exception:
-                        pass
+                    if recording:
+                        try:
+                            await ws.send_json({"type": "recording_progress", "bytes": 0, "samples": 0})
+                        except Exception:
+                            pass
                     update_shm_read_pause()
                 elif action == "stop_recording":
                     recording = False
-                    if recording_write_queue is not None and recording_writer_thread is not None:
+                    if recording_sidecar_proc is not None:
+                        psc = recording_sidecar_proc
+                        recording_sidecar_proc = None
+                        try:
+                            psc.send_signal(signal.SIGTERM)
+                            psc.wait(timeout=12)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                psc.kill()
+                                psc.wait(timeout=4)
+                            except Exception:
+                                pass
+                        except Exception:
+                            try:
+                                psc.kill()
+                            except Exception:
+                                pass
+                        rows_done = 0
+                        stp = recording_sidecar_status_path
+                        if stp and os.path.isfile(stp):
+                            try:
+                                with open(stp, encoding="utf-8") as sf:
+                                    first = (sf.readline() or "").strip()
+                                rows_done = int(first) if first.isdigit() else 0
+                            except (OSError, ValueError):
+                                rows_done = 0
+                        if rows_done <= 0 and recording_tmp_path and os.path.isfile(recording_tmp_path):
+                            try:
+                                with open(recording_tmp_path, "rb") as rf:
+                                    rows_done = max(0, rf.read().count(b"\n") - 1)
+                            except OSError:
+                                rows_done = 0
+                        recording_rows_written = rows_done
+                        recording_sidecar_alarm_delegate = False
+                        for aux in (
+                            recording_sidecar_status_path,
+                            recording_sidecar_names_path,
+                            recording_sidecar_alarms_path,
+                            recording_sidecar_alarm_exit_path,
+                        ):
+                            if aux and os.path.isfile(aux):
+                                try:
+                                    os.remove(aux)
+                                except OSError:
+                                    pass
+                        recording_sidecar_status_path = None
+                        recording_sidecar_names_path = None
+                        recording_sidecar_alarms_path = None
+                        recording_sidecar_alarm_exit_path = None
+                    elif recording_write_queue is not None and recording_writer_thread is not None:
                         recording_write_queue.put(None)
                         recording_writer_thread.join(timeout=5.0)
                         recording_writer_thread = None
@@ -2734,25 +3422,69 @@ async def websocket_endpoint(ws: WebSocket):
                     recording_rows_written = 0
                     recording_t0 = None
                     update_shm_read_pause()
+                    _try_start_alarm_sidecar()
             except asyncio.TimeoutError:
                 pass
             except WebSocketDisconnect:
-                print(f"[VarMonitor Web] WebSocket desconectado por el cliente durante receive (C++ {connection_label})", flush=True)
+                ws_close_detail = ws_close_detail or "cliente durante receive"
                 break
             except RuntimeError as e:
                 if "WebSocket is not connected" in str(e):
-                    print(f"[VarMonitor Web] WebSocket no conectado durante receive (C++ {connection_label})", flush=True)
+                    ws_close_detail = ws_close_detail or "socket ya no conectado (receive)"
                     break
                 raise
     except WebSocketDisconnect:
-        print(f"[VarMonitor Web] WebSocket desconectado por el cliente (C++ {connection_label})", flush=True)
+        ws_close_detail = ws_close_detail or "WebSocketDisconnect (bucle principal)"
     finally:
+        _stop_alarm_sidecar()
         if shm_drain_task is not None:
             shm_drain_task.cancel()
             try:
                 await shm_drain_task
             except asyncio.CancelledError:
                 pass
+        if recording_sidecar_proc is not None:
+            try:
+                recording_sidecar_proc.send_signal(signal.SIGTERM)
+                recording_sidecar_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    recording_sidecar_proc.kill()
+                except Exception:
+                    pass
+            recording_sidecar_proc = None
+            if recording and recording_rows_written <= 0:
+                stp = recording_sidecar_status_path
+                if stp and os.path.isfile(stp):
+                    try:
+                        with open(stp, encoding="utf-8") as sf:
+                            first = (sf.readline() or "").strip()
+                        if first.isdigit():
+                            recording_rows_written = int(first)
+                    except (OSError, ValueError):
+                        pass
+                if recording_rows_written <= 0 and recording_tmp_path and os.path.isfile(recording_tmp_path):
+                    try:
+                        with open(recording_tmp_path, "rb") as rf:
+                            recording_rows_written = max(0, rf.read().count(b"\n") - 1)
+                    except OSError:
+                        pass
+        for aux in (
+            recording_sidecar_status_path,
+            recording_sidecar_names_path,
+            recording_sidecar_alarms_path,
+            recording_sidecar_alarm_exit_path,
+        ):
+            if aux and os.path.isfile(aux):
+                try:
+                    os.remove(aux)
+                except OSError:
+                    pass
+        recording_sidecar_status_path = None
+        recording_sidecar_names_path = None
+        recording_sidecar_alarms_path = None
+        recording_sidecar_alarm_exit_path = None
+        recording_sidecar_alarm_delegate = False
         if recording_write_queue is not None and recording_writer_thread is not None:
             try:
                 recording_write_queue.put(None)
@@ -2793,7 +3525,8 @@ async def websocket_endpoint(ws: WebSocket):
             counts.pop(ws_id, None)
         ACTIVE_WS -= 1
         bridge.disconnect()
-        print(f"[VarMonitor Web] WebSocket cerrado (C++ {connection_label})", flush=True)
+        suffix = f" — {ws_close_detail}" if ws_close_detail else ""
+        print(f"[VarMonitor Web] WebSocket cerrado (C++ {connection_label}){suffix}", flush=True)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

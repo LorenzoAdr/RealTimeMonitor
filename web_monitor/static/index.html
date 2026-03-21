@@ -117,8 +117,8 @@
                     </label>
                     <label id="visualBufferLabel">Buffer visual:
                         <select id="timeWindow">
-                            <option value="10">10s</option>
-                            <option value="30" selected>30s</option>
+                            <option value="10" selected>10s</option>
+                            <option value="30">30s</option>
                             <option value="60">1 min</option>
                             <option value="120">2 min</option>
                         </select>
@@ -167,7 +167,7 @@
                         <input type="number" id="offlineWindowSpanInput" min="1" max="20" step="1" value="3" title="Ancho de cada ventana de lectura desde TSV en modo análisis (solo monitorización)">
                     </label>
                     <label class="settings-adv-checkbox">Buffer visual por defecto (s):
-                        <input type="number" id="defaultVisualBufferInput" min="1" max="120" step="1" value="30">
+                        <input type="number" id="defaultVisualBufferInput" min="1" max="7200" step="1" value="10" title="Valores altos aumentan RAM del navegador; use con cuidado. varmon.conf: visual_buffer_sec">
                     </label>
                     <label class="settings-adv-checkbox">Umbral carga completa (MB):
                         <input type="number" id="offlineFullLoadMaxMbInput" min="5" step="1" value="100">
