@@ -17,6 +17,8 @@
 #include <limits.h>
 #include <map>
 #include <cstdlib>
+#include <type_traits>
+#include <variant>
 
 namespace varmon {
 
@@ -233,45 +235,41 @@ static bool recv_message(int fd, std::string& out) {
     return recv_all(fd, out.data(), len);
 }
 
-static const char* type_str(VarType t) {
-    switch (t) {
-        case VarType::Double: return "double";
-        case VarType::Int32:  return "int32";
-        case VarType::Bool:   return "bool";
-        case VarType::String: return "string";
-        case VarType::Array:  return "array";
+/** Etiqueta JSON según el tipo activo del variant (no usar VarSnapshot::type: puede no coincidir y std::get lanzaba bad_variant_access). */
+static const char* type_str_from_variant(const VarValue& val) {
+    switch (val.index()) {
+        case 0: return "double";
+        case 1: return "int32";
+        case 2: return "bool";
+        case 3: return "string";
+        case 4: return "array";
+        default: return "unknown";
     }
-    return "unknown";
 }
 
 static void write_var_json(std::ostringstream& ss, const VarMonitor::VarSnapshot& v) {
     ss << "{\"name\":\"" << json_escape(v.name) << "\""
-       << ",\"type\":\"" << type_str(v.type) << "\"";
+       << ",\"type\":\"" << type_str_from_variant(v.value) << "\"";
 
-    switch (v.type) {
-        case VarType::Double:
-            ss << ",\"value\":" << std::get<double>(v.value);
-            break;
-        case VarType::Int32:
-            ss << ",\"value\":" << std::get<int32_t>(v.value);
-            break;
-        case VarType::Bool:
-            ss << ",\"value\":" << (std::get<bool>(v.value) ? "true" : "false");
-            break;
-        case VarType::String:
-            ss << ",\"value\":\"" << json_escape(std::get<std::string>(v.value)) << "\"";
-            break;
-        case VarType::Array: {
-            auto& arr = std::get<std::vector<double>>(v.value);
+    std::visit([&ss](const auto& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, double>) {
+            ss << ",\"value\":" << arg;
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            ss << ",\"value\":" << arg;
+        } else if constexpr (std::is_same_v<T, bool>) {
+            ss << ",\"value\":" << (arg ? "true" : "false");
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            ss << ",\"value\":\"" << json_escape(arg) << "\"";
+        } else if constexpr (std::is_same_v<T, std::vector<double>>) {
             ss << ",\"value\":[";
-            for (size_t i = 0; i < arr.size(); i++) {
+            for (size_t i = 0; i < arg.size(); i++) {
                 if (i > 0) ss << ",";
-                ss << arr[i];
+                ss << arg[i];
             }
-            ss << "],\"size\":" << arr.size();
-            break;
+            ss << "],\"size\":" << arg.size();
         }
-    }
+    }, v.value);
 
     double ts = std::chrono::duration<double>(v.time.time_since_epoch()).count();
     ss << ",\"timestamp\":" << std::fixed << std::setprecision(6) << ts << "}";

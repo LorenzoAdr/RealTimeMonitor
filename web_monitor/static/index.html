@@ -33,11 +33,15 @@
             <span id="varCount" class="var-count"></span>
         </div>
         <div id="advancedStatsStrip" class="advanced-stats-strip" style="display:none" aria-hidden="true">
-            <div class="adv-block">
+            <div class="adv-block" title="RAM: Py/C++ son procesos aparte. «HTML» aquí es solo el heap JS (V8), no la RAM total del proceso del navegador que ves en el monitor del portátil (GPU, WebGL/Plotly, cachés nativas, fragmentación; Chromium a menudo no devuelve páginas al SO).">
                 <span class="adv-label">RAM</span>
-                <span id="advRamHtml" class="adv-val" title="Navegador">HTML: —</span>
-                <span id="advRamPython" class="adv-val" title="Backend Python">Py: —</span>
-                <span id="advRamCpp" class="adv-val" title="Proceso C++">C++: —</span>
+                <span id="advRamHtml" class="adv-val" title="Solo heap JavaScript (V8) de esta pestaña. El monitor del sistema muestra todo el proceso del navegador, suele ser mucho mayor.">HTML: —</span>
+                <span id="advRamPython" class="adv-val" title="RSS del proceso Python (FastAPI/uvicorn). Independiente del navegador de run_desktop.">Py: —</span>
+                <span id="advRamCpp" class="adv-val" title="RAM del proceso C++ (vía UDS), si está disponible">C++: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">Mon.</span>
+                <span id="advMonCount" class="adv-val" title="Variables en la lista de monitorización (backend; varias pestañas → máximo entre sesiones WS)">vars: —</span>
             </div>
             <div class="adv-block">
                 <span class="adv-label">CPU</span>
@@ -432,9 +436,12 @@
                     <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
                 </div>
             </div>
+            <div class="plot-workspace">
+            <div id="monitorDetailDock" class="monitor-detail-dock monitor-detail-dock--plot-overlay" style="display:none" role="region" aria-label="Consulta y ajuste de variable"></div>
             <div id="plotArea" class="plot-area" tabindex="0">
                 <div id="plotEmpty" class="plot-empty">Selecciona variables y asígnalas a un gráfico</div>
                 <button id="toggleAdvancedPlotBtn" class="btn-small btn-advanced-plot-toggle" type="button" title="Mostrar u ocultar opciones avanzadas de análisis">Opciones avanzadas</button>
+            </div>
             </div>
             <div id="anomalyPanel" class="anomaly-panel" style="display:none">
                 <div class="anomaly-controls">

@@ -196,5 +196,5 @@ Only **monitored** variables are updated and sent to the browser; others are not
 
 ## Alarms and recording in the backend
 
-- **Alarms**: frontend sends `set_alarms` with `{ name: { lo, hi } }`. Backend evaluates each snapshot; threshold cross → `alarm_triggered`; back in range → `alarm_cleared`. Rolling buffer 10 s + 1 s; after trigger, 1 s later write TSV and `alarm_recording_ready`.
+- **Alarms**: frontend sends `set_alarms` with `{ name: { lo, hi } }`. Backend evaluates each snapshot; threshold cross → `alarm_triggered`; back in range → `alarm_cleared`. Short rolling buffer (~1 s + 1 s) with **full snapshot** per sample; after trigger, 1 s later write TSV and `alarm_recording_ready`.
 - **Recording**: `start_recording` / `stop_recording`. Backend queues snapshots. On stop, writes TSV under `web_monitor/recordings/`, sends `record_finished` with `path` (and optional `file_base64`). Toast shows path; file attachment only if "Send file when finished" is enabled.

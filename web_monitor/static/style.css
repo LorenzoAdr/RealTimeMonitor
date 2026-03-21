@@ -560,7 +560,12 @@ main {
     min-width: calc(240px * var(--monitor-columns));
     flex-shrink: 0;
     max-width: 60%;
-    overflow-y: auto;
+    /* Solo la lista (#monitorList) hace scroll; si el panel también overflow-y:auto, algunos Chrome/OS
+       ocultan la barra del hijo o delegan el scroll al padre de forma confusa. */
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 .col-plot { flex: 1; min-width: 300px; }
 
@@ -1374,17 +1379,171 @@ main {
     flex-shrink: 0;
 }
 
+/* Panel consulta/ajuste (lista virtual): superpuesto arriba-izquierda sobre la zona de gráficos */
+.plot-workspace {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+.monitor-detail-dock {
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
+}
+.monitor-detail-dock.monitor-detail-dock--plot-overlay {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 26;
+    max-width: min(440px, calc(100% - 16px));
+    max-height: min(52vh, calc(100% - 48px));
+}
+.monitor-detail-dock-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.monitor-detail-dock-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    word-break: break-all;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.3;
+}
+.btn-monitor-detail-close {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    line-height: 1;
+    font-size: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text-dim);
+    cursor: pointer;
+}
+.btn-monitor-detail-close:hover {
+    color: var(--text);
+    border-color: var(--accent);
+}
+.stats-panel.stats-panel--docked {
+    margin: 0;
+    padding-top: 0;
+}
+
+.mon-status-tags {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    max-width: 140px;
+}
+.mon-tag {
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 2px 5px;
+    border-radius: 3px;
+    border: 1px solid;
+    flex-shrink: 0;
+    line-height: 1.2;
+}
+.mon-tag--units {
+    color: #93c5fd;
+    border-color: #2563eb;
+    background: rgba(37, 99, 235, 0.2);
+}
+.mon-tag--gen {
+    color: #86efac;
+    border-color: #16a34a;
+    background: rgba(22, 163, 74, 0.2);
+}
+.mon-tag--alarm {
+    color: #fca5a5;
+    border-color: #dc2626;
+    background: rgba(220, 38, 38, 0.2);
+}
+.mon-tag--arinc {
+    color: #fde68a;
+    border-color: #d97706;
+    background: rgba(217, 119, 6, 0.22);
+}
+/* Subcanales .arinc.* monitorizados: mismo texto, estilo neutro para contrastar con la palabra base. */
+.mon-tag--arinc-virt {
+    color: var(--text-dim);
+    border-color: var(--border);
+    background: transparent;
+    font-weight: 600;
+}
+
+.arinc-subvar-row .btn-arinc-add-monitor {
+    flex-shrink: 0;
+    min-width: 26px;
+    height: 22px;
+    padding: 0 6px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    line-height: 1;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--accent);
+    cursor: pointer;
+}
+.arinc-subvar-row .btn-arinc-add-monitor:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: rgba(108, 140, 255, 0.12);
+}
+.arinc-subvar-row .btn-arinc-add-monitor:disabled,
+.arinc-subvar-row .btn-arinc-add-monitor--done {
+    opacity: 0.45;
+    cursor: default;
+    color: var(--text-dim);
+}
+
 /* --- Monitor list --- */
 .monitor-list {
     flex: 1 1 auto;
-    /* deja que la altura total crezca dentro de col-monitor,
-       que ahora tiene su propio scroll vertical */
+    min-height: 0;
+    /* Scroll explícito en la lista; reserva hueco para barra (evita overlay “invisible” en Chrome). */
     overflow-y: auto;
     overflow-x: hidden;
+    scrollbar-gutter: stable;
     padding: 4px;
     column-count: var(--monitor-columns);
     column-gap: 8px;
-    min-height: 0;
+}
+
+/* Lista virtual: una sola columna y altura total simulada con spacers (miles de variables). */
+.monitor-list.monitor-list--virtual {
+    column-count: 1 !important;
+    column-gap: 0;
+    display: block;
+}
+.monitor-list.monitor-list--virtual .monitor-vm-rows {
+    display: block;
+    width: 100%;
+}
+.monitor-list.monitor-list--virtual .monitor-vm-spacer {
+    display: block;
+    width: 100%;
+    flex-shrink: 0;
+}
+.monitor-list.monitor-list--virtual .monitor-item-wrap {
+    content-visibility: visible;
+    contain-intrinsic-size: auto;
 }
 
 .monitor-list.mon-drop-over {
@@ -1524,13 +1683,6 @@ body.monitor-compact .stats-panel {
 
 .monitor-item .mon-name { cursor: pointer; }
 .monitor-item .mon-name:hover { color: var(--accent); }
-
-.mon-alarm-icon {
-    font-size: 0.65rem;
-    color: var(--red);
-    flex-shrink: 0;
-    opacity: 0.8;
-}
 
 /* --- Stats panel --- */
 .stats-panel {
@@ -2221,10 +2373,8 @@ body.monitor-compact .stats-panel {
     flex-direction: column;
     gap: 2px;
 }
-.monitor-list.monitor-virtualized .monitor-item-wrap {
-    content-visibility: auto;
-    contain-intrinsic-size: 28px;
-}
+/* (Quitado content-visibility en lista larga no-VM: con filas más altas que 28px el scroll
+   del portátil se quedaba “atascado” al entrar en la zona de muchas filas.) */
 .browser-virtual-window {
     position: relative;
 }

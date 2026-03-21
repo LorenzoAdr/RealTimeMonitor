@@ -44,7 +44,7 @@ The backend lives in [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSo
 2. **Pick UDS instance**: If `uds_path` is missing in the query, call `_list_uds_instances(None)` and take the first. If none, send `error` and close.
 3. **Connect UDS and server_info**: Create `UdsBridge(query_uds, 5.0)` and call `bridge.get_server_info()`. Read `shm_name` and `sem_name`.
 4. **ShmReader**: If `shm_name` and `sem_name` exist, create a `Queue` and `ShmReader(shm_name, sem_name, shm_queue, max_vars=_config["shm_max_vars"])`. Call `shm_reader.start()`. `max_vars` is how many entries to read per snapshot (must match C++). If the semaphore cannot open (e.g. WSL), ShmReader may use polling (~5 ms SHM reads, change detection via `seq`).
-5. **Main loop**: A task `_shm_drain_loop()` drains the SHM queue. For each snapshot: update `latest_snapshot`, evaluate alarms (`_evaluate_alarms`), fill rolling `alarm_buffer` (10 s + 1 s), and if recording is active enqueue the snapshot for the TSV writer thread. At **visual** rate (every `update_ratio` cycles) send `vars_update` to the browser with the current snapshot.
+5. **Main loop**: A task `_shm_drain_loop()` drains the SHM queue (FIFO; `shm_queue_max_size`, 0 = unbounded; when full the reader thread blocks on `put`). For each snapshot: update `latest_snapshot`, evaluate alarms (`_evaluate_alarms`), fill rolling `alarm_buffer` (short window ~1 s + 1 s, full snapshots), and if recording is active enqueue the snapshot for the TSV writer thread. At **visual** rate (every `update_ratio` cycles) send `vars_update` to the browser with the current snapshot.
 6. **Client messages**: In parallel, receive JSON from the frontend: `monitored`, `set_alarms`, `start_recording`, `stop_recording`, `update_ratio`, `send_file_on_finish`, etc. Update `monitored_names`, `alarms_config`, `recording`, etc.
 7. **Alarms**: In `_shm_drain_loop`, if `_evaluate_alarms` detects threshold crossing, send `alarm_triggered`; when back in range, `alarm_cleared`. After trigger, 1 s later write alarm TSV buffer and send `alarm_recording_ready` (path and optional `file_base64`).
 8. **Recording**: On `start_recording` start a writer thread (`_recording_writer_thread`) writing TSV rows. On `stop_recording` finalize the file and send `record_finished` with `path` and optional `file_base64`.
@@ -52,7 +52,7 @@ The backend lives in [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSo
 ## Helper modules
 
 - **uds_client.py**: `UdsBridge` class. Unix socket connection, commands (4-byte big-endian length + JSON), responses. Methods: `get_server_info()`, `list_names`, `list_vars`, `get_var(name)`, `set_var(...)`, etc.
-- **shm_reader.py**: `ShmReader` class. Opens `/dev/shm/<shm_name>` with `mmap` and semaphore via ctypes. Thread runs `sem_timedwait` (or polling on failure), reads header + segment entries, builds `{name, type, value}` lists and pushes to the queue. The WebSocket consumes the queue in `_shm_drain_loop`.
+- **shm_reader.py**: `ShmReader` class. Opens `/dev/shm/<shm_name>` with `mmap` and semaphore via ctypes. Thread runs `sem_timedwait` (or polling on failure), reads header + segment entries, builds `{name, type, value}` lists and enqueues each snapshot (FIFO). The WebSocket consumes the queue in `_shm_drain_loop`.
 
 ## Key functions for alarms and recording
 

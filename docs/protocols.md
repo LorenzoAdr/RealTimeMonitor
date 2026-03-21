@@ -202,5 +202,5 @@ Resumen: **variables no monitorizadas** no se envían al navegador. Con suscripc
 
 ## Alarmas y grabación en backend
 
-- **Alarmas**: el frontend envía `set_alarms` con `{ name: { lo, hi } }`. El backend evalúa cada snapshot; si un valor cruza umbral envía `alarm_triggered`; si vuelve a rango `alarm_cleared`. Buffer rodante 10 s + 1 s; al disparar, 1 s después se escribe TSV y se notifica `alarm_recording_ready`.
+- **Alarmas**: el frontend envía `set_alarms` con `{ name: { lo, hi } }`. El backend evalúa cada snapshot; si un valor cruza umbral envía `alarm_triggered`; si vuelve a rango `alarm_cleared`. Buffer rodante corto (~1 s + 1 s) con **snapshot completo** por muestra; al disparar, 1 s después se escribe TSV y se notifica `alarm_recording_ready`.
 - **Grabación**: el frontend envía `start_recording` y `stop_recording`. El backend encola snapshots. Al parar, escribe TSV en `web_monitor/recordings/`, envía `record_finished` con `path` (y opcionalmente `file_base64`). La ruta se muestra en un toast; el fichero se envía solo si está activada la opción "Enviar fichero al terminar".

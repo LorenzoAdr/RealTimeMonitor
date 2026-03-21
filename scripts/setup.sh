@@ -11,6 +11,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install -r requirements-desktop.txt
+python "$(dirname "$0")/patch_pywebview_qt.py"
 
 echo "=== Dependencias instaladas correctamente ==="
 echo ""
@@ -23,3 +25,6 @@ echo "Para arrancar:"
 echo "  1. ./build/demo_app/demo_server"
 echo "  2. cd web_monitor && source .venv/bin/activate && python app.py"
 echo "  3. Abrir http://localhost:8080"
+echo ""
+echo "Ventana embebida (Qt por pip; ver requirements-desktop.txt). En WSL sin WSLg se usa el navegador de Windows:"
+echo "  ./scripts/run_desktop.sh"

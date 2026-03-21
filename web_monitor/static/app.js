@@ -43,6 +43,8 @@
     let seriesColorByName = {};
     let seriesHueByName = {};
     let historyCache = {};
+    /** En modo live: si en el tick anterior había series en gráficos y ahora no, purgar buffers una vez. */
+    let lastLiveHistoryNeed = undefined;
     let graphList = [];
     let graphColumns = [];
     let plotInstances = {};
@@ -52,7 +54,14 @@
     const ARRAY_HIST_MAX = 2000;
 
     let plotRafPending = false;
-    let localHistMaxSec = 30;
+    /** En live: purgar Plotly cada N repintados para soltar retención interna (react acumula). */
+    let plotLiveRenderCount = 0;
+    const PLOT_LIVE_PURGE_EVERY = 72;
+    /** Coalescencia vars_update → un onVarsUpdate por frame (menos CPU/RAM que N mensajes WS en el mismo frame). */
+    let liveVarsCoalesceMap = null;
+    let liveVarsCoalesceRafId = 0;
+    const DEFAULT_LOCAL_HIST_MAX_SEC = 10;
+    let localHistMaxSec = DEFAULT_LOCAL_HIST_MAX_SEC;
     /** Origen de tiempo compartido para todos los gráficos (segundos Unix). Se fija con el primer historial recibido. */
     let sessionStartTime = null;
 
@@ -114,6 +123,21 @@
     const selectNoneBtn = document.getElementById("selectNone");
     const refreshNamesBtn = document.getElementById("refreshNames");
     const monitorListEl = document.getElementById("monitorList");
+    /** Lista virtualizada: solo filas visibles en DOM; evita miles de nodos y RAM. */
+    const MONITOR_VM_THRESHOLD = 150;
+    /** Filas extra arriba/abajo del viewport; más buffer = scroll rápido sin “huecos” (todo pre-renderizado en ~1 frame). */
+    const MONITOR_VM_BUFFER = 12;
+    /**
+     * Al arrastrar al gráfico, si la variable está en la preselección del monitor se asignan todas
+     * las preseleccionadas. Con "Seleccionar todas" + miles de variables eso activa needsScalarPlotHistory
+     * para todas y el buffer de onVarsUpdate crece como si se plotearan 5000 series → fuga brutal de RAM.
+     */
+    const MAX_GRAPH_ASSIGN_BATCH = 128;
+    let monitorVmTopSpacer = null;
+    let monitorVmRows = null;
+    let monitorVmBottomSpacer = null;
+    let monitorVmRowPx = 36;
+    let monitorVmScrollPending = false;
     const monitorFilterInput = document.getElementById("monitorFilterInput");
     const monitorSelectAllBtn = document.getElementById("monitorSelectAllBtn");
     const monitorDeselectAllBtn = document.getElementById("monitorDeselectAllBtn");
@@ -158,6 +182,7 @@
     const advRamHtml = document.getElementById("advRamHtml");
     const advRamPython = document.getElementById("advRamPython");
     const advRamCpp = document.getElementById("advRamCpp");
+    const advMonCount = document.getElementById("advMonCount");
     const advCpuPython = document.getElementById("advCpuPython");
     const advCpuCpp = document.getElementById("advCpuCpp");
     const advNetMbMsg = document.getElementById("advNetMbMsg");
@@ -251,7 +276,7 @@
             }
             timeWindowSelect.value = closest;
             const sec = parseInt(closest, 10);
-            localHistMaxSec = (Number.isFinite(sec) && sec > 0) ? sec : 60;
+            localHistMaxSec = (Number.isFinite(sec) && sec > 0) ? sec : DEFAULT_LOCAL_HIST_MAX_SEC;
             if (isLiveMode()) trimLocalHistory();
             saveConfig();
             schedulePlotRender();
@@ -357,6 +382,7 @@
     let browserVirtualRowPx = 24;
     let browserVirtualOverscan = 10;
     let browserVirtualRows = [];
+    let browserVirtualScrollPending = false;
     let arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
     let offlineSafetyInfo = null;
     let recordingsMetaByName = new Map();
@@ -634,13 +660,15 @@
                 } else {
                     if (!varsByName[name]) varsByName[name] = { name, value: val, type: varType || "double" };
                     else varsByName[name].value = val;
-                    if (!historyCache[name]) historyCache[name] = { timestamps: [], values: [] };
-                    const h = historyCache[name];
-                    h.timestamps.push(now);
-                    h.values.push(val);
-                    if (h.timestamps.length > (localHistMaxSec || 30) * 100) {
-                        h.timestamps.shift();
-                        h.values.shift();
+                    if (needsScalarPlotHistory(name)) {
+                        if (!historyCache[name]) historyCache[name] = { timestamps: [], values: [] };
+                        const h = historyCache[name];
+                        h.timestamps.push(now);
+                        h.values.push(val);
+                        if (h.timestamps.length > (localHistMaxSec || DEFAULT_LOCAL_HIST_MAX_SEC) * 100) {
+                            h.timestamps.shift();
+                            h.values.shift();
+                        }
                     }
                 }
                 schedulePlotRender();
@@ -729,6 +757,7 @@
         monitoredOrder = monitoredOrder.filter(n => n !== name);
         delete varGraphAssignment[name];
         expandedStats.delete(name);
+        pruneMonitorAuxMapsForName(name);
     }
 
     function isComputed(name) {
@@ -736,6 +765,7 @@
     }
 
     function evalComputedVars() {
+        if (computedVars.length === 0) return;
         const vals = {};
         for (const [k, v] of Object.entries(varsByName)) {
             if (isComputed(k)) continue;
@@ -759,13 +789,19 @@
                 varsByName[cv.name] = { name: cv.name, type: "double", value: num, timestamp: now };
                 const hist = computedHistories[cv.name];
                 if (hist) {
-                    hist.timestamps.push(now);
-                    hist.values.push(num);
-                    if (hist.timestamps.length > COMPUTED_MAX_HISTORY) {
-                        hist.timestamps.shift();
-                        hist.values.shift();
+                    if (needsScalarPlotHistory(cv.name)) {
+                        hist.timestamps.push(now);
+                        hist.values.push(num);
+                        if (hist.timestamps.length > COMPUTED_MAX_HISTORY) {
+                            hist.timestamps.shift();
+                            hist.values.shift();
+                        }
+                        historyCache[cv.name] = hist;
+                    } else {
+                        delete historyCache[cv.name];
+                        hist.timestamps.length = 0;
+                        hist.values.length = 0;
                     }
-                    historyCache[cv.name] = hist;
                 }
             } catch (e) { /* expression references unavailable vars */ }
         }
@@ -808,6 +844,30 @@
 
     function getArincBaseName(derivedName) {
         return String(derivedName).replace(/\.arinc\.(label|sdi|data|ssm|parity|value)$/, "");
+    }
+
+    /** Inserta `base.arinc.suffix` en la lista monitorizada justo después del bloque base + derivados del mismo word. */
+    function insertArincDerivedMonitoredAfterBase(baseName, suffix) {
+        if (!baseName || !suffix || !ARINC_SUFFIXES.includes(suffix)) return;
+        if (!isArincEnabled(baseName)) return;
+        const dName = `${baseName}.arinc.${suffix}`;
+        if (monitoredNames.has(dName)) return;
+        const anchorIdx = monitoredOrder.indexOf(baseName);
+        if (anchorIdx === -1) return;
+        let insertAt = anchorIdx + 1;
+        const prefix = baseName + ".arinc.";
+        while (insertAt < monitoredOrder.length && monitoredOrder[insertAt].startsWith(prefix)) {
+            insertAt++;
+        }
+        monitoredNames.add(dName);
+        monitoredOrder.splice(insertAt, 0, dName);
+        if (!(dName in varGraphAssignment)) varGraphAssignment[dName] = "";
+        saveConfig();
+        sendMonitored();
+        renderBrowserList();
+        rebuildMonitorList();
+        schedulePlotRender();
+        updateMonitorItemStyles();
     }
 
     function reverseBits8(x) {
@@ -925,6 +985,7 @@
             monitoredOrder = monitoredOrder.filter((x) => x !== n);
             delete varGraphAssignment[n];
             expandedStats.delete(n);
+            pruneMonitorAuxMapsForName(n);
         }
     }
 
@@ -949,8 +1010,20 @@
         for (const suffix of ARINC_SUFFIXES) {
             const dName = `${baseName}.arinc.${suffix}`;
             const v = vals[suffix];
-            varsByName[dName] = { name: dName, type: "double", value: v, timestamp: ts };
+            const needDerivedEntry = monitoredNames.has(dName) || needsScalarPlotHistory(dName);
+            if (needDerivedEntry) {
+                const prev = varsByName[dName];
+                if (prev && typeof prev === "object" && prev.type === "double") {
+                    prev.value = v;
+                    prev.timestamp = ts;
+                } else {
+                    varsByName[dName] = { name: dName, type: "double", value: v, timestamp: ts };
+                }
+            } else if (varsByName[dName]) {
+                delete varsByName[dName];
+            }
             if (!appendHistory || !Number.isFinite(v)) continue;
+            if (!needsScalarPlotHistory(dName)) continue;
             if (!historyCache[dName]) historyCache[dName] = { timestamps: [], values: [] };
             historyCache[dName].timestamps.push(ts);
             historyCache[dName].values.push(v);
@@ -1743,11 +1816,11 @@
             if (cfg.timeWindow) {
                 timeWindowSelect.value = cfg.timeWindow;
                 const v = parseInt(cfg.timeWindow, 10);
-                localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+                localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : DEFAULT_LOCAL_HIST_MAX_SEC;
             } else if (cfg.historyBuffer) {
                 timeWindowSelect.value = cfg.historyBuffer;
                 const v = parseInt(cfg.historyBuffer, 10);
-                localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+                localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : DEFAULT_LOCAL_HIST_MAX_SEC;
             }
             const smoothPlotsSelect = document.getElementById("smoothPlotsSelect");
             if (smoothPlotsSelect && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
@@ -2404,19 +2477,28 @@
         exportPdfReportBtn.addEventListener("click", async () => {
             const prevExpanded = new Set(expandedStats);
             try {
-                for (const n of monitoredOrder) expandedStats.add(n);
+                const useVirtualReport = shouldUseMonitorVirtualList();
+                if (!useVirtualReport) {
+                    for (const n of monitoredOrder) expandedStats.add(n);
+                }
                 rebuildMonitorList();
                 updateMonitorValues();
                 const rows = anomalyResults.slice(0, 200).map((a) => {
                     const rel = offlineDataset ? (a.ts - offlineDataset.minTs) : a.ts;
                     return `<tr><td>${rel.toFixed(3)}s</td><td>${a.name}</td><td>${a.type}</td><td>${a.detail}</td></tr>`;
                 }).join("");
-                const monitorRows = Array.from(monitorListEl.querySelectorAll(".monitor-item-wrap")).map((w) => {
-                    const nm = w.querySelector(".mon-name")?.textContent?.trim() || "";
-                    const vv = w.querySelector(".mon-value")?.textContent?.trim() || "";
-                    const stats = w.querySelector(".stats-panel")?.innerText?.trim() || "";
-                    return `<tr><td>${nm}</td><td>${vv}</td><td><pre style="margin:0;white-space:pre-wrap">${stats || "-"}</pre></td></tr>`;
-                }).join("");
+                const monitorRows = (useVirtualReport || monitorListEl.classList.contains("monitor-list--virtual") || monitorDetailPanelUsesDock())
+                    ? monitoredOrder.map((nm) => {
+                        const vd = varsByName[nm];
+                        const vvRaw = vd ? formatValue(vd.value, vd.type, nm) : "--";
+                        return `<tr><td>${escapeLogHtml(nm)}</td><td>${escapeLogHtml(String(vvRaw))}</td><td>—</td></tr>`;
+                    }).join("")
+                    : Array.from(monitorListEl.querySelectorAll(".monitor-item-wrap")).map((w) => {
+                        const nm = w.querySelector(".mon-name")?.textContent?.trim() || "";
+                        const vv = w.querySelector(".mon-value")?.textContent?.trim() || "";
+                        const stats = w.querySelector(".stats-panel")?.innerText?.trim() || "";
+                        return `<tr><td>${nm}</td><td>${vv}</td><td><pre style="margin:0;white-space:pre-wrap">${stats || "-"}</pre></td></tr>`;
+                    }).join("");
                 const imgs = [];
                 const plotEls = Array.from(plotArea.querySelectorAll(".js-plotly-plot"));
                 for (const el of plotEls) {
@@ -2694,6 +2776,8 @@
     const logSaveBtn = document.getElementById("logSaveBtn");
     let logAutoRefreshInterval = null;
     let logViewerRawLines = [];
+    /** Último seq del buffer Python (GET /api/log); el auto-refresh usa since_seq para no bajar 2000 líneas cada vez. */
+    let logViewerMaxSeq = 0;
 
     function escapeLogHtml(s) {
         return String(s)
@@ -2735,11 +2819,21 @@
         logViewerContent.scrollTop = logViewerContent.scrollHeight;
     }
 
-    async function fetchLogViewer() {
+    async function fetchLogViewer(options) {
         if (!logViewerContent) return;
+        const incremental = options && options.incremental;
         const source = (logSourceSelect && logSourceSelect.value) || "python";
         try {
-            const r = await fetch(`/api/log?tail=2000&source=${encodeURIComponent(source)}`);
+            let url;
+            if (incremental && source === "python" && logViewerMaxSeq > 0) {
+                url =
+                    "/api/log?since_seq=" +
+                    encodeURIComponent(String(logViewerMaxSeq)) +
+                    "&limit=500&source=python";
+            } else {
+                url = `/api/log?tail=2000&source=${encodeURIComponent(source)}`;
+            }
+            const r = await fetch(url);
             if (!r.ok) {
                 logViewerRawLines = [`Error ${r.status}: ${r.statusText}`];
                 applyLogViewerFilter();
@@ -2748,9 +2842,22 @@
             const contentType = r.headers.get("content-type") || "";
             if (contentType.includes("application/json")) {
                 const data = await r.json();
-                logViewerRawLines = (data.lines || []).map((x) =>
-                    (x.ts ? x.ts + " " : "") + (x.msg || "")
-                );
+                const rows = data.lines || [];
+                const toText = (x) => (x.ts ? x.ts + " " : "") + (x.msg || "");
+                if (!incremental) {
+                    logViewerMaxSeq = source === "cpp" ? 0 : typeof data.max_seq === "number" ? data.max_seq : 0;
+                } else if (typeof data.max_seq === "number" && data.max_seq >= logViewerMaxSeq) {
+                    logViewerMaxSeq = data.max_seq;
+                }
+                if (incremental && source === "python" && rows.length > 0) {
+                    logViewerRawLines = logViewerRawLines.concat(rows.map(toText));
+                    const cap = 3500;
+                    if (logViewerRawLines.length > cap) {
+                        logViewerRawLines = logViewerRawLines.slice(-cap);
+                    }
+                } else {
+                    logViewerRawLines = rows.map(toText);
+                }
             } else {
                 const text = await r.text() || "";
                 logViewerRawLines = text ? text.split("\n") : [];
@@ -2818,7 +2925,9 @@
             if (logAutoRefreshCheckbox.checked) {
                 if (logAutoRefreshInterval) clearInterval(logAutoRefreshInterval);
                 logAutoRefreshInterval = setInterval(() => {
-                    if (logOverlay && logOverlay.style.display === "flex") fetchLogViewer();
+                    if (logOverlay && logOverlay.style.display === "flex") {
+                        fetchLogViewer({ incremental: true });
+                    }
                 }, 4000);
             } else {
                 if (logAutoRefreshInterval) {
@@ -2897,6 +3006,11 @@
         if (varDrawer) {
             positionVarDrawer();
             varDrawer.style.display = "flex";
+            // Tras mostrar el cajón, el alto real de #varBrowserList ya es fiable; re-renderiza la lista virtual.
+            requestAnimationFrame(() => {
+                renderBrowserList();
+                positionVarDrawer();
+            });
         }
     }
 
@@ -3022,16 +3136,26 @@
 
     if (monitorColsAddBtn) {
         monitorColsAddBtn.addEventListener("click", () => {
+            const prevCols = monitorColumnsCount;
             monitorColumnsCount = Math.min(3, monitorColumnsCount + 1);
+            if (prevCols < monitorColumnsCount && Number.isFinite(monitorPaneWidthPx) && monitorPaneWidthPx > 0 && prevCols > 0) {
+                monitorPaneWidthPx = clampMonitorPaneWidth(Math.round((monitorPaneWidthPx * monitorColumnsCount) / prevCols));
+            }
             applyMonitorColumns();
+            rebuildMonitorList();
             positionVarDrawer();
             saveConfig();
         });
     }
     if (monitorColsRemoveBtn) {
         monitorColsRemoveBtn.addEventListener("click", () => {
+            const prevCols = monitorColumnsCount;
             monitorColumnsCount = Math.max(1, monitorColumnsCount - 1);
+            if (prevCols > monitorColumnsCount && Number.isFinite(monitorPaneWidthPx) && monitorPaneWidthPx > 0 && monitorColumnsCount > 0) {
+                monitorPaneWidthPx = clampMonitorPaneWidth(Math.round((monitorPaneWidthPx * monitorColumnsCount) / prevCols));
+            }
             applyMonitorColumns();
+            rebuildMonitorList();
             positionVarDrawer();
             saveConfig();
         });
@@ -3041,11 +3165,20 @@
             const v = Number(compactMonitorSlider.value);
             compactMonitorLevel = Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0;
             updateCompactMonitorUi();
+            if (monitorListEl && monitorListEl.classList.contains("monitor-list--virtual")) {
+                monitorListEl._vmRowFrozen = false;
+                measureMonitorVmRowHeightFromSlice(true);
+                syncMonitorVirtualWindow();
+            }
             saveConfig();
         });
     }
     if (expandAllMonBtn) {
         expandAllMonBtn.addEventListener("click", () => {
+            if (shouldUseMonitorVirtualList() || monitorDetailPanelUsesDock()) {
+                alert("Con muchas variables el detalle se abre arriba a la izquierda del panel de gráficos (una a la vez; clic en el nombre). \"Desplegar todo\" no está disponible.");
+                return;
+            }
             for (const n of monitoredOrder) expandedStats.add(n);
             rebuildMonitorList();
             updateMonitorValues();
@@ -3054,6 +3187,7 @@
     if (collapseAllMonBtn) {
         collapseAllMonBtn.addEventListener("click", () => {
             expandedStats.clear();
+            hideMonitorDetailDock();
             rebuildMonitorList();
             updateMonitorValues();
             monitorListEl.querySelectorAll(".stats-panel").forEach((p) => p.remove());
@@ -3200,11 +3334,11 @@
         if (cfg.timeWindow) {
             timeWindowSelect.value = cfg.timeWindow;
             const v = parseInt(cfg.timeWindow, 10);
-            localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+            localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : DEFAULT_LOCAL_HIST_MAX_SEC;
         } else if (cfg.historyBuffer) {
             timeWindowSelect.value = cfg.historyBuffer;
             const v = parseInt(cfg.historyBuffer, 10);
-            localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+            localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : DEFAULT_LOCAL_HIST_MAX_SEC;
         }
         const smoothSel = document.getElementById("smoothPlotsSelect");
         if (smoothSel && cfg.smoothPlots && /^[1-9][0-9]*$/.test(String(cfg.smoothPlots))) {
@@ -3714,10 +3848,11 @@
             delete arrayElemAssignment[key];
             delete arrayElemHistory[key];
         }
-        rebuildMonitorList();
         saveConfig();
-        pruneEmptyGraphs();
-        updateMonitorItemStyles();
+        const pruned = pruneEmptyGraphs();
+        if (!pruned) {
+            rebuildMonitorList();
+        }
         renderPlots();
     }
 
@@ -3874,14 +4009,26 @@
         if (!advancedStatsStrip || advancedStatsStrip.style.display !== "flex") return;
         if (advRamHtml) {
             let htmlMb = null;
+            let htmlTotalMb = null;
+            let htmlLimitMb = null;
             try {
                 const mem = typeof performance !== "undefined" && performance.memory;
                 if (mem && typeof mem.usedJSHeapSize === "number") {
                     htmlMb = mem.usedJSHeapSize / (1024 * 1024);
+                    if (typeof mem.totalJSHeapSize === "number") htmlTotalMb = mem.totalJSHeapSize / (1024 * 1024);
+                    if (typeof mem.jsHeapSizeLimit === "number") htmlLimitMb = mem.jsHeapSizeLimit / (1024 * 1024);
                 }
             } catch (err) { /* performance.memory no disponible (solo Chrome/Chromium) */ }
             advRamHtml.textContent = "HTML: " + (htmlMb != null ? formatAdvNum(htmlMb) + " MB" : "—");
-            advRamHtml.title = htmlMb != null ? "Heap JS del navegador" : "No disponible en Firefox (solo Chrome/Chromium expone performance.memory)";
+            if (htmlMb != null) {
+                let t = `Heap JS (V8): ${formatAdvNum(htmlMb)} MB usados`;
+                if (htmlTotalMb != null) t += ` · ${formatAdvNum(htmlTotalMb)} MB reservados por el motor`;
+                if (htmlLimitMb != null) t += ` (límite ~${formatAdvNum(htmlLimitMb)} MB)`;
+                t += ". El monitor del portátil / administrador de tareas muestra la RAM de TODO el proceso del navegador (GPU, WebGL, librerías nativas, Plotly, etc.), no esta cifra; suele ser varias veces mayor y puede no bajar aunque el heap JS se estabilice.";
+                advRamHtml.title = t;
+            } else {
+                advRamHtml.title = "No disponible en Firefox (solo Chrome/Chromium expone performance.memory)";
+            }
         }
         try {
             const r = await fetch("/api/advanced_stats");
@@ -3901,6 +4048,12 @@
                     advShmCycle.textContent = (d.shm_cycle_ms != null && !isNaN(d.shm_cycle_ms))
                         ? "shm: " + formatAdvNum(d.shm_cycle_ms) + " ms"
                         : "shm: —";
+                if (advMonCount) {
+                    const mc = d.monitored_var_count;
+                    advMonCount.textContent = (typeof mc === "number" && Number.isFinite(mc))
+                        ? "vars: " + String(Math.max(0, Math.round(mc)))
+                        : "vars: —";
+                }
             }
         } catch (e) {
             if (advRamPython) advRamPython.textContent = "Py: —";
@@ -3908,6 +4061,7 @@
             if (advCpuPython) advCpuPython.textContent = "Py: —";
             if (advCpuCpp) advCpuCpp.textContent = "C++: —";
             if (advShmCycle) advShmCycle.textContent = "shm: —";
+            if (advMonCount) advMonCount.textContent = "vars: —";
         }
         const now = Date.now();
         const cutoff = now - WS_BUFFER_MAX_AGE_MS;
@@ -4008,6 +4162,11 @@
         offlineSegmentOffsetSec = 0;
         sessionStartTime = null;
         sharedZoomXRange = null;
+        // Históricos completos y metadatos de ventanas cortas (modo seguro): si no se limpian,
+        // saltos de tiempo / nuevas cargas acumulan series gigantes en RAM.
+        fullHistoryByName = {};
+        for (const _wk of Object.keys(windowMetaByName)) delete windowMetaByName[_wk];
+        fullHistoryPending.clear();
         historyCache = {};
         arrayElemHistory = {};
         deltaByName = {};
@@ -4017,6 +4176,7 @@
         arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
         plotInstances = {};
         expandedStats.clear();
+        hideMonitorDetailDock();
         prevAlarmState = {};
         computedHistories = {};
         browserSelection.clear();
@@ -4960,15 +5120,11 @@
     async function loadOfflineDataset(ds, opts = {}) {
         const preserveLayout = !!opts.preserveLayout;
         stopOfflinePlayback();
-        const prevRecording = offlineRecordingName || "";
         // En replay (modo híbrido) conservar nombres del backend para unir con los del TSV.
         const liveVarNamesForMerge = isReplayMode() ? baseKnownVarNames.slice() : [];
         if (!preserveLayout) clearUserLayout();
         clearDataBuffers();
-        // Si cambiamos de grabación, el historial completo por variable ya no es válido.
-        if (opts.recordingName && opts.recordingName !== prevRecording) {
-            fullHistoryByName = {};
-        }
+        // fullHistoryByName / windowMetaByName se vacían en clearDataBuffers (ver arriba).
         // Si conservamos layout (monitorizadas + asignación de gráficos),
         // hay que reconstruir los slots visuales tras limpiar buffers/DOM.
         if (preserveLayout) {
@@ -5099,6 +5255,39 @@
         loadOfflineDataset(ds, { ...opts, recordingName: filename, safeInfo: null });
     }
 
+    function discardLiveVarsCoalesce() {
+        if (liveVarsCoalesceRafId) {
+            cancelAnimationFrame(liveVarsCoalesceRafId);
+            liveVarsCoalesceRafId = 0;
+        }
+        liveVarsCoalesceMap = null;
+    }
+
+    function flushCoalescedLiveVarsFromMap() {
+        if (!liveVarsCoalesceMap || liveVarsCoalesceMap.size === 0) {
+            liveVarsCoalesceMap = null;
+            return;
+        }
+        const merged = Array.from(liveVarsCoalesceMap.values());
+        liveVarsCoalesceMap = null;
+        injectBrowserHeapTelemetryIntoVarsUpdate(merged);
+        onVarsUpdate(merged);
+    }
+
+    function queueLiveVarsUpdateForFrame(data) {
+        if (!Array.isArray(data)) return;
+        if (!liveVarsCoalesceMap) liveVarsCoalesceMap = new Map();
+        for (let i = 0; i < data.length; i++) {
+            const item = data[i];
+            if (item && item.name) liveVarsCoalesceMap.set(item.name, item);
+        }
+        if (liveVarsCoalesceRafId) return;
+        liveVarsCoalesceRafId = requestAnimationFrame(() => {
+            liveVarsCoalesceRafId = 0;
+            flushCoalescedLiveVarsFromMap();
+        });
+    }
+
     function connect() {
         if (!hasBackendConnectionMode()) {
             setOfflineStatus();
@@ -5124,6 +5313,7 @@
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusConnected;
             statusEl.className = "status connected";
             clearReconnectPending();
+            lastAlarmsPayloadSent = "";
             sendUpdateRatio();
             sendMonitored();
             sendAlarmsToBackend();
@@ -5132,6 +5322,7 @@
         };
         socket.onclose = () => {
             if (thisId !== connectionId) return;
+            discardLiveVarsCoalesce();
             ws = null;
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusDisconnected;
             statusEl.className = "status disconnected";
@@ -5168,7 +5359,10 @@
             }
             clearConnectionError();
             if (msg.type === "vars_names") onVarNames(msg.data);
-            else if (msg.type === "vars_update") onVarsUpdate(msg.data);
+            else if (msg.type === "vars_update") {
+                if (isLiveMode()) queueLiveVarsUpdateForFrame(msg.data);
+                else onVarsUpdate(msg.data);
+            }
             else if (msg.type === "set_result") onSetResult(msg);
             else if (msg.type === "alarm_triggered") onAlarmTriggeredFromBackend(msg.triggered);
             else if (msg.type === "alarm_cleared") onAlarmClearedFromBackend(msg.names);
@@ -5234,6 +5428,12 @@
             action: "set_monitored",
             names: realNames,
         });
+        if (isLiveMode() && monitoredNames.size === 0) {
+            clearLiveMonitorCachesWhenEmpty();
+            rebuildMonitorList();
+            schedulePlotRender();
+            saveConfig();
+        }
     }
 
     function ensureMonitoredName(name) {
@@ -5441,11 +5641,23 @@
     function renderBrowserList() {
         const filterText = varFilter.value;
         const filtered = knownVarNames.filter(n => nameMatchesFilter(n, filterText));
-        if (!groupVariables && filtered.length > 350) {
+        // Con >350 coincidencias, siempre lista virtual: con "Agrupar" el árbol expandible crearía miles de nodos DOM
+        // (mismo orden de problema que un "seleccionar todo" masivo en la vista antigua).
+        if (filtered.length > 350) {
+            if (groupVarsCheckbox) {
+                if (groupVariables) {
+                    groupVarsCheckbox.title = (currentLang === "en")
+                        ? "Too many matches: flat virtual list. Narrow the filter to use grouping."
+                        : "Demasiadas coincidencias: lista plana virtual. Reduce el filtro para usar agrupación.";
+                } else {
+                    groupVarsCheckbox.title = "";
+                }
+            }
             renderBrowserListVirtualFlat(filtered);
             browserVirtualEnabled = true;
             return;
         }
+        if (groupVarsCheckbox) groupVarsCheckbox.title = "";
         browserVirtualEnabled = false;
         let tree = buildTree(filtered);
 
@@ -5466,8 +5678,10 @@
         browserListDirty = false;
     }
 
-    function renderBrowserListVirtualFlat(filtered) {
-        browserVirtualRows = filtered.slice().sort();
+    function renderBrowserListVirtualFlat(filteredOverride) {
+        if (filteredOverride != null) {
+            browserVirtualRows = filteredOverride.slice().sort();
+        }
         const rows = browserVirtualRows;
         const rowH = browserVirtualRowPx;
         const viewH = Math.max(120, varBrowserList.clientHeight || 420);
@@ -5517,6 +5731,18 @@
             label.textContent = name;
             label.title = name;
             el.appendChild(label);
+            if (varsByName[name] && varsByName[name].type === "array") {
+                const arrBdg = document.createElement("span");
+                arrBdg.className = "array-badge-browser";
+                const vv = varsByName[name].value;
+                arrBdg.textContent = Array.isArray(vv) ? "[" + vv.length + "]" : "[ ]";
+                el.appendChild(arrBdg);
+            } else if (isArincDerivedName(name)) {
+                const arincBdg = document.createElement("span");
+                arincBdg.className = "arinc-badge-browser";
+                arincBdg.textContent = "ARINC";
+                el.appendChild(arincBdg);
+            }
             if (!inMonitor) {
                 el.addEventListener("click", (e) => {
                     if (e.target === cb) {
@@ -5524,7 +5750,7 @@
                     } else {
                         if (browserSelection.has(name)) browserSelection.delete(name); else browserSelection.add(name);
                     }
-                    renderBrowserListVirtualFlat(filtered);
+                    renderBrowserListVirtualFlat();
                 });
             }
             root.appendChild(el);
@@ -5540,8 +5766,15 @@
         if (!varBrowserList._virtualScrollHooked) {
             varBrowserList._virtualScrollHooked = true;
             varBrowserList.addEventListener("scroll", () => {
-                if (browserVirtualEnabled) renderBrowserListVirtualFlat(browserVirtualRows);
-            });
+                if (!browserVirtualEnabled) return;
+                if (!browserVirtualScrollPending) {
+                    browserVirtualScrollPending = true;
+                    requestAnimationFrame(() => {
+                        browserVirtualScrollPending = false;
+                        if (browserVirtualEnabled) renderBrowserListVirtualFlat();
+                    });
+                }
+            }, { passive: true });
         }
         browserListDirty = false;
     }
@@ -5796,6 +6029,10 @@
         return order;
     }
 
+    function getVisibleMonitorRenderOrder() {
+        return getMonitorRenderOrder().filter(n => nameMatchesFilter(n, monitorFilterText));
+    }
+
     function buildGraphSelectOptions() {
         let html = '<option value="">—</option>';
         graphList.forEach((gid, idx) => {
@@ -5826,7 +6063,469 @@
         badge.style.display = isImposing ? "inline-flex" : "none";
     }
 
+    function shouldUseMonitorVirtualList() {
+        /* column-count + spacers de la VM no son compatibles: con 2–3 columnas se usa lista completa. */
+        if (monitorColumnsCount > 1) return false;
+        return getVisibleMonitorNames().length >= MONITOR_VM_THRESHOLD;
+    }
+
+    /** Panel de detalle (stats/ARINC) en zona de gráficos: misma UX que lista virtual si hay una sola columna. */
+    function monitorDetailPanelUsesDock() {
+        return monitorColumnsCount <= 1;
+    }
+
+    function getMonitorDetailDockEl() {
+        return document.getElementById("monitorDetailDock");
+    }
+
+    function hideMonitorDetailDock() {
+        const dock = getMonitorDetailDockEl();
+        if (!dock) return;
+        dock.style.display = "none";
+        dock.innerHTML = "";
+        delete dock.dataset.detailFor;
+    }
+
+    /** Con lista virtual solo puede haber un detalle abierto (panel en zona de gráficos). */
+    function getDockedExpandedVarName() {
+        if (expandedStats.size === 0) return null;
+        return expandedStats.values().next().value;
+    }
+
+    function refreshDockedStatsAfterVirtualSync() {
+        if (!monitorListEl || !monitorListEl.classList.contains("monitor-list--virtual")) return;
+        const nm = getDockedExpandedVarName();
+        if (nm) updateStatsPanel(null, nm);
+    }
+
+    function destroyMonitorVirtualShell() {
+        if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+        monitorListEl.innerHTML = "";
+        monitorListEl.classList.remove("monitor-list--virtual");
+        delete monitorListEl._vmRowFrozen;
+        monitorVmTopSpacer = null;
+        monitorVmRows = null;
+        monitorVmBottomSpacer = null;
+    }
+
+    function ensureMonitorVirtualShell() {
+        if (monitorListEl.classList.contains("monitor-list--virtual") && monitorVmRows && monitorVmRows.parentNode === monitorListEl) {
+            return;
+        }
+        monitorListEl._vmRowFrozen = false;
+        monitorListEl.innerHTML = "";
+        monitorListEl.classList.add("monitor-list--virtual");
+        monitorVmTopSpacer = document.createElement("div");
+        monitorVmTopSpacer.className = "monitor-vm-spacer monitor-vm-spacer-top";
+        monitorVmRows = document.createElement("div");
+        monitorVmRows.className = "monitor-vm-rows";
+        monitorVmBottomSpacer = document.createElement("div");
+        monitorVmBottomSpacer.className = "monitor-vm-spacer monitor-vm-spacer-bottom";
+        monitorListEl.appendChild(monitorVmTopSpacer);
+        monitorListEl.appendChild(monitorVmRows);
+        monitorListEl.appendChild(monitorVmBottomSpacer);
+    }
+
+    /**
+     * Altura de fila para la VM: debe ser estable entre ticks de scroll; si cambia en cada sync
+     * (primera fila distinta, ResizeObserver, etc.) el scroll se vuelve “acelerado” o asimétrico.
+     */
+    function measureMonitorVmRowHeightFromSlice(force) {
+        if (!monitorVmRows || !monitorListEl) return;
+        if (!force && monitorListEl._vmRowFrozen) return;
+        let maxH = 0;
+        monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach((w) => {
+            const h = w.offsetHeight;
+            if (h > maxH) maxH = h;
+        });
+        if (maxH > 0) {
+            monitorVmRowPx = Math.max(28, Math.min(72, Math.ceil(maxH)));
+            monitorListEl._vmRowFrozen = true;
+        }
+    }
+
+    function updateMonitorRowWrap(wrap, name) {
+        wrap.classList.toggle("monitor-item-selected", monitorSelectedNames.has(name));
+        const hasMarkers = hasActiveDeltaMarkers();
+        const changed = hasMarkers && isDeltaChangedForName(name);
+        wrap.classList.toggle("monitor-item-delta-changed", changed);
+        wrap.classList.toggle("monitor-item-delta-unchanged", hasMarkers && !changed);
+        if (!wrap._selectionClickAttached) {
+            wrap._selectionClickAttached = true;
+            wrap.addEventListener("click", (e) => {
+                if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
+                if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
+                else monitorSelectedNames.add(name);
+                rebuildMonitorList();
+            });
+        }
+        const nameSpan = wrap.querySelector(".mon-name");
+        if (nameSpan) {
+            nameSpan.textContent = formatNameWithHiddenLevels(name, hideLevels);
+        }
+        syncMonitorImpositionVisual(wrap, name);
+        if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
+            const rowEl = wrap.querySelector(".monitor-item");
+            let imposeWrap = wrap.querySelector(".monitor-impose-wrap");
+            if (!imposeWrap && rowEl) {
+                imposeWrap = document.createElement("span");
+                imposeWrap.className = "monitor-impose-wrap";
+                const lab = document.createElement("label");
+                const cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.className = "monitor-impose-cb";
+                cb.title = "Imponer a SHM (replay)";
+                cb.addEventListener("change", (e) => {
+                    e.stopPropagation();
+                    const checked = cb.checked;
+                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                    toApply.forEach(n => {
+                        if (checked) impositionNames.add(n);
+                        else impositionNames.delete(n);
+                        syncReplayTsvHistoryForName(n);
+                    });
+                    saveConfig();
+                    rebuildMonitorList();
+                });
+                lab.appendChild(cb);
+                imposeWrap.appendChild(lab);
+                rowEl.insertBefore(imposeWrap, rowEl.querySelector(".mon-name"));
+            }
+            const cb = imposeWrap && imposeWrap.querySelector(".monitor-impose-cb");
+            if (cb) cb.checked = impositionNames.has(name);
+        } else {
+            const imposeWrap = wrap.querySelector(".monitor-impose-wrap");
+            if (imposeWrap) imposeWrap.remove();
+        }
+        const rowForTags = wrap.querySelector(".monitor-item");
+        if (rowForTags) syncMonitorRowStatusTags(rowForTags, name);
+    }
+
+    function hasScalarFormatConversion(name) {
+        const vf = varFormat[name];
+        if (!vf || typeof vf !== "object") return false;
+        const o = vf.ori || "dec";
+        const s = vf.sal || "dec";
+        return o !== s;
+    }
+
+    function syncMonitorRowStatusTags(rowEl, name) {
+        if (!rowEl || !name) return;
+        let box = rowEl.querySelector(".mon-status-tags");
+        if (!box) {
+            box = document.createElement("span");
+            box.className = "mon-status-tags";
+            const nameEl = rowEl.querySelector(".mon-name");
+            if (nameEl) rowEl.insertBefore(box, nameEl);
+            else rowEl.appendChild(box);
+        }
+        box.innerHTML = "";
+        function addTag(suffix, text, title) {
+            const s = document.createElement("span");
+            s.className = "mon-tag mon-tag--" + suffix;
+            s.textContent = text;
+            if (title) s.title = title;
+            box.appendChild(s);
+        }
+        if (hasScalarFormatConversion(name) && !isArincEnabled(name) && !isArincDerivedName(name)) {
+            addTag("units", "units", currentLang === "en" ? "Ori/sal display conversion" : "Conversión de formato ori→sal");
+        }
+        if (activeGenerators[name]) {
+            addTag("gen", "gen", currentLang === "en" ? "Signal generator active" : "Generador activo");
+        }
+        if (alarms[name]) {
+            addTag("alarm", "alarm", currentLang === "en" ? "Alarm configured" : "Alarma configurada");
+        }
+        if (isArincDerivedName(name)) {
+            addTag("arinc-virt", "ARINC", currentLang === "en" ? "Derived ARINC subchannel" : "Subcanal ARINC derivado (virtual)");
+        } else if (isArincEnabled(name)) {
+            addTag("arinc", "ARINC", currentLang === "en" ? "ARINC 429 word" : "Palabra ARINC 429");
+        }
+        box.style.display = box.childElementCount ? "inline-flex" : "none";
+    }
+
+    function createMonitorRowWrap(name) {
+        const wrap = document.createElement("div");
+        wrap.className = "monitor-item-wrap";
+        wrap.dataset.name = name;
+        if (monitorSelectedNames.has(name)) wrap.classList.add("monitor-item-selected");
+        if (hasActiveDeltaMarkers()) {
+            if (isDeltaChangedForName(name)) wrap.classList.add("monitor-item-delta-changed");
+            else wrap.classList.add("monitor-item-delta-unchanged");
+        }
+        wrap.addEventListener("click", (e) => {
+            if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
+            if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
+            else monitorSelectedNames.add(name);
+            rebuildMonitorList();
+        });
+
+        const el = document.createElement("div");
+        el.className = "monitor-item";
+        el.dataset.name = name;
+
+        el.draggable = true;
+        el.addEventListener("dragstart", (e) => {
+            e.dataTransfer.setData("text/plain", name);
+            e.dataTransfer.setData("application/x-monitor-reorder", name);
+            e.dataTransfer.effectAllowed = "copyMove";
+            ensureNewGraphDropTarget();
+        });
+        el.addEventListener("dragend", () => {
+            plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
+                slot.classList.remove("plot-add-over");
+                slot.style.display = "none";
+            });
+            if (graphList.length === 0 && plotEmpty) {
+                plotEmpty.classList.remove("plot-add-over");
+                if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
+            }
+            monitorListEl.querySelectorAll(".monitor-item-wrap").forEach(w => {
+                w.classList.remove("monitor-drop-before", "monitor-drop-after");
+                delete w.dataset.dropPosition;
+            });
+        });
+
+        if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
+            const imposeWrap = document.createElement("span");
+            imposeWrap.className = "monitor-impose-wrap";
+            const lab = document.createElement("label");
+            const imposeCb = document.createElement("input");
+            imposeCb.type = "checkbox";
+            imposeCb.className = "monitor-impose-cb";
+            imposeCb.title = "Imponer a SHM (replay)";
+            imposeCb.checked = impositionNames.has(name);
+            imposeCb.addEventListener("change", (e) => {
+                e.stopPropagation();
+                const checked = imposeCb.checked;
+                const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+                toApply.forEach(n => {
+                    if (checked) impositionNames.add(n);
+                    else impositionNames.delete(n);
+                    syncReplayTsvHistoryForName(n);
+                });
+                saveConfig();
+                rebuildMonitorList();
+            });
+            lab.appendChild(imposeCb);
+            imposeWrap.appendChild(lab);
+            el.appendChild(imposeWrap);
+        }
+
+        const nameEl = document.createElement("span");
+        nameEl.className = "mon-name";
+        nameEl.textContent = formatNameWithHiddenLevels(name, hideLevels);
+        nameEl.title = name;
+        nameEl.addEventListener("click", () => {
+            const useDock = monitorDetailPanelUsesDock();
+            if (expandedStats.has(name)) expandedStats.delete(name);
+            else {
+                if (useDock) expandedStats.clear();
+                expandedStats.add(name);
+            }
+            updateStatsPanel(wrap, name);
+            rebuildMonitorList();
+        });
+
+        let valEl = null;
+        if (!isArrayVar(name)) {
+            valEl = document.createElement("span");
+            valEl.className = "mon-value";
+            const vdInit = varsByName[name];
+            if (vdInit) {
+                valEl.textContent = formatValue(vdInit.value, vdInit.type, name);
+            } else if (isPlaybackMode() && offlineDataset && isVarInTsv(name)) {
+                const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : offlineDataset.minTs;
+                const vAtT = getOfflineScalarValueAtTs(name, tNow);
+                valEl.textContent = (vAtT == null) ? "--" : formatValue(vAtT, "double", name);
+            } else {
+                valEl.textContent = "--";
+            }
+            valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
+        }
+
+        if (isArrayVar(name)) {
+            const badge = document.createElement("span");
+            badge.className = "array-badge";
+            const vd = varsByName[name];
+            badge.textContent = vd && Array.isArray(vd.value) ? "[" + vd.value.length + "]" : "[ ]";
+            badge.title = "Variable tipo array";
+            el.appendChild(badge);
+        } else if (isComputed(name)) {
+            const badge = document.createElement("span");
+            badge.className = "comp-badge";
+            badge.textContent = "fx";
+            badge.title = computedVars.find(c => c.name === name)?.expr || "";
+            el.appendChild(badge);
+        }
+
+        const statusTags = document.createElement("span");
+        statusTags.className = "mon-status-tags";
+        el.appendChild(statusTags);
+
+        const imposeBadge = document.createElement("span");
+        imposeBadge.className = "mon-impose-badge";
+        imposeBadge.textContent = "IMP";
+        imposeBadge.title = "Imponiendo valor desde TSV a SHM";
+        imposeBadge.style.display = "none";
+
+        el.appendChild(imposeBadge);
+        el.appendChild(nameEl);
+        if (valEl) el.appendChild(valEl);
+
+        syncMonitorRowStatusTags(el, name);
+
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "btn-mon-remove";
+        removeBtn.textContent = "\u00D7";
+        removeBtn.title = "Quitar de monitorizacion";
+        removeBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const toRemove = monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
+            for (const n of toRemove) {
+                if (isComputed(n)) removeComputedVar(n);
+                else {
+                    monitoredNames.delete(n);
+                    monitoredOrder = monitoredOrder.filter(o => o !== n);
+                    delete varGraphAssignment[n];
+                    delete historyCache[n];
+                    expandedStats.delete(n);
+                    monitorSelectedNames.delete(n);
+                    if (!isArincDerivedName(n) && isArincEnabled(n)) {
+                        removeArincDerivedForBase(n);
+                    }
+                    if (isArrayVar(n)) {
+                        for (const key of Object.keys(arrayElemAssignment)) {
+                            if (key.startsWith(n + "[")) {
+                                delete arrayElemAssignment[key];
+                                delete arrayElemHistory[key];
+                            }
+                        }
+                    }
+                    pruneMonitorAuxMapsForName(n);
+                }
+            }
+            saveConfig();
+            sendMonitored();
+            const pruned = pruneEmptyGraphs();
+            renderBrowserList();
+            if (!pruned) {
+                rebuildMonitorList();
+            }
+            renderPlots();
+        });
+        el.appendChild(removeBtn);
+        wrap.appendChild(el);
+        return wrap;
+    }
+
+    function syncMonitorVirtualWindow() {
+        if (!monitorVmRows || !monitorVmTopSpacer || !monitorVmBottomSpacer) return;
+        const renderOrder = getVisibleMonitorRenderOrder();
+        const N = renderOrder.length;
+        const rowH = monitorVmRowPx;
+
+        const statusEl = document.getElementById("monitorFilterStatus");
+        if (statusEl) {
+            const total = monitoredOrder.length;
+            if ((monitorFilterText || "").trim()) {
+                statusEl.textContent = "Mostrando " + N + " de " + total;
+                statusEl.style.display = "";
+            } else {
+                statusEl.textContent = "";
+                statusEl.style.display = "none";
+            }
+        }
+
+        if (N === 0) {
+            monitorVmTopSpacer.style.height = "0px";
+            monitorVmBottomSpacer.style.height = "0px";
+            monitorVmRows.innerHTML = "";
+            monitorListEl.classList.toggle("monitor-virtualized", false);
+            hideMonitorDetailDock();
+            updateMonitorItemStyles();
+            return;
+        }
+
+        const viewportH = monitorListEl.clientHeight || 400;
+        const scrollTop = monitorListEl.scrollTop;
+        let start = Math.floor(scrollTop / rowH) - MONITOR_VM_BUFFER;
+        let end = Math.ceil((scrollTop + viewportH) / rowH) + MONITOR_VM_BUFFER;
+        if (start < 0) start = 0;
+        if (end > N) end = N;
+        if (end <= start) {
+            end = Math.min(N, start + 1);
+        }
+        const slice = renderOrder.slice(start, end);
+        const sliceSet = new Set(slice);
+
+        monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach(el => {
+            if (!sliceSet.has(el.dataset.name)) el.remove();
+        });
+
+        monitorVmRows.querySelectorAll(".stats-panel").forEach(p => p.remove());
+
+        for (let i = 0; i < slice.length; i++) {
+            const name = slice[i];
+            let wrap = monitorVmRows.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
+            if (wrap) {
+                updateMonitorRowWrap(wrap, name);
+            } else {
+                wrap = createMonitorRowWrap(name);
+                monitorVmRows.appendChild(wrap);
+            }
+            syncMonitorImpositionVisual(wrap, name);
+        }
+
+        slice.forEach(name => {
+            const w = monitorVmRows.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
+            if (w) monitorVmRows.appendChild(w);
+        });
+
+        monitorVmTopSpacer.style.height = (start * rowH) + "px";
+        monitorVmBottomSpacer.style.height = ((N - end) * rowH) + "px";
+
+        monitorListEl.classList.toggle("monitor-virtualized", false);
+        updateMonitorItemStyles();
+    }
+
+    function rebuildMonitorListVirtual() {
+        ensureMonitorVirtualShell();
+        if (expandedStats.size > 1) {
+            let keep = null;
+            for (const n of monitoredOrder) {
+                if (expandedStats.has(n)) {
+                    keep = n;
+                    break;
+                }
+            }
+            expandedStats.clear();
+            if (keep) expandedStats.add(keep);
+        }
+        syncMonitorVirtualWindow();
+        measureMonitorVmRowHeightFromSlice(true);
+        syncMonitorVirtualWindow();
+        refreshDockedStatsAfterVirtualSync();
+        requestAnimationFrame(() => {
+            if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+            syncMonitorVirtualWindow();
+            measureMonitorVmRowHeightFromSlice(true);
+            syncMonitorVirtualWindow();
+            refreshDockedStatsAfterVirtualSync();
+        });
+    }
+
     function rebuildMonitorList() {
+        if (shouldUseMonitorVirtualList()) {
+            rebuildMonitorListVirtual();
+            return;
+        }
+        if (!monitorDetailPanelUsesDock()) {
+            hideMonitorDetailDock();
+        }
+        destroyMonitorVirtualShell();
+        delete monitorListEl._vmRowFrozen;
+
         const existing = monitorListEl.querySelectorAll(".monitor-item-wrap");
         const existingMap = {};
         existing.forEach(el => { existingMap[el.dataset.name] = el; });
@@ -5844,233 +6543,12 @@
             visibleCount++;
 
             if (existingMap[name]) {
-                const wrap = existingMap[name];
-                wrap.classList.toggle("monitor-item-selected", monitorSelectedNames.has(name));
-                const hasMarkers = hasActiveDeltaMarkers();
-                const changed = hasMarkers && isDeltaChangedForName(name);
-                wrap.classList.toggle("monitor-item-delta-changed", changed);
-                wrap.classList.toggle("monitor-item-delta-unchanged", hasMarkers && !changed);
-                if (!wrap._selectionClickAttached) {
-                    wrap._selectionClickAttached = true;
-                    wrap.addEventListener("click", (e) => {
-                        if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
-                        if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
-                        else monitorSelectedNames.add(name);
-                        rebuildMonitorList();
-                    });
-                }
-                const nameSpan = wrap.querySelector(".mon-name");
-                if (nameSpan) {
-                    nameSpan.textContent = formatNameWithHiddenLevels(name, hideLevels);
-                }
-                syncMonitorImpositionVisual(wrap, name);
-                if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
-                    const rowEl = wrap.querySelector(".monitor-item");
-                    let imposeWrap = wrap.querySelector(".monitor-impose-wrap");
-                    if (!imposeWrap && rowEl) {
-                        imposeWrap = document.createElement("span");
-                        imposeWrap.className = "monitor-impose-wrap";
-                        const lab = document.createElement("label");
-                        const cb = document.createElement("input");
-                        cb.type = "checkbox";
-                        cb.className = "monitor-impose-cb";
-                        cb.title = "Imponer a SHM (replay)";
-                        cb.addEventListener("change", (e) => {
-                            e.stopPropagation();
-                            const checked = cb.checked;
-                            const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                            toApply.forEach(n => {
-                                if (checked) impositionNames.add(n);
-                                else impositionNames.delete(n);
-                                syncReplayTsvHistoryForName(n);
-                            });
-                            saveConfig();
-                            rebuildMonitorList();
-                        });
-                        lab.appendChild(cb);
-                        imposeWrap.appendChild(lab);
-                        rowEl.insertBefore(imposeWrap, rowEl.querySelector(".mon-name"));
-                    }
-                    const cb = imposeWrap && imposeWrap.querySelector(".monitor-impose-cb");
-                    if (cb) cb.checked = impositionNames.has(name);
-                } else {
-                    const imposeWrap = wrap.querySelector(".monitor-impose-wrap");
-                    if (imposeWrap) imposeWrap.remove();
-                }
+                updateMonitorRowWrap(existingMap[name], name);
                 delete existingMap[name];
                 continue;
             }
 
-            const wrap = document.createElement("div");
-            wrap.className = "monitor-item-wrap";
-            wrap.dataset.name = name;
-            if (monitorSelectedNames.has(name)) wrap.classList.add("monitor-item-selected");
-            if (hasActiveDeltaMarkers()) {
-                if (isDeltaChangedForName(name)) wrap.classList.add("monitor-item-delta-changed");
-                else wrap.classList.add("monitor-item-delta-unchanged");
-            }
-            wrap.addEventListener("click", (e) => {
-                if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
-                if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
-                else monitorSelectedNames.add(name);
-                rebuildMonitorList();
-            });
-
-            const el = document.createElement("div");
-            el.className = "monitor-item";
-            el.dataset.name = name;
-
-            // Drag & drop: permitir arrastrar hacia graficos y reordenar dentro de la lista
-            el.draggable = true;
-            el.addEventListener("dragstart", (e) => {
-                e.dataTransfer.setData("text/plain", name);
-                e.dataTransfer.setData("application/x-monitor-reorder", name);
-                e.dataTransfer.effectAllowed = "copyMove";
-                ensureNewGraphDropTarget();
-            });
-            el.addEventListener("dragend", () => {
-                plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
-                    slot.classList.remove("plot-add-over");
-                    slot.style.display = "none";
-                });
-                if (graphList.length === 0 && plotEmpty) {
-                    plotEmpty.classList.remove("plot-add-over");
-                    if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
-                }
-                monitorListEl.querySelectorAll(".monitor-item-wrap").forEach(w => {
-                    w.classList.remove("monitor-drop-before", "monitor-drop-after");
-                    delete w.dataset.dropPosition;
-                });
-            });
-
-            if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
-                const imposeWrap = document.createElement("span");
-                imposeWrap.className = "monitor-impose-wrap";
-                const lab = document.createElement("label");
-                const imposeCb = document.createElement("input");
-                imposeCb.type = "checkbox";
-                imposeCb.className = "monitor-impose-cb";
-                imposeCb.title = "Imponer a SHM (replay)";
-                imposeCb.checked = impositionNames.has(name);
-                imposeCb.addEventListener("change", (e) => {
-                    e.stopPropagation();
-                    const checked = imposeCb.checked;
-                    const toApply = monitorSelectedNames.size && monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                    toApply.forEach(n => {
-                        if (checked) impositionNames.add(n);
-                        else impositionNames.delete(n);
-                        syncReplayTsvHistoryForName(n);
-                    });
-                    saveConfig();
-                    rebuildMonitorList();
-                });
-                lab.appendChild(imposeCb);
-                imposeWrap.appendChild(lab);
-                el.appendChild(imposeWrap);
-            }
-
-            const nameEl = document.createElement("span");
-            nameEl.className = "mon-name";
-            nameEl.textContent = formatNameWithHiddenLevels(name, hideLevels);
-            nameEl.title = name;
-            nameEl.addEventListener("click", () => {
-                if (expandedStats.has(name)) expandedStats.delete(name);
-                else expandedStats.add(name);
-                updateStatsPanel(wrap, name);
-            });
-
-            let valEl = null;
-            if (!isArrayVar(name)) {
-                valEl = document.createElement("span");
-                valEl.className = "mon-value";
-                const vdInit = varsByName[name];
-                if (vdInit) {
-                    valEl.textContent = formatValue(vdInit.value, vdInit.type, name);
-                } else if (isPlaybackMode() && offlineDataset && isVarInTsv(name)) {
-                    const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : offlineDataset.minTs;
-                    const vAtT = getOfflineScalarValueAtTs(name, tNow);
-                    valEl.textContent = (vAtT == null) ? "--" : formatValue(vAtT, "double", name);
-                } else {
-                    valEl.textContent = "--";
-                }
-                valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
-            }
-
-            if (isArrayVar(name)) {
-                const badge = document.createElement("span");
-                badge.className = "array-badge";
-                const vd = varsByName[name];
-                badge.textContent = vd && Array.isArray(vd.value) ? "[" + vd.value.length + "]" : "[ ]";
-                badge.title = "Variable tipo array";
-                el.appendChild(badge);
-            } else if (isArincDerivedName(name)) {
-                const badge = document.createElement("span");
-                badge.className = "arinc-badge";
-                badge.textContent = "ARINC";
-                badge.title = "Subcanal ARINC derivado";
-                el.appendChild(badge);
-            } else if (isComputed(name)) {
-                const badge = document.createElement("span");
-                badge.className = "comp-badge";
-                badge.textContent = "fx";
-                badge.title = computedVars.find(c => c.name === name)?.expr || "";
-                el.appendChild(badge);
-            }
-            const alarmIcon = document.createElement("span");
-            alarmIcon.className = "mon-alarm-icon";
-            alarmIcon.textContent = "\u26A0";
-            alarmIcon.title = "Alarma configurada";
-            if (!alarms[name]) alarmIcon.style.display = "none";
-
-            const imposeBadge = document.createElement("span");
-            imposeBadge.className = "mon-impose-badge";
-            imposeBadge.textContent = "IMP";
-            imposeBadge.title = "Imponiendo valor desde TSV a SHM";
-            imposeBadge.style.display = "none";
-
-            el.appendChild(imposeBadge);
-            el.appendChild(nameEl);
-            el.appendChild(alarmIcon);
-            if (valEl) el.appendChild(valEl);
-
-            const removeBtn = document.createElement("button");
-            removeBtn.className = "btn-mon-remove";
-            removeBtn.textContent = "\u00D7";
-            removeBtn.title = "Quitar de monitorizacion";
-            removeBtn.addEventListener("click", (e) => {
-                e.stopPropagation();
-                const toRemove = monitorSelectedNames.has(name) ? [...monitorSelectedNames] : [name];
-                for (const n of toRemove) {
-                    if (isComputed(n)) removeComputedVar(n);
-                    else {
-                        monitoredNames.delete(n);
-                        monitoredOrder = monitoredOrder.filter(o => o !== n);
-                        delete varGraphAssignment[n];
-                        delete historyCache[n];
-                        expandedStats.delete(n);
-                        monitorSelectedNames.delete(n);
-                        if (!isArincDerivedName(n) && isArincEnabled(n)) {
-                            removeArincDerivedForBase(n);
-                        }
-                        if (isArrayVar(n)) {
-                            for (const key of Object.keys(arrayElemAssignment)) {
-                                if (key.startsWith(n + "[")) {
-                                    delete arrayElemAssignment[key];
-                                    delete arrayElemHistory[key];
-                                }
-                            }
-                        }
-                    }
-                }
-                saveConfig();
-                sendMonitored();
-                pruneEmptyGraphs();
-                renderBrowserList();
-                rebuildMonitorList();
-                renderPlots();
-            });
-            el.appendChild(removeBtn);
-            wrap.appendChild(el);
+            const wrap = createMonitorRowWrap(name);
             monitorListEl.appendChild(wrap);
             syncMonitorImpositionVisual(wrap, name);
         }
@@ -6088,13 +6566,64 @@
         }
 
         Object.values(existingMap).forEach(el => el.remove());
-        // Reordenar DOM para que coincida con monitoredOrder (p. ej. tras "Por nombre" / "Con gráfico primero")
         monitoredOrder.forEach(n => {
             const w = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(n)}"]`);
             if (w) monitorListEl.appendChild(w);
         });
-        monitorListEl.classList.toggle("monitor-virtualized", monitoredOrder.length > 300);
+        if (monitorDetailPanelUsesDock() && expandedStats.size > 1) {
+            let keep = null;
+            for (const n of monitoredOrder) {
+                if (expandedStats.has(n)) {
+                    keep = n;
+                    break;
+                }
+            }
+            expandedStats.clear();
+            if (keep) expandedStats.add(keep);
+        }
+        if (monitorDetailPanelUsesDock()) {
+            const nm = getDockedExpandedVarName();
+            if (nm) updateStatsPanel(null, nm);
+        } else {
+            for (const n of expandedStats) {
+                const w = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(n)}"]`);
+                if (w) updateStatsPanel(w, n);
+            }
+        }
         updateMonitorItemStyles();
+    }
+
+    if (monitorListEl && !monitorListEl._vmScrollBound) {
+        monitorListEl._vmScrollBound = true;
+        monitorListEl.addEventListener("scroll", () => {
+            if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+            if (!monitorVmScrollPending) {
+                monitorVmScrollPending = true;
+                requestAnimationFrame(() => {
+                    monitorVmScrollPending = false;
+                    if (monitorListEl.classList.contains("monitor-list--virtual")) {
+                        syncMonitorVirtualWindow();
+                    }
+                });
+            }
+        }, { passive: true });
+        let monitorVmResizeDebounce = null;
+        if (typeof ResizeObserver !== "undefined") {
+            const ro = new ResizeObserver(() => {
+                if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+                clearTimeout(monitorVmResizeDebounce);
+                monitorVmResizeDebounce = setTimeout(() => {
+                    monitorVmResizeDebounce = null;
+                    if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+                    monitorListEl._vmRowFrozen = false;
+                    measureMonitorVmRowHeightFromSlice(true);
+                    syncMonitorVirtualWindow();
+                }, 120);
+            });
+            ro.observe(monitorListEl);
+        }
+        /* Scroll con rueda/trackpad nativo: el listener custom con preventDefault provocaba sensación
+           de scroll “atascado” al usar la lista virtual. La sincronización va solo por el evento scroll. */
     }
 
     function arrayElemName(arrName, idx) { return arrName + "[" + idx + "]"; }
@@ -6465,15 +6994,69 @@
     }
 
     function updateStatsPanel(wrap, name) {
-        let panel = wrap.querySelector(".stats-panel");
+        const useDock = monitorListEl && monitorDetailPanelUsesDock();
+
         if (!expandedStats.has(name)) {
-            if (panel) panel.remove();
+            if (useDock) {
+                const dock = getMonitorDetailDockEl();
+                if (dock && dock.dataset.detailFor === name) {
+                    hideMonitorDetailDock();
+                }
+                if (monitorVmRows) {
+                    monitorVmRows.querySelectorAll(".stats-panel").forEach((p) => p.remove());
+                }
+            } else if (wrap) {
+                const oldPanel = wrap.querySelector(".stats-panel");
+                if (oldPanel) oldPanel.remove();
+            }
             return;
         }
-        if (!panel) {
-            panel = document.createElement("div");
-            panel.className = "stats-panel";
-            wrap.appendChild(panel);
+
+        let panel;
+        if (useDock) {
+            const dock = getMonitorDetailDockEl();
+            if (!dock) return;
+            dock.style.display = "";
+            panel = dock.querySelector(".stats-panel");
+            if (dock.dataset.detailFor !== name || !panel) {
+                dock.dataset.detailFor = name;
+                dock.innerHTML = "";
+                const hdr = document.createElement("div");
+                hdr.className = "monitor-detail-dock-header";
+                const titleSpan = document.createElement("span");
+                titleSpan.className = "monitor-detail-dock-title";
+                titleSpan.textContent = name;
+                const closeBtn = document.createElement("button");
+                closeBtn.type = "button";
+                closeBtn.className = "btn-monitor-detail-close";
+                closeBtn.textContent = "\u00D7";
+                closeBtn.title = currentLang === "en" ? "Close panel" : "Cerrar panel";
+                closeBtn.setAttribute("aria-label", closeBtn.title);
+                closeBtn.addEventListener("click", (ev) => {
+                    ev.stopPropagation();
+                    const cur = dock.dataset.detailFor;
+                    if (cur) expandedStats.delete(cur);
+                    hideMonitorDetailDock();
+                    rebuildMonitorList();
+                });
+                hdr.appendChild(titleSpan);
+                hdr.appendChild(closeBtn);
+                panel = document.createElement("div");
+                panel.className = "stats-panel stats-panel--docked";
+                dock.appendChild(hdr);
+                dock.appendChild(panel);
+            } else {
+                const titleSpan = dock.querySelector(".monitor-detail-dock-title");
+                if (titleSpan) titleSpan.textContent = name;
+            }
+        } else {
+            if (!wrap) return;
+            panel = wrap.querySelector(".stats-panel");
+            if (!panel) {
+                panel = document.createElement("div");
+                panel.className = "stats-panel";
+                wrap.appendChild(panel);
+            }
         }
 
         if (isArrayVar(name)) {
@@ -6866,7 +7449,10 @@
                     } else {
                         varGraphAssignment[dName] = sel.value || "";
                         if (sel.value) ensureSeriesColor(dName, true);
-                        pruneEmptyGraphs();
+                        const pruned = pruneEmptyGraphs();
+                        if (!pruned) {
+                            updateMonitorItemStyles();
+                        }
                     }
                     if (isPlaybackMode() && sel.value && sel.value !== "__new__") {
                         fetchFullHistoryIfNeeded(dName);
@@ -6876,6 +7462,24 @@
                     schedulePlotRender();
                 });
                 sel.addEventListener("click", (e) => e.stopPropagation());
+                const addMonBtn = document.createElement("button");
+                addMonBtn.type = "button";
+                addMonBtn.className = "btn-arinc-add-monitor";
+                addMonBtn.textContent = "+";
+                addMonBtn.title = currentLang === "en"
+                    ? "Monitor this ARINC subchannel (inserted below the base variable in the list)"
+                    : "Monitorizar este subcanal (se inserta debajo de la variable base en la lista)";
+                if (monitoredNames.has(dName)) {
+                    addMonBtn.disabled = true;
+                    addMonBtn.classList.add("btn-arinc-add-monitor--done");
+                    addMonBtn.title = currentLang === "en" ? "Already in monitor list" : "Ya en la lista de monitorización";
+                }
+                addMonBtn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    if (monitoredNames.has(dName)) return;
+                    insertArincDerivedMonitoredAfterBase(name, spec.suffix);
+                    updateStatsPanel(null, name);
+                });
                 let alarmBtn = null;
                 if (isLiveMode()) {
                     alarmBtn = document.createElement("span");
@@ -6907,6 +7511,7 @@
                 row.appendChild(lbl);
                 row.appendChild(val);
                 row.appendChild(sel);
+                row.appendChild(addMonBtn);
                 if (alarmBtn) row.appendChild(alarmBtn);
                 arincSubvars.appendChild(row);
             }
@@ -7179,6 +7784,15 @@
 
     function refreshAllStats() {
         const active = document.activeElement;
+        const useDock = monitorDetailPanelUsesDock();
+        if (useDock) {
+            const nm = getDockedExpandedVarName();
+            if (!nm) return;
+            const dock = getMonitorDetailDockEl();
+            if (active && dock && dock.contains(active)) return;
+            updateStatsPanel(null, nm);
+            return;
+        }
         for (const name of expandedStats) {
             const wrap = monitorListEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
             if (!wrap) continue;
@@ -7275,6 +7889,7 @@
         }
     }
 
+    let lastAlarmsPayloadSent = "";
     function sendAlarmsToBackend() {
         const payload = {};
         for (const [name, cfg] of Object.entries(alarms)) {
@@ -7287,6 +7902,9 @@
                 };
             }
         }
+        const key = JSON.stringify(payload);
+        if (key === lastAlarmsPayloadSent) return;
+        lastAlarmsPayloadSent = key;
         sendWsAction({ action: "set_alarms", alarms: payload });
     }
 
@@ -7649,7 +8267,9 @@
                 }
             }
             const wrap = el.closest(".monitor-item-wrap");
-            if (wrap && expandedStats.has(name)) updateStatsPanel(wrap, name);
+            if (wrap && expandedStats.has(name) && !monitorDetailPanelUsesDock()) {
+                updateStatsPanel(wrap, name);
+            }
         }
         sendAlarmsToBackend();
         refreshAllStats();
@@ -7722,8 +8342,7 @@
                 el.style.borderColor = c;
                 el.style.backgroundColor = c + "1a";
             }
-            const icon = el.querySelector(".mon-alarm-icon");
-            if (icon) icon.style.display = alarms[name] ? "" : "none";
+            syncMonitorRowStatusTags(el, name);
         });
     }
 
@@ -8104,6 +8723,151 @@
         return names;
     }
 
+    /**
+     * Historial temporal largo solo para series que se dibujan en un gráfico (o base ARINC si hay
+     * subcanal ploteado). El resto de variables monitorizadas bastan con varsByName (valor actual);
+     * guardar histórico para miles de escalares dispara la RAM (p. ej. 2k vars × ventana × tasa).
+     */
+    function needsScalarPlotHistory(name) {
+        if (!name || typeof name !== "string") return false;
+        if (isComputed(name)) {
+            return graphAssignmentIsPlotted(varGraphAssignment[name]);
+        }
+        if (isArincDerivedName(name)) {
+            return graphAssignmentIsPlotted(varGraphAssignment[name]);
+        }
+        if (isArincEnabled(name) && !isArincDerivedName(name)) {
+            const derived = getArincDerivedNames(name);
+            for (let i = 0; i < derived.length; i++) {
+                if (graphAssignmentIsPlotted(varGraphAssignment[derived[i]])) return true;
+            }
+        }
+        return graphAssignmentIsPlotted(varGraphAssignment[name]);
+    }
+
+    /**
+     * En modo live, solo hace falta historial (historyCache, elementos de array, ARINC derivados)
+     * si hay al menos una variable asignada a un gráfico existente. Sin eso, monitorización = solo valor actual (varsByName).
+     */
+    function liveModeNeedsHistoryBuffers() {
+        if (graphList.length === 0) return false;
+        for (const name in varGraphAssignment) {
+            if (graphAssignmentIsPlotted(varGraphAssignment[name])) return true;
+        }
+        for (const eName in arrayElemAssignment) {
+            if (graphAssignmentIsPlotted(arrayElemAssignment[eName])) return true;
+        }
+        return false;
+    }
+
+    function purgeHistoryCacheWithoutPlot() {
+        for (const name of Object.keys(historyCache)) {
+            if (!needsScalarPlotHistory(name)) {
+                delete historyCache[name];
+            }
+        }
+    }
+
+    /** Quita colores, alarmas locales y similares asociados a un nombre al dejar de monitorizarlo. */
+    function pruneMonitorAuxMapsForName(name) {
+        if (!name) return;
+        delete seriesColorByName[name];
+        delete seriesHueByName[name];
+        delete alarms[name];
+        delete prevAlarmState[name];
+        delete alarmPendingSince[name];
+        activeAlarms.delete(name);
+    }
+
+    function purgeAllPlotlyContainers() {
+        if (typeof Plotly === "undefined" || !Array.isArray(graphList)) return;
+        for (let i = 0; i < graphList.length; i++) {
+            const el = document.getElementById("plotContainer_" + graphList[i]);
+            if (el) {
+                try {
+                    Plotly.purge(el);
+                } catch (e) { /* ignore */ }
+            }
+        }
+        plotInstances = {};
+    }
+
+    /**
+     * En vivo, sin variables monitorizadas el servidor deja de enviar vars_update: pruneVarsByName no corría
+     * (mon.size===0 hacía return) y varsByName conservaba miles de entradas → RAM que no bajaba.
+     */
+    function clearLiveMonitorCachesWhenEmpty() {
+        if (!isLiveMode()) return;
+        if (monitoredNames.size > 0) return;
+        varsByName = {};
+        historyCache = {};
+        arrayElemHistory = {};
+        arrayElemAssignment = {};
+        varGraphAssignment = {};
+        seriesColorByName = {};
+        seriesHueByName = {};
+        expandedStats.clear();
+        hideMonitorDetailDock();
+        monitorSelectedNames.clear();
+        deltaByName = {};
+        lastLiveHistoryNeed = undefined;
+        sessionStartTime = null;
+        sharedZoomXRange = null;
+        purgeAllPlotlyContainers();
+        const known = new Set(knownVarNames);
+        for (const k of Object.keys(varFormat)) {
+            if (!known.has(k)) delete varFormat[k];
+        }
+        arincBusHealth = {
+            totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0,
+            labels: {}, parityByLabel: {}, unknownByLabel: {},
+        };
+        fullHistoryByName = {};
+        for (const _wk of Object.keys(windowMetaByName)) delete windowMetaByName[_wk];
+        fullHistoryPending.clear();
+    }
+
+    /** Elimina entradas huérfanas (p. ej. tras quitar variables del monitor). */
+    function pruneVarsByName() {
+        const mon = monitoredNames;
+        if (!mon) return;
+        if (mon.size === 0) {
+            if (isLiveMode()) clearLiveMonitorCachesWhenEmpty();
+            return;
+        }
+        for (const k of Object.keys(varsByName)) {
+            if (mon.has(k)) continue;
+            if (computedVars.some((c) => c.name === k)) continue;
+            if (isArincDerivedName(k)) {
+                const base = getArincBaseName(k);
+                if (base && mon.has(base)) continue;
+            }
+            if (isArrayElem(k)) {
+                const br = k.indexOf("[");
+                if (br > 0 && mon.has(k.slice(0, br))) continue;
+            }
+            delete varsByName[k];
+        }
+        pruneArrayElemHistoryOrphans();
+        // Quitar series de historial que ya no están monitorizadas ni en un gráfico (miles de vars).
+        for (const hk of Object.keys(historyCache)) {
+            if (mon.has(hk)) continue;
+            if (needsScalarPlotHistory(hk)) continue;
+            if (isArincDerivedName(hk)) {
+                const base = getArincBaseName(hk);
+                if (base && mon.has(base)) continue;
+            }
+            delete historyCache[hk];
+            delete fullHistoryByName[hk];
+        }
+    }
+
+    function pruneArrayElemHistoryOrphans() {
+        for (const k of Object.keys(arrayElemHistory)) {
+            if (!arrayElemAssignment[k]) delete arrayElemHistory[k];
+        }
+    }
+
     function schedulePlotRender() {
         if (plotsPaused) return;
         if (adaptiveLoadEnabled && document.hidden) return;
@@ -8136,7 +8900,17 @@
             const m = h.timestamps[h.timestamps.length - 1];
             if (maxTs === null || m > maxTs) maxTs = m;
         }
-        if (maxTs === null) return;
+        if (maxTs === null) {
+            purgeHistoryCacheWithoutPlot();
+            pruneArrayElemHistoryOrphans();
+            for (const cv of computedVars) {
+                if (!needsScalarPlotHistory(cv.name) && computedHistories[cv.name]) {
+                    computedHistories[cv.name].timestamps = [];
+                    computedHistories[cv.name].values = [];
+                }
+            }
+            return;
+        }
         const cutoff = maxTs - localHistMaxSec;
         for (const name in historyCache) {
             const h = historyCache[name];
@@ -8167,6 +8941,32 @@
             if (lo > 0) {
                 h.timestamps = h.timestamps.slice(lo);
                 h.values = h.values.slice(lo);
+            }
+        }
+        const histMaxSamples = Math.min(32000, Math.max(4000, (downsampleMaxPoints || 2000) * 8));
+        function capHist(h) {
+            if (!h || !h.timestamps || h.timestamps.length <= histMaxSamples) return;
+            const drop = h.timestamps.length - histMaxSamples;
+            h.timestamps = h.timestamps.slice(drop);
+            h.values = h.values.slice(drop);
+        }
+        for (const name in historyCache) {
+            const h = historyCache[name];
+            if (!h || isComputed(name)) continue;
+            capHist(h);
+        }
+        for (const key of Object.keys(arrayElemHistory)) {
+            capHist(arrayElemHistory[key]);
+        }
+        for (const cv of computedVars) {
+            capHist(computedHistories[cv.name]);
+        }
+        purgeHistoryCacheWithoutPlot();
+        pruneArrayElemHistoryOrphans();
+        for (const cv of computedVars) {
+            if (!needsScalarPlotHistory(cv.name) && computedHistories[cv.name]) {
+                computedHistories[cv.name].timestamps = [];
+                computedHistories[cv.name].values = [];
             }
         }
         // Actualizar el origen de sesión al mínimo que queda: así el eje X sigue mostrando
@@ -8327,19 +9127,30 @@
         if (!gid) return;
         saveConfig();
         rebuildPlotArea();
-        rebuildMonitorList();
+        updateMonitorItemStyles();
         renderPlots();
+    }
+
+    /** Lote al soltar en gráfico: capado para no asignar miles de series (y sus historiales) de golpe. */
+    function namesToAssignForGraphDrop(draggedName) {
+        if (!draggedName) return [];
+        if (!monitorSelectedNames.has(draggedName)) return [draggedName];
+        const list = [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n));
+        if (list.length <= MAX_GRAPH_ASSIGN_BATCH) return list;
+        return [draggedName];
     }
 
     function handleNewGraphDrop(name, opts = {}) {
         if (!name) return;
-        const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
+        const namesToAssign = namesToAssignForGraphDrop(name);
+        const monitoredCountBefore = monitoredOrder.length;
         for (const n of namesToAssign) {
             if (!monitoredNames.has(n) && !isArrayElem(n) && !isArincDerivedName(n)) {
                 ensureArincBaseMonitored(n);
                 ensureMonitoredName(n);
             }
         }
+        const addedMonitoredRows = monitoredOrder.length > monitoredCountBefore;
         if (namesToAssign.length) sendMonitored();
         if (graphList.length >= MAX_GRAPHS) return;
         const mode = opts.mode === "right" ? "right" : "bottom";
@@ -8357,8 +9168,14 @@
             browserSelection.delete(n);
         }
         rebuildPlotArea();
-        pruneEmptyGraphs();
-        rebuildMonitorList();
+        const pruned = pruneEmptyGraphs();
+        if (!pruned) {
+            if (addedMonitoredRows) {
+                rebuildMonitorList();
+            } else {
+                updateMonitorItemStyles();
+            }
+        }
         saveConfig();
         schedulePlotRender();
     }
@@ -8409,7 +9226,7 @@
         delete plotInstances[gid];
         saveConfig();
         rebuildPlotArea();
-        rebuildMonitorList();
+        updateMonitorItemStyles();
         renderPlots();
     }
 
@@ -8501,13 +9318,15 @@
                     slot.classList.remove("plot-drop-over");
                     const name = e.dataTransfer.getData("text/plain");
                     if (!name) return;
-                    const namesToAssign = monitorSelectedNames.has(name) ? [...monitorSelectedNames].filter(n => !isArrayVar(n) && !isArrayElem(n)) : [name];
+                    const namesToAssign = namesToAssignForGraphDrop(name);
+                    const monitoredCountBefore = monitoredOrder.length;
                     for (const n of namesToAssign) {
                         if (!monitoredNames.has(n) && !isArrayElem(n) && !isArincDerivedName(n)) {
                             ensureArincBaseMonitored(n);
                             ensureMonitoredName(n);
                         }
                     }
+                    const addedMonitoredRows = monitoredOrder.length > monitoredCountBefore;
                     if (namesToAssign.length) sendMonitored();
                     for (const n of namesToAssign) {
                         if (isArrayElem(n)) {
@@ -8520,8 +9339,14 @@
                         }
                         browserSelection.delete(n);
                     }
-                    pruneEmptyGraphs();
-                    rebuildMonitorList();
+                    const pruned = pruneEmptyGraphs();
+                    if (!pruned) {
+                        if (addedMonitoredRows) {
+                            rebuildMonitorList();
+                        } else {
+                            updateMonitorItemStyles();
+                        }
+                    }
                     saveConfig();
                     schedulePlotRender();
                 });
@@ -8607,7 +9432,7 @@
     function pruneEmptyGraphs() {
         normalizeGraphLayout();
         const empty = graphList.filter(gid => getVarsForGraph(gid).length === 0);
-        if (empty.length === 0) return;
+        if (empty.length === 0) return false;
         for (const gid of empty) {
             graphColumns = graphColumns
                 .map((col) => col.filter((g) => g !== gid))
@@ -8620,6 +9445,7 @@
         saveConfig();
         rebuildPlotArea();
         rebuildMonitorList();
+        return true;
     }
 
     /** Media móvil centrada para suavizar series (ventana impar). */
@@ -8734,8 +9560,10 @@
             if (monitoredNames.has(varName)) varGraphAssignment[varName] = "";
             else delete varGraphAssignment[varName];
         }
-        pruneEmptyGraphs();
-        rebuildMonitorList();
+        const pruned = pruneEmptyGraphs();
+        if (!pruned) {
+            updateMonitorItemStyles();
+        }
         saveConfig();
         schedulePlotRender();
     }
@@ -8772,6 +9600,8 @@
 
     function renderPlots() {
         const tRender0 = performance.now();
+        plotLiveRenderCount++;
+        const livePlotlyHardRefresh = isLiveMode() && graphList.length > 0 && (plotLiveRenderCount % PLOT_LIVE_PURGE_EVERY === 0);
         const windowSec = parseInt(timeWindowSelect.value);
         const activeSlots = [];
         // Origen = mínimo timestamp real en los datos mostrados, para que al recortar el buffer
@@ -8791,7 +9621,7 @@
                 if (globalTMax === null || tMax > globalTMax) globalTMax = tMax;
             }
         }
-        const win = windowSec > 0 ? windowSec : 60;
+        const win = windowSec > 0 ? windowSec : DEFAULT_LOCAL_HIST_MAX_SEC;
         let defaultXRange;
         let liveUseAutorange = false;
         if (isReplayMode() && offlineDataset) {
@@ -9043,6 +9873,18 @@
                 attachSharedZoomHandler(containerEl, gid);
                 attachLegendRemoveHandler(containerEl);
                 attachOfflineClickSeekHandler(containerEl);
+            } else if (livePlotlyHardRefresh) {
+                try {
+                    Plotly.purge(containerEl);
+                } catch (e) { /* ignore */ }
+                delete containerEl._varmonRelayoutHooked;
+                delete containerEl._varmonLegendHooked;
+                delete containerEl._varmonClickSeekHooked;
+                Plotly.newPlot(containerEl, traces, layout, config);
+                plotInstances[gid] = true;
+                attachSharedZoomHandler(containerEl, gid);
+                attachLegendRemoveHandler(containerEl);
+                attachOfflineClickSeekHandler(containerEl);
             } else {
                 Plotly.react(containerEl, traces, layout, config);
                 attachSharedZoomHandler(containerEl, gid);
@@ -9085,7 +9927,7 @@
 
     timeWindowSelect.addEventListener("change", () => {
         const v = parseInt(timeWindowSelect.value, 10);
-        localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : 60;
+        localHistMaxSec = (Number.isFinite(v) && v > 0) ? v : DEFAULT_LOCAL_HIST_MAX_SEC;
         if (isLiveMode()) trimLocalHistory();
         saveConfig();
         schedulePlotRender();
@@ -9318,6 +10160,7 @@
                 monitorListEl.appendChild(draggedWrap);
             }
             saveConfig();
+            rebuildMonitorList();
             return;
         }
 
@@ -9399,20 +10242,105 @@
             renderBrowserList();
             if (varDrawer && varDrawer.style.display === "flex") positionVarDrawer();
         } else {
-            const prev = knownVarNames.join(",");
+            // Mismo catálogo base: rebuildKnownVarNamesWithDerived() no añade hoy variables derivadas al browser.
+            // Evitamos join(",") sobre decenas de miles de nombres (picos de memoria / presión al GC).
             rebuildKnownVarNamesWithDerived();
-            const now = knownVarNames.join(",");
-            if (prev !== now) {
-                browserListDirty = true;
-                renderBrowserList();
-                if (varDrawer && varDrawer.style.display === "flex") positionVarDrawer();
+        }
+    }
+
+    function injectBrowserHeapTelemetryIntoVarsUpdate(data) {
+        if (!Array.isArray(data)) return data;
+        let heapMb = null;
+        try {
+            const m = performance.memory;
+            if (m && typeof m.usedJSHeapSize === "number") {
+                heapMb = m.usedJSHeapSize / (1024 * 1024);
+            }
+        } catch (e) { /* no performance.memory (p. ej. Firefox) */ }
+        if (heapMb == null) return data;
+        // No usar .map(): con miles de variables cada vars_update clonaba un array gigante → presión
+        // brutal al GC si además coincidía con pintar gráficos (memoria que tarda en estabilizarse).
+        for (let i = 0; i < data.length; i++) {
+            const item = data[i];
+            if (item && item.name === "varmon.telemetry.browser_js_heap_mb") {
+                item.value = heapMb;
+                item.type = "double";
+                break;
             }
         }
+        return data;
+    }
+
+    /** Asignación real a un gráfico existente (evita tratar "", 0, etc. como válidos). */
+    function graphAssignmentIsPlotted(g) {
+        return typeof g === "string" && g.length > 0 && graphList.includes(g);
+    }
+
+    /**
+     * Reutiliza el objeto en varsByName en lugar de asignar cada vez el item del JSON parseado.
+     * Con miles de variables y alta frecuencia de vars_update, reemplazar miles de referencias/tick
+     * + activar Plotly de golpe dejaba el heap en niveles altos de forma sostenida (GC no recuperaba).
+     */
+    function mergeVarsByNameInPlace(item) {
+        if (!item || !item.name) return null;
+        const prev = varsByName[item.name];
+        if (!prev || typeof prev !== "object") {
+            varsByName[item.name] = item;
+            return item;
+        }
+        const prevArr = Array.isArray(prev.value);
+        const itemArr = Array.isArray(item.value);
+        if (prevArr !== itemArr) {
+            varsByName[item.name] = item;
+            return item;
+        }
+        if (prevArr) {
+            prev.value = item.value;
+            prev.timestamp = item.timestamp;
+            if (item.type != null) prev.type = item.type;
+            return prev;
+        }
+        const pt = String(prev.type || "");
+        const it = String(item.type || "");
+        if (pt !== it) {
+            const scalarish = new Set(["double", "float", "int", "int32", "uint32", "uint64", "int64", "bool"]);
+            if (!(scalarish.has(pt) && scalarish.has(it))) {
+                varsByName[item.name] = item;
+                return item;
+            }
+        }
+        prev.value = item.value;
+        prev.timestamp = item.timestamp;
+        if (item.type != null) prev.type = item.type;
+        return prev;
     }
 
     function onVarsUpdate(data, opts = {}) {
         if (!Array.isArray(data)) return;
-        const appendHistory = opts.appendHistory !== false;
+        data = injectBrowserHeapTelemetryIntoVarsUpdate(data);
+        let appendHistory = opts.appendHistory !== false;
+        const needHistBuffers = liveModeNeedsHistoryBuffers();
+        if (isLiveMode() && appendHistory && !needHistBuffers) {
+            appendHistory = false;
+        }
+        if (isLiveMode() && lastLiveHistoryNeed === true && !needHistBuffers) {
+            purgeHistoryCacheWithoutPlot();
+            for (const k of Object.keys(arrayElemHistory)) delete arrayElemHistory[k];
+            for (let ci = 0; ci < computedVars.length; ci++) {
+                const cn = computedVars[ci].name;
+                const h = computedHistories[cn];
+                if (h) {
+                    h.timestamps.length = 0;
+                    h.values.length = 0;
+                }
+                delete historyCache[cn];
+            }
+        }
+        // Primer gráfico en vivo tras solo monitorizar: estado limpio de historial (sin arrastre raro).
+        if (isLiveMode() && lastLiveHistoryNeed === false && needHistBuffers) {
+            purgeHistoryCacheWithoutPlot();
+        }
+        lastLiveHistoryNeed = needHistBuffers;
         const forcedTs = (typeof opts.timestamp === "number" && Number.isFinite(opts.timestamp)) ? opts.timestamp : null;
         const isOfflineSnapshot = forcedTs != null && opts.appendHistory === false;
         const changedNames = new Set();
@@ -9425,8 +10353,9 @@
             if (isReplayMode() && !isOfflineSnapshot && impositionNames.has(item.name) && isVarInTsv(item.name)) {
                 continue;
             }
-            accepted.push(item);
-            varsByName[item.name] = item;
+            const stored = mergeVarsByNameInPlace(item);
+            if (!stored) continue;
+            accepted.push(stored);
             changedNames.add(item.name);
         }
         if (accepted.length === 0) return;
@@ -9471,6 +10400,7 @@
                 if (isReplayMode() && isVarInTsv(v.name) && impositionNames.has(v.name)) continue;
                 const num = typeof v.value === "number" ? v.value : (v.value === true ? 1 : v.value === false ? 0 : Number(v.value));
                 if (!isFinite(num)) continue;
+                if (!needsScalarPlotHistory(v.name)) continue;
                 if (!historyCache[v.name]) historyCache[v.name] = { timestamps: [], values: [] };
                 historyCache[v.name].timestamps.push(now);
                 historyCache[v.name].values.push(num);
@@ -9481,6 +10411,7 @@
             localRecordSamples.push(buildLocalFrontendSample(nowTs));
             if (localRecordSamples.length > 120000) localRecordSamples = localRecordSamples.slice(-120000);
         }
+        pruneVarsByName();
         schedulePlotRender();
 
         updateMonitorValues();

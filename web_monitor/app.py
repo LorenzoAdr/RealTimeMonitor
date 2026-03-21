@@ -41,6 +41,10 @@ DEFAULTS = {
     "log_buffer_size": 5000,
     "log_file_cpp": "",
     "shm_max_vars": 2048,
+    # Máx. parseos SHM/s solo monitorizando (0 = sin tope). Con REC o alarmas no se aplica tope.
+    "shm_parse_max_hz": 40,
+    # Snapshots en cola reader→drain (0 = ilimitada; >0 = FIFO acotada, put bloquea si llena = backpressure).
+    "shm_queue_max_size": 512,
 }
 
 CONFIG_ABS_PATH = ""
@@ -76,6 +80,10 @@ def load_config() -> dict:
                     cfg[key] = max(100, min(50000, int(val)))
                 elif key == "shm_max_vars":
                     cfg[key] = max(64, min(100000, int(val)))
+                elif key == "shm_parse_max_hz":
+                    cfg[key] = max(0.0, min(5000.0, float(val)))
+                elif key == "shm_queue_max_size":
+                    cfg[key] = max(0, min(100000, int(val)))
                 elif key in ("lan_ip", "bind_host", "auth_password", "server_state_dir", "log_file_cpp"):
                     cfg[key] = val
         CONFIG_ABS_PATH = os.path.abspath(path)
@@ -99,6 +107,7 @@ _config = load_config()
 
 # --- Buffer de log para visor integrado ---
 _LOG_BUFFER_LOCK = threading.Lock()
+_LOG_SEQ = 0  # contador monotónico por línea (para GET /api/log?since_seq=…)
 _LOG_BUFFER: collections.deque = collections.deque(
     maxlen=max(100, min(50000, int(_config.get("log_buffer_size", 5000)))),
 )
@@ -118,7 +127,10 @@ class _LogTee:
                     if self._linebuf:
                         line = "".join(self._linebuf).strip()
                         if line:
+                            global _LOG_SEQ
+                            _LOG_SEQ += 1
                             _LOG_BUFFER.append({
+                                "seq": _LOG_SEQ,
                                 "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                                 "level": "info",
                                 "msg": line,
@@ -160,7 +172,8 @@ async def _watchdog_no_cpp():
                 inst = await asyncio.to_thread(_list_uds_instances, None)
                 if inst:
                     b = await asyncio.to_thread(UdsBridge, inst[0]["uds_path"], 0.5)
-                    _ = await asyncio.to_thread(b.list_names)
+                    # get_server_info basta para comprobar C++; list_names alocaría miles de strings cada 5 s (RSS).
+                    _ = await asyncio.to_thread(b.get_server_info)
                     b.disconnect()
                     last_ok = time.monotonic()
             except Exception:
@@ -170,7 +183,7 @@ async def _watchdog_no_cpp():
             inst = await asyncio.to_thread(_list_uds_instances, None)
             if inst:
                 b = await asyncio.to_thread(UdsBridge, inst[0]["uds_path"], 0.5)
-                _ = await asyncio.to_thread(b.list_names)
+                _ = await asyncio.to_thread(b.get_server_info)
                 b.disconnect()
                 last_ok = time.monotonic()
         except Exception:
@@ -262,13 +275,35 @@ def _get_suggested_web_port(
     return suggested
 
 
+async def _memtrace_log_loop():
+    """Si VARMON_MEMTRACE=1: imprime cada 30s las líneas con más RAM propia (tracemalloc)."""
+    import tracemalloc
+    await asyncio.sleep(20.0)
+    while True:
+        await asyncio.sleep(30.0)
+        snap = tracemalloc.take_snapshot()
+        lines = snap.statistics("lineno")[:15]
+        print("[VarMonitor Web] MEMTRACE top asignaciones (tracemalloc):", flush=True)
+        for s in lines:
+            print(f"  {s}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not hasattr(app.state, "startup_time"):
         app.state.startup_time = time.monotonic()
     if not hasattr(app.state, "shm_cycle_ms"):
         app.state.shm_cycle_ms = None
+    if not hasattr(app.state, "ws_monitored_counts"):
+        # id(WebSocket) -> len(monitored_names); para /api/advanced_stats y varmon.telemetry.*
+        app.state.ws_monitored_counts = {}
     asyncio.create_task(_watchdog_no_cpp())
+    _mt = (os.environ.get("VARMON_MEMTRACE") or "").strip().lower()
+    if _mt in ("1", "true", "yes", "on"):
+        import tracemalloc
+        tracemalloc.start(25)
+        print("[VarMonitor Web] MEMTRACE activo (VARMON_MEMTRACE=1); tracemalloc cada ~30s en log.", flush=True)
+        asyncio.create_task(_memtrace_log_loop())
     yield
 
 
@@ -283,13 +318,15 @@ async def log_requests_middleware(request: Request, call_next):
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - start) * 1000
     path = getattr(request.url, "path", "") or ""
-    query = getattr(request.url, "query", "") or ""
-    if query:
-        path_display = path + "?" + (query if len(query) <= 100 else query[:100] + "...")
-    else:
-        path_display = path
-    status = getattr(response, "status_code", 0)
-    print(f"[Req] {request.method} {path_display} -> {status} ({elapsed_ms:.0f}ms)")
+    # Evita bucle de ruido y picos de RAM: el visor hace polling frecuente a /api/log.
+    if path != "/api/log":
+        query = getattr(request.url, "query", "") or ""
+        if query:
+            path_display = path + "?" + (query if len(query) <= 100 else query[:100] + "...")
+        else:
+            path_display = path
+        status = getattr(response, "status_code", 0)
+        print(f"[Req] {request.method} {path_display} -> {status} ({elapsed_ms:.0f}ms)")
     return response
 
 
@@ -299,20 +336,28 @@ async def index():
 
 
 @app.get("/api/vars")
-async def api_list_vars():
+async def api_list_vars(request: Request):
     try:
         b = await asyncio.to_thread(_first_uds_bridge)
         if b is None:
             return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
         data = await asyncio.to_thread(b.list_vars)
         b.disconnect()
+        extra = _telemetry_snapshot_rows(set(VARMON_TELEMETRY_NAMES), request.app.state)
+        if isinstance(data, list):
+            return JSONResponse(data + extra)
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/var/{name:path}")
-async def api_get_var(name: str):
+async def api_get_var(name: str, request: Request):
+    if name in VARMON_TELEMETRY_NAME_SET:
+        rows = _telemetry_snapshot_rows({name}, request.app.state)
+        if rows:
+            return JSONResponse(rows[0])
+        return JSONResponse({"error": "telemetría no disponible"}, status_code=404)
     try:
         b = await asyncio.to_thread(_first_uds_bridge)
         if b is None:
@@ -328,6 +373,8 @@ async def api_get_var(name: str):
 
 @app.post("/api/var/{name:path}")
 async def api_set_var(name: str, value: float = Query(...), var_type: str = Query("double")):
+    if name in VARMON_TELEMETRY_NAME_SET:
+        return JSONResponse({"success": False})
     try:
         b = await asyncio.to_thread(_first_uds_bridge)
         if b is None:
@@ -403,7 +450,183 @@ STATE_ROOT_DIR = (_config.get("server_state_dir") or "").strip() or os.path.join
 BROWSER_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
 SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
-ALARM_BUFFER_SEC = 11.0  # 10 s + 1 s para registro en alarma
+ALARM_BUFFER_SEC = 2.2  # ~1 s previos + ~1 s posteriores al contexto de disparo (TSV con snapshot completo)
+ALARM_UDS_POLL_SEC = 0.2  # Sin monitor pero con alarmas: get_var solo sobre nombres en alarma (evita snapshots SHM masivos)
+
+# Variables sintéticas (solo backend / UI); no existen en C++. Aparecen en el catálogo y en vars_update si están monitorizadas.
+VARMON_TELEMETRY_NAMES: tuple[str, ...] = (
+    "varmon.telemetry.python_ram_mb",
+    "varmon.telemetry.python_cpu_percent",
+    "varmon.telemetry.cpp_ram_mb",
+    "varmon.telemetry.cpp_cpu_percent",
+    "varmon.telemetry.shm_cycle_ms",
+    "varmon.telemetry.browser_js_heap_mb",
+    "varmon.telemetry.ws_monitored_count",
+)
+VARMON_TELEMETRY_NAME_SET: frozenset[str] = frozenset(VARMON_TELEMETRY_NAMES)
+
+
+def _ws_monitored_count_aggregate(state) -> int:
+    """Máximo de |monitored_names| entre WebSockets activos (una pestaña → número exacto)."""
+    counts = getattr(state, "ws_monitored_counts", None)
+    if not isinstance(counts, dict) or not counts:
+        return 0
+    return int(max(counts.values()))
+
+
+def _merge_names_with_telemetry(names_list: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names_list:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    for n in VARMON_TELEMETRY_NAMES:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _telemetry_float(v) -> float:
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)) and math.isfinite(float(v)):
+        return float(v)
+    return 0.0
+
+
+def _telemetry_snapshot_rows(monitored: set[str], app_state) -> list[dict]:
+    """Filas compatibles con vars_update para nombres varmon.telemetry.*."""
+    need = monitored & VARMON_TELEMETRY_NAME_SET
+    if not need:
+        return []
+    t_snap = time.time()
+    py_r = _get_process_ram_mb()
+    py_c = _get_python_cpu_percent(app_state)
+    now_m = time.monotonic()
+    if now_m - getattr(app_state, "varmon_telemetry_cpp_at", 0.0) >= 1.0:
+        cpp_ram, cpp_cpu, shm_hint, shm_active = _fetch_cpp_stats_sync()
+        app_state.varmon_telemetry_cpp_at = now_m
+        app_state.varmon_telemetry_cpp_ram = cpp_ram
+        app_state.varmon_telemetry_cpp_cpu = cpp_cpu
+        app_state.varmon_telemetry_shm_hint = shm_hint
+        app_state.varmon_telemetry_shm_active = shm_active
+    else:
+        cpp_ram = getattr(app_state, "varmon_telemetry_cpp_ram", None)
+        cpp_cpu = getattr(app_state, "varmon_telemetry_cpp_cpu", None)
+        shm_hint = getattr(app_state, "varmon_telemetry_shm_hint", None)
+        shm_active = bool(getattr(app_state, "varmon_telemetry_shm_active", False))
+
+    shm_ms = getattr(app_state, "shm_cycle_ms", None)
+    if isinstance(shm_ms, (int, float)):
+        shm_ms = float(shm_ms)
+    elif isinstance(shm_hint, (int, float)):
+        shm_ms = float(shm_hint)
+    elif shm_active:
+        try:
+            shm_ms = float(_config.get("cycle_interval_ms", 100))
+        except Exception:
+            shm_ms = 0.0
+    else:
+        shm_ms = 0.0
+
+    def row(name: str, val: float) -> dict:
+        return {"name": name, "type": "double", "value": val, "timestamp": t_snap}
+
+    out: list[dict] = []
+    for n in VARMON_TELEMETRY_NAMES:
+        if n not in need:
+            continue
+        if n == "varmon.telemetry.python_ram_mb":
+            out.append(row(n, _telemetry_float(py_r)))
+        elif n == "varmon.telemetry.python_cpu_percent":
+            out.append(row(n, _telemetry_float(py_c)))
+        elif n == "varmon.telemetry.cpp_ram_mb":
+            out.append(row(n, _telemetry_float(cpp_ram)))
+        elif n == "varmon.telemetry.cpp_cpu_percent":
+            out.append(row(n, _telemetry_float(cpp_cpu)))
+        elif n == "varmon.telemetry.shm_cycle_ms":
+            out.append(row(n, _telemetry_float(shm_ms)))
+        elif n == "varmon.telemetry.ws_monitored_count":
+            out.append(row(n, float(_ws_monitored_count_aggregate(app_state))))
+        else:
+            out.append(row(n, 0.0))
+    return out
+
+
+def _var_update_signature(entry: dict) -> tuple:
+    """Firma (tipo, valor) para comparar snapshots sin serializar JSON completo."""
+    typ = entry.get("type") or "double"
+    val = entry.get("value")
+    if typ == "double":
+        if isinstance(val, bool):
+            return (typ, 1.0 if val else 0.0)
+        if isinstance(val, int):
+            return (typ, float(val))
+        if isinstance(val, float):
+            return (typ, val)
+        try:
+            return (typ, float(val))
+        except (TypeError, ValueError):
+            return (typ, val)
+    return (typ, val)
+
+
+def _var_signature_equal(a: tuple, b: tuple) -> bool:
+    if a[0] != b[0]:
+        return False
+    va, vb = a[1], b[1]
+    if va == vb:
+        return True
+    if isinstance(va, float) and isinstance(vb, float):
+        return math.isclose(va, vb, rel_tol=0.0, abs_tol=1e-9)
+    return False
+
+
+def _prune_vars_update_sig_cache(cache: dict[str, tuple], allowed_shm_names: set[str]) -> None:
+    for k in list(cache.keys()):
+        if k not in allowed_shm_names:
+            del cache[k]
+
+
+def _merge_shm_and_telemetry_vars_updates(
+    latest_snapshot: list[dict] | None,
+    name_set: set[str],
+    app_state,
+    sig_cache: dict[str, tuple],
+    force_full: bool,
+) -> tuple[list[dict], bool]:
+    """
+    vars_update en delta para variables SHM (evita JSON gigante con miles de vars estables).
+    La telemetría (pocas filas) se anexa siempre si está monitorizada.
+    """
+    telemetry_rows = _telemetry_snapshot_rows(name_set, app_state)
+    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+    _prune_vars_update_sig_cache(sig_cache, shm_only)
+    cand = [v for v in (latest_snapshot or []) if (v.get("name") or "") in shm_only]
+
+    if force_full or not sig_cache:
+        for v in cand:
+            n = v.get("name")
+            if n:
+                sig_cache[n] = _var_update_signature(v)
+        out = cand + telemetry_rows
+        return out, len(out) > 0
+
+    shm_out: list[dict] = []
+    for v in cand:
+        n = v.get("name")
+        if not n:
+            continue
+        sig = _var_update_signature(v)
+        old = sig_cache.get(n)
+        if old is None or not _var_signature_equal(old, sig):
+            shm_out.append(v)
+            sig_cache[n] = sig
+    out = shm_out + telemetry_rows
+    return out, len(out) > 0
+
 
 # Índice ligero de tiempos por grabación TSV: path -> [(time_s, byte_offset), ...]
 _TIME_INDEX: dict[str, list[tuple[float, int]]] = {}
@@ -581,6 +804,17 @@ def _flush_record_buffer_to_tsv(
     return path_saved, fn_saved, size_bytes
 
 
+def _record_row_layout(col_spec: list[tuple[str, int]]) -> tuple[dict[str, tuple[int, int]], int]:
+    """Nombre → (offset, celdas) en la fila TSV de valores; evita dict nombre→valor de todo el snapshot por muestra."""
+    layout: dict[str, tuple[int, int]] = {}
+    off = 0
+    for name, size in col_spec:
+        sz = max(1, int(size))
+        layout[name] = (off, sz)
+        off += sz
+    return layout, off
+
+
 def _build_record_col_spec(var_names: list[str], snapshot: list[dict]) -> list[tuple[str, int]]:
     """Construye especificación de columnas para grabación incremental."""
     snap_map = {e.get("name"): e.get("value") for e in snapshot if isinstance(e, dict)}
@@ -611,23 +845,34 @@ def _write_record_row_stream(
     t_snap: float,
     snapshot: list[dict],
     col_spec: list[tuple[str, int]],
+    row_layout: tuple[dict[str, tuple[int, int]], int] | None = None,
 ) -> int:
-    name_to_val = {e.get("name"): e.get("value", "") for e in snapshot if isinstance(e, dict)}
-    row_parts = [f"{t_snap:.6f}"]
-    for name, size in col_spec:
-        v = name_to_val.get(name, "")
+    if row_layout is None:
+        row_layout = _record_row_layout(col_spec)
+    layout, nvals = row_layout
+    vals = [""] * nvals
+    for e in snapshot:
+        if not isinstance(e, dict):
+            continue
+        n = e.get("name")
+        if n is None or n not in layout:
+            continue
+        off, size = layout[n]
+        v = e.get("value", "")
         if size <= 1:
             if isinstance(v, (list, tuple)):
-                row_parts.append(str(v[0]) if len(v) >= 1 else "")
+                vals[off] = str(v[0]) if len(v) >= 1 else ""
             else:
-                row_parts.append(str(v))
+                vals[off] = str(v)
         else:
             if isinstance(v, (list, tuple)):
                 for i in range(size):
-                    row_parts.append(str(v[i]) if i < len(v) else "")
+                    vals[off + i] = str(v[i]) if i < len(v) else ""
             else:
-                row_parts.extend([str(v)] + [""] * (size - 1))
-    line = "\t".join(row_parts) + "\n"
+                vals[off] = str(v)
+                for i in range(1, size):
+                    vals[off + i] = ""
+    line = f"{t_snap:.6f}\t" + "\t".join(vals) + "\n"
     f.write(line)
     return len(line.encode("utf-8", errors="ignore"))
 
@@ -642,6 +887,7 @@ def _recording_writer_thread(
     _ensure_recordings_dir()
     f = None
     col_spec: list[tuple[str, int]] | None = None
+    row_layout: tuple[dict[str, tuple[int, int]], int] | None = None
     try:
         while True:
             item = queue.get()
@@ -653,9 +899,10 @@ def _recording_writer_thread(
             if col_spec is None:
                 names = var_names or sorted(set(e.get("name") for e in snapshot if isinstance(e, dict)))
                 col_spec = _build_record_col_spec(names, snapshot)
-                f = open(path, "w")
+                row_layout = _record_row_layout(col_spec)
+                f = open(path, "w", buffering=1024 * 1024)
                 _write_record_header_stream(f, col_spec)
-            _write_record_row_stream(f, t_rel, snapshot, col_spec)
+            _write_record_row_stream(f, t_rel, snapshot, col_spec, row_layout)
             rows_written_ref[0] += 1
     finally:
         if f is not None:
@@ -705,7 +952,15 @@ def _evaluate_alarms(
     new_pending = dict(pending_since_ms)
     triggered = []
     cleared = []
-    var_by_name = {e["name"]: e for e in snapshot}
+    names_needed = frozenset(alarms_config.keys())
+    var_by_name: dict[str, dict] = {}
+    for e in snapshot:
+        if not isinstance(e, dict):
+            continue
+        n = e.get("name")
+        if n is None or n not in names_needed:
+            continue
+        var_by_name[n] = e
     for name, cfg in alarms_config.items():
         if name not in var_by_name:
             continue
@@ -1494,33 +1749,55 @@ def _read_cpp_log_tail(path: str, max_lines: int) -> list[dict]:
 async def api_log(
     request: Request,
     tail: int = Query(2000, ge=1, le=20000),
+    since_seq: int = Query(0, ge=0, description="Solo source=python: líneas con seq > since_seq"),
+    limit: int = Query(500, ge=1, le=2000, description="Máx. líneas en modo incremental"),
     source: str = Query("python", description="python | cpp | all"),
 ):
     """Devuelve el log del backend (Python) y opcionalmente del proceso C++ (archivo configurado)."""
     source = (source or "python").strip().lower()
     if source not in ("python", "cpp", "all"):
         source = "python"
+    want_plain = request.headers.get("accept", "").strip().startswith("text/plain")
     lines: list[dict] = []
+    max_seq = 0
     if source in ("python", "all"):
         with _LOG_BUFFER_LOCK:
-            lines = list(_LOG_BUFFER)[-tail:]
-        if source == "all":
-            lines = [{"ts": x["ts"], "level": x["level"], "msg": f"[Py] {x['msg']}"} for x in lines]
+            max_seq = _LOG_SEQ
+            use_incr = (not want_plain) and source == "python" and since_seq > 0
+            if use_incr:
+                acc: list[dict] = []
+                for x in _LOG_BUFFER:
+                    if x.get("seq", 0) > since_seq:
+                        acc.append(x)
+                lines = acc[-limit:]
+            else:
+                snap = list(_LOG_BUFFER)[-tail:]
+                if source == "all":
+                    lines = [
+                        {"ts": x["ts"], "level": x["level"], "msg": f"[Py] {x['msg']}", "seq": x.get("seq", 0)}
+                        for x in snap
+                    ]
+                else:
+                    lines = snap
     if source in ("cpp", "all"):
         cpp_path = (_config.get("log_file_cpp") or "").strip()
         cpp_lines = _read_cpp_log_tail(cpp_path, tail)
         if source == "all":
             lines = list(lines) + cpp_lines
             lines.sort(key=lambda x: (x["ts"], x["msg"]))
-        else:
+        elif source == "cpp":
             lines = cpp_lines
-    if request.headers.get("accept", "").strip().startswith("text/plain"):
+            max_seq = 0
+    if want_plain:
         text = "\n".join(
             (f"{x['ts']} {x['msg']}" if x.get("ts") else x["msg"]) for x in lines
         )
         from fastapi.responses import PlainTextResponse
         return PlainTextResponse(text)
-    return {"lines": lines, "source": source}
+    out: dict = {"lines": lines, "source": source}
+    if source in ("python", "all"):
+        out["max_seq"] = max_seq
+    return out
 
 
 @app.get("/api/admin/storage")
@@ -1724,6 +2001,7 @@ async def api_advanced_stats(request: Request):
         "cpp_ram_mb": cpp_ram_mb,
         "cpp_cpu_percent": cpp_cpu_percent,
         "shm_cycle_ms": shm_cycle_ms,
+        "monitored_var_count": _ws_monitored_count_aggregate(state),
     }
 
 
@@ -1817,17 +2095,21 @@ async def websocket_endpoint(ws: WebSocket):
     update_ratio = 5  # enviar vars_update cada N ciclos de tiempo (5 por defecto; 1 = tasa máxima)
     last_vars_update_at = 0.0  # tiempo (monotonic) del último vars_update
     names_refresh_interval = 30.0
+    names_refresh_interval_idle = 600.0  # idle: catálogo raro que cambie; evita list_names/list_vars gigantes
     monitored_names: set[str] = set()
-    last_names_send = 0.0
-    names_sent_once = False
+    # None = aún no hubo envío exitoso de catálogo desde el bucle; evita martillar list_names/list_vars.
+    last_names_send: float | None = None
     # Alarmas y grabación (plan dos tasas)
     alarms_config: dict = {}  # { name: { lo, hi } }
     prev_alarm_state: dict = {}
     alarm_pending_since_ms: dict = {}
     recording = False
     record_buffer: list[tuple[float, list[dict]]] = []  # fallback (legacy)
-    alarm_buffer: list[tuple[float, list[dict]]] = []  # ventana rodante ALARM_BUFFER_SEC
+    alarm_buffer: collections.deque = collections.deque()  # ventana rodante ALARM_BUFFER_SEC
     latest_snapshot: list[dict] | None = None
+    # Delta vars_update: evita reenviar miles de variables sin cambio (RSS Python + ancho de banda).
+    vars_update_sig_cache: dict[str, tuple] = {}
+    force_full_vars_update = False
     send_file_on_finish = False  # por defecto no enviar fichero al navegador
     recording_var_names: list[str] | None = None  # columnas para CSV (monitored al start)
     recording_size_est_bytes = 0
@@ -1836,6 +2118,7 @@ async def websocket_endpoint(ws: WebSocket):
     recording_tmp_path: str | None = None
     recording_tmp_fp = None
     recording_col_spec: list[tuple[str, int]] | None = None
+    recording_row_layout: tuple[dict[str, tuple[int, int]], int] | None = None
     recording_rows_written = 0
     recording_t0: float | None = None
     shm_last_snap_ts: float | None = None
@@ -1870,16 +2153,38 @@ async def websocket_endpoint(ws: WebSocket):
     shm_reader: ShmReader | None = None
     shm_queue: Queue | None = None
     if info and info.get("shm_name") and info.get("sem_name"):
-        shm_queue = Queue()
+        qmax = int(_config.get("shm_queue_max_size", 512))
+        shm_queue = Queue(0 if qmax <= 0 else qmax)
         shm_max_vars = int(_config.get("shm_max_vars", 2048))
+        shm_hz = float(_config.get("shm_parse_max_hz", 40) or 0)
+        shm_parse_cap = None if shm_hz <= 0 else shm_hz
         shm_reader = ShmReader(
-            info["shm_name"], info["sem_name"], shm_queue, poll_interval=0.5, max_vars=shm_max_vars
+            info["shm_name"],
+            info["sem_name"],
+            shm_queue,
+            poll_interval=0.5,
+            max_vars=shm_max_vars,
+            parse_max_hz=shm_parse_cap,
         )
         if shm_reader.start():
+            # Hasta update_shm_read_pause() puede pasar mucho tiempo (list_names/list_vars enormes). Si _reads_paused
+            # queda False, el hilo parsea SHM a ritmo C++ y dispara RSS; arrancar conservador y luego sincronizar.
+            shm_reader.set_reads_paused(True)
             if getattr(shm_reader, "_polling_only", False):
                 print(f"[VarMonitor Web] SHM activo (modo polling): {info['shm_name']} — {shm_reader._last_error or ''}", flush=True)
             else:
-                print(f"[VarMonitor Web] SHM activo: {info['shm_name']} (grabación a tasa real del SHM)", flush=True)
+                qnote = "ilimitada" if qmax <= 0 else f"{qmax} snapshots (FIFO; llena → lector espera)"
+                if shm_parse_cap is not None:
+                    print(
+                        f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote}; solo monitorización ≤{shm_parse_cap:.0f} parseos/s "
+                        f"(REC/alarmas a tasa completa; `shm_parse_max_hz=0` quita el tope)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote} (sin tope Hz de parseo)",
+                        flush=True,
+                    )
         else:
             reason = getattr(shm_reader, "_last_error", None) or "desconocido"
             print(f"[VarMonitor Web] SHM no disponible: {reason}", flush=True)
@@ -1895,85 +2200,101 @@ async def websocket_endpoint(ws: WebSocket):
         names_list = await asyncio.to_thread(bridge.list_names)
         if not names_list:
             names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+        names_list = _merge_names_with_telemetry(names_list)
         await ws.send_json({"type": "vars_names", "data": names_list})
         last_names_send = time.monotonic()
-        names_sent_once = True
     except Exception as e:
         print(f"[VarMonitor Web] Aviso: no se pudo obtener vars_names al conectar: {e}", flush=True)
 
     shm_drain_task: asyncio.Task | None = None
+    last_alarm_uds_poll_at = 0.0
+
+    async def _notify_alarm_events(cleared: list[str], triggered: list[dict]) -> None:
+        if cleared:
+            try:
+                await ws.send_json({"type": "alarm_cleared", "names": cleared})
+            except Exception:
+                pass
+        if not triggered:
+            return
+        await ws.send_json({
+            "type": "alarm_triggered",
+            "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
+        })
+
+        async def _send_alarm_file_later():
+            await asyncio.sleep(1.0)
+            buf_now = list(alarm_buffer)
+            if not buf_now:
+                return
+            _ensure_recordings_dir()
+            from datetime import datetime
+            fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+            path = os.path.join(RECORDINGS_DIR, fn)
+            var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
+            if not var_names:
+                var_names = ["time_s"]
+            _write_snapshots_tsv(path, buf_now, var_names)
+            msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
+            if send_file_on_finish:
+                try:
+                    with open(path, "rb") as f:
+                        import base64
+                        msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+                except Exception:
+                    pass
+            try:
+                await ws.send_json(msg)
+            except Exception:
+                pass
+
+        asyncio.create_task(_send_alarm_file_later())
 
     async def _shm_drain_loop():
         """Task que drena la cola SHM a la frecuencia real (no ligada a receive_text)."""
         nonlocal latest_snapshot, shm_last_snap_ts, shm_cycle_ema_ms
         nonlocal alarm_buffer, prev_alarm_state, alarm_pending_since_ms
-        nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_t0
+        nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_row_layout, recording_t0
         nonlocal recording_header_estimated, recording_rows_written, recording_size_est_bytes, last_record_progress_send_at
-        while True:
-            try:
-                snapshot_item = shm_queue.get_nowait()
-            except Empty:
-                await asyncio.sleep(0.001)
-                continue
+
+        async def _handle_snapshot_item(snapshot_item):
+            nonlocal latest_snapshot, shm_last_snap_ts, shm_cycle_ema_ms
+            nonlocal alarm_buffer, prev_alarm_state, alarm_pending_since_ms
+            nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_row_layout, recording_t0
+            nonlocal recording_header_estimated, recording_rows_written, recording_size_est_bytes, last_record_progress_send_at
             if isinstance(snapshot_item, dict):
                 snapshot = snapshot_item.get("data")
                 t_snap = float(snapshot_item.get("timestamp") or time.time())
             else:
                 snapshot = snapshot_item
                 t_snap = time.time()
+            if not snapshot:
+                return
+            if shm_reader is not None and shm_reader.reads_paused():
+                return
             if shm_last_snap_ts is not None:
                 dt_ms = max(0.0, (t_snap - shm_last_snap_ts) * 1000.0)
                 shm_cycle_ema_ms = dt_ms if shm_cycle_ema_ms is None else (shm_cycle_ema_ms * 0.85 + dt_ms * 0.15)
                 ws.app.state.shm_cycle_ms = round(shm_cycle_ema_ms, 3)
             shm_last_snap_ts = t_snap
-            if not snapshot:
-                continue
-            latest_snapshot = snapshot
+            # No es un buffer histórico: solo el último frame. Con alarmas/REC el snapshot debe ser
+            # completo para evaluación y TSV. Si solo monitorizas, recortar a `monitored_names` libera
+            # referencias a dicts de variables SHM que no están en el monitor (p. ej. 2048 vs 2000).
+            if not alarms_config and not recording and monitored_names:
+                mn = monitored_names
+                latest_snapshot = [v for v in snapshot if (v.get("name") or "") in mn]
+            else:
+                latest_snapshot = snapshot
             if alarms_config:
                 alarm_buffer.append((t_snap, snapshot))
                 cutoff = t_snap - ALARM_BUFFER_SEC
                 while alarm_buffer and alarm_buffer[0][0] < cutoff:
-                    alarm_buffer.pop(0)
+                    alarm_buffer.popleft()
             if alarms_config:
                 prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
                     snapshot, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
                 )
-                if cleared:
-                    try:
-                        await ws.send_json({"type": "alarm_cleared", "names": cleared})
-                    except Exception:
-                        pass
-                if triggered:
-                    await ws.send_json({
-                        "type": "alarm_triggered",
-                        "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
-                    })
-                    async def _send_alarm_file_later():
-                        await asyncio.sleep(1.0)
-                        buf_now = list(alarm_buffer)
-                        if not buf_now:
-                            return
-                        _ensure_recordings_dir()
-                        from datetime import datetime
-                        fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
-                        path = os.path.join(RECORDINGS_DIR, fn)
-                        var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
-                        if not var_names:
-                            var_names = ["time_s"]
-                        _write_snapshots_tsv(path, buf_now, var_names)
-                        msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
-                        if send_file_on_finish:
-                            try:
-                                with open(path, "rb") as f:
-                                    import base64
-                                    msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
-                            except Exception:
-                                pass
-                        try:
-                            await ws.send_json(msg)
-                        except Exception:
-                            pass
-                    asyncio.create_task(_send_alarm_file_later())
+                await _notify_alarm_events(cleared, triggered)
             if recording:
                 if recording_t0 is None:
                     recording_t0 = t_snap
@@ -2000,16 +2321,19 @@ async def websocket_endpoint(ws: WebSocket):
                     if recording_tmp_fp is None:
                         _ensure_recordings_dir()
                         recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
-                        recording_tmp_fp = open(recording_tmp_path, "w")
+                        recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
                     if recording_col_spec is None:
                         names = recording_var_names or sorted(set(e["name"] for e in snapshot))
                         recording_col_spec = _build_record_col_spec(names, snapshot)
+                        recording_row_layout = _record_row_layout(recording_col_spec)
                     if not recording_header_estimated and recording_col_spec:
                         recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
                         recording_header_estimated = True
                     if recording_col_spec:
                         t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
-                        recording_size_est_bytes += _write_record_row_stream(recording_tmp_fp, t_rel_local, snapshot, recording_col_spec)
+                        recording_size_est_bytes += _write_record_row_stream(
+                            recording_tmp_fp, t_rel_local, snapshot, recording_col_spec, recording_row_layout
+                        )
                         recording_rows_written += 1
                     if (t_snap - last_record_progress_send_at) >= 0.5:
                         last_record_progress_send_at = t_snap
@@ -2022,38 +2346,139 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             pass
 
+        while True:
+            batch: list = []
+            try:
+                while True:
+                    batch.append(shm_queue.get_nowait())
+            except Empty:
+                pass
+            if not batch:
+                if shm_reader is not None and shm_reader.reads_paused():
+                    await asyncio.sleep(15.0)
+                else:
+                    await asyncio.sleep(0.004)
+                continue
+            # Solo monitorización: el navegador ya recibe vars_update a tasa baja; procesar toda la
+            # cola por frame satura la CPU si C++ publica más rápido que este bucle.
+            if not alarms_config and not recording:
+                batch = batch[-1:]
+            for bi, snapshot_item in enumerate(batch):
+                if bi > 0 and (bi & 31) == 0:
+                    await asyncio.sleep(0)
+                await _handle_snapshot_item(snapshot_item)
+
+    def update_shm_read_pause() -> None:
+        """Sin monitor ni grabación: no parsear SHM (las alarmas sin monitor usan get_var acotado en el bucle principal)."""
+        nonlocal latest_snapshot
+        if not shm_reader:
+            return
+        idle = not monitored_names and not recording
+        shm_reader.set_reads_paused(bool(idle))
+        # Grabación y alarmas: sin tope Hz (cada snapshot que entrega el lector SHM). Solo UI usa shm_parse_max_hz.
+        shm_reader.set_full_parse_rate(bool(alarms_config or recording))
+        if idle:
+            latest_snapshot = None
+
     if shm_reader and shm_queue is not None:
         shm_drain_task = asyncio.create_task(_shm_drain_loop())
+        update_shm_read_pause()
+
+    ws_id = id(ws)
+    if not hasattr(ws.app.state, "ws_monitored_counts"):
+        ws.app.state.ws_monitored_counts = {}
+    ws.app.state.ws_monitored_counts[ws_id] = len(monitored_names)
 
     try:
         while True:
             try:
                 now = time.monotonic()
 
-                if not names_sent_once or (now - last_names_send >= names_refresh_interval):
-                    names_list = await asyncio.to_thread(bridge.list_names)
-                    if not names_list:
-                        names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
-                    await ws.send_json({"type": "vars_names", "data": names_list})
-                    last_names_send = now
-                    names_sent_once = True
+                catalog_idle = not monitored_names and not recording
+                refresh_iv = names_refresh_interval_idle if catalog_idle else names_refresh_interval
+                # Sesión idle y catálogo ya enviado: no list_names/list_vars periódicos (evita RSS por asignaciones enormes).
+                if last_names_send is None:
+                    need_catalog = True
+                elif catalog_idle:
+                    need_catalog = False
+                else:
+                    need_catalog = now - last_names_send >= refresh_iv
+                if need_catalog:
+                    try:
+                        names_list = await asyncio.to_thread(bridge.list_names)
+                        if not names_list:
+                            names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+                        names_list = _merge_names_with_telemetry(names_list)
+                        await ws.send_json({"type": "vars_names", "data": names_list})
+                    except Exception as e:
+                        print(f"[VarMonitor Web] Aviso: vars_names periódico falló: {e}", flush=True)
+                    finally:
+                        # Siempre espaciar reintentos (incluso si falla UDS o send_json) para no crecer la RAM.
+                        last_names_send = now
+
+                if (
+                    shm_reader
+                    and shm_queue is not None
+                    and alarms_config
+                    and not monitored_names
+                    and not recording
+                    and (now - last_alarm_uds_poll_at >= ALARM_UDS_POLL_SEC)
+                ):
+                    last_alarm_uds_poll_at = now
+                    snapshot_alarm: list[dict] = []
+                    for aname in alarms_config:
+                        if aname in VARMON_TELEMETRY_NAME_SET:
+                            snapshot_alarm.extend(_telemetry_snapshot_rows({aname}, ws.app.state))
+                            continue
+                        vinfo = await asyncio.to_thread(bridge.get_var, aname)
+                        if vinfo:
+                            snapshot_alarm.append(vinfo)
+                    if snapshot_alarm:
+                        t_snap = time.time()
+                        alarm_buffer.append((t_snap, snapshot_alarm))
+                        cutoff = t_snap - ALARM_BUFFER_SEC
+                        while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                            alarm_buffer.popleft()
+                        prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                            snapshot_alarm, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                        )
+                        await _notify_alarm_events(cleared, triggered)
 
                 if shm_reader and shm_queue is not None:
                     # Cola SHM la drena _shm_drain_loop en segundo plano. Aquí solo envío visual a tasa baja.
                     interval_between_updates = update_ratio * cycle_interval_sec
-                    if monitored_names and latest_snapshot is not None and (now - last_vars_update_at >= interval_between_updates):
+                    if monitored_names and (now - last_vars_update_at >= interval_between_updates):
                         last_vars_update_at = now
                         name_set = set(monitored_names)
-                        mon_data = [v for v in latest_snapshot if v["name"] in name_set]
-                        await ws.send_json({"type": "vars_update", "data": mon_data})
+                        pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                            latest_snapshot,
+                            name_set,
+                            ws.app.state,
+                            vars_update_sig_cache,
+                            force_full_vars_update,
+                        )
+                        if should_send:
+                            await ws.send_json({"type": "vars_update", "data": pack})
+                            if force_full_vars_update:
+                                shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                shm_sent = {
+                                    v["name"]
+                                    for v in pack
+                                    if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                }
+                                if not shm_only or shm_only.issubset(shm_sent):
+                                    force_full_vars_update = False
                 else:
                     # Sin SHM: tomar snapshot completo cada ciclo (backend-first para alarmas/grabación).
                     if monitored_names:
                         snapshot_now: list[dict] = []
                         for name in monitored_names:
+                            if name in VARMON_TELEMETRY_NAME_SET:
+                                continue
                             vinfo = await asyncio.to_thread(bridge.get_var, name)
                             if vinfo:
                                 snapshot_now.append(vinfo)
+                        snapshot_now.extend(_telemetry_snapshot_rows(set(monitored_names), ws.app.state))
                         if snapshot_now:
                             t_snap = time.time()
                             latest_snapshot = snapshot_now
@@ -2061,55 +2486,20 @@ async def websocket_endpoint(ws: WebSocket):
                                 alarm_buffer.append((t_snap, snapshot_now))
                                 cutoff = t_snap - ALARM_BUFFER_SEC
                                 while alarm_buffer and alarm_buffer[0][0] < cutoff:
-                                    alarm_buffer.pop(0)
+                                    alarm_buffer.popleft()
                                 prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
                                     snapshot_now, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
                                 )
-                                if cleared:
-                                    try:
-                                        await ws.send_json({"type": "alarm_cleared", "names": cleared})
-                                    except Exception:
-                                        pass
-                                if triggered:
-                                    await ws.send_json({
-                                        "type": "alarm_triggered",
-                                        "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
-                                    })
-                                    # Programar escritura y notificación del fichero de alarma 1 s después.
-                                    async def send_alarm_file_later_fallback():
-                                        await asyncio.sleep(1.0)
-                                        buf_now = list(alarm_buffer)
-                                        if not buf_now:
-                                            return
-                                        _ensure_recordings_dir()
-                                        from datetime import datetime
-                                        fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
-                                        path = os.path.join(RECORDINGS_DIR, fn)
-                                        var_names = sorted(set(e["name"] for _, data in buf_now for e in data))
-                                        if not var_names:
-                                            var_names = ["time_s"]
-                                        _write_snapshots_tsv(path, buf_now, var_names)
-                                        msg = {"type": "alarm_recording_ready", "path": path, "filename": fn}
-                                        if send_file_on_finish:
-                                            try:
-                                                with open(path, "rb") as f:
-                                                    import base64
-                                                    msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
-                                            except Exception:
-                                                pass
-                                        try:
-                                            await ws.send_json(msg)
-                                        except Exception:
-                                            pass
-                                    asyncio.create_task(send_alarm_file_later_fallback())
+                                await _notify_alarm_events(cleared, triggered)
                             if recording:
                                 if recording_tmp_fp is None:
                                     _ensure_recordings_dir()
                                     recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
-                                    recording_tmp_fp = open(recording_tmp_path, "w")
+                                    recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
                                 if recording_col_spec is None:
                                     names = recording_var_names or sorted(set(e["name"] for e in snapshot_now))
                                     recording_col_spec = _build_record_col_spec(names, snapshot_now)
+                                    recording_row_layout = _record_row_layout(recording_col_spec)
                                 if recording_t0 is None:
                                     recording_t0 = t_snap
                                 if not recording_header_estimated and recording_col_spec:
@@ -2118,7 +2508,9 @@ async def websocket_endpoint(ws: WebSocket):
                                 if recording_col_spec:
                                     # Tiempo relativo: primera fila siempre 0.0
                                     t_rel = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
-                                    recording_size_est_bytes += _write_record_row_stream(recording_tmp_fp, t_rel, snapshot_now, recording_col_spec)
+                                    recording_size_est_bytes += _write_record_row_stream(
+                                        recording_tmp_fp, t_rel, snapshot_now, recording_col_spec, recording_row_layout
+                                    )
                                     recording_rows_written += 1
                                 if (t_snap - last_record_progress_send_at) >= 0.5:
                                     last_record_progress_send_at = t_snap
@@ -2132,9 +2524,27 @@ async def websocket_endpoint(ws: WebSocket):
                                         pass
                     # Envío visual a tasa reducida.
                     interval_between_updates = update_ratio * cycle_interval_sec
-                    if monitored_names and latest_snapshot is not None and (now - last_vars_update_at >= interval_between_updates):
+                    if monitored_names and (now - last_vars_update_at >= interval_between_updates):
                         last_vars_update_at = now
-                        await ws.send_json({"type": "vars_update", "data": latest_snapshot})
+                        name_set = set(monitored_names)
+                        pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                            latest_snapshot,
+                            name_set,
+                            ws.app.state,
+                            vars_update_sig_cache,
+                            force_full_vars_update,
+                        )
+                        if should_send:
+                            await ws.send_json({"type": "vars_update", "data": pack})
+                            if force_full_vars_update:
+                                shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                shm_sent = {
+                                    v["name"]
+                                    for v in pack
+                                    if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                }
+                                if not shm_only or shm_only.issubset(shm_sent):
+                                    force_full_vars_update = False
 
             except Exception as e:
                 msg_err = str(e)
@@ -2157,12 +2567,16 @@ async def websocket_endpoint(ws: WebSocket):
                     print(f"[VarMonitor Web] No se pudo enviar error al cliente: {send_err}", flush=True)
 
             try:
-                # Al grabar con SHM, usar timeout corto para drenar la cola a la frecuencia real del SHM
-                # (no a la del envío al frontend). Así cada muestra del SHM se escribe en el TSV.
-                recv_timeout = cycle_interval_sec
-                if recording and shm_reader and shm_queue is not None:
-                    recv_timeout = min(cycle_interval_sec, 0.005)  # 5 ms
-                msg = await asyncio.wait_for(ws.receive_text(), timeout=recv_timeout)
+                # Sin monitor/alarmas/REC: receive_text() bloqueante (sin asyncio.wait_for) evita crear/cancelar
+                # una tarea interna en cada timeout; con timeouts cortos eso puede inflar RSS del proceso.
+                ws_fully_idle = not monitored_names and not recording and not alarms_config
+                if ws_fully_idle:
+                    msg = await ws.receive_text()
+                else:
+                    recv_timeout = cycle_interval_sec
+                    if recording and shm_reader and shm_queue is not None:
+                        recv_timeout = min(cycle_interval_sec, 0.005)  # 5 ms
+                    msg = await asyncio.wait_for(ws.receive_text(), timeout=recv_timeout)
                 cmd = json.loads(msg)
                 action = cmd.get("action")
 
@@ -2172,26 +2586,39 @@ async def websocket_endpoint(ws: WebSocket):
                     update_ratio = max(1, min(max_r, v))
                 elif action == "set_monitored":
                     monitored_names = set(cmd.get("names", []))
+                    force_full_vars_update = True
+                    ws.app.state.ws_monitored_counts[ws_id] = len(monitored_names)
                     # Fase 2: suscripción SHM para que C++ solo escriba estas vars
                     try:
-                        await asyncio.to_thread(bridge.set_shm_subscription, list(monitored_names))
+                        sub_real = [n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET]
+                        await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
                     except Exception:
                         pass
+                    update_shm_read_pause()
                 # Historial en vivo eliminado: se mantiene solo vía SHM y grabaciones TSV.
                 elif action == "set_var":
-                    ok = await asyncio.to_thread(
-                        bridge.set_var, cmd["name"], cmd["value"], cmd.get("var_type", "double")
-                    )
-                    await ws.send_json({"type": "set_result", "success": ok, "name": cmd["name"]})
+                    sn = cmd.get("name") or ""
+                    if sn in VARMON_TELEMETRY_NAME_SET:
+                        await ws.send_json({"type": "set_result", "success": False, "name": sn})
+                    else:
+                        ok = await asyncio.to_thread(
+                            bridge.set_var, sn, cmd["value"], cmd.get("var_type", "double")
+                        )
+                        await ws.send_json({"type": "set_result", "success": ok, "name": sn})
                 elif action == "set_array_element":
-                    ok = await asyncio.to_thread(
-                        bridge.set_array_element, cmd["name"], int(cmd["index"]), float(cmd["value"])
-                    )
-                    await ws.send_json({"type": "set_result", "success": ok, "name": cmd["name"]})
+                    sn = cmd.get("name") or ""
+                    if sn in VARMON_TELEMETRY_NAME_SET:
+                        await ws.send_json({"type": "set_result", "success": False, "name": sn})
+                    else:
+                        ok = await asyncio.to_thread(
+                            bridge.set_array_element, sn, int(cmd["index"]), float(cmd["value"])
+                        )
+                        await ws.send_json({"type": "set_result", "success": ok, "name": sn})
                 elif action == "refresh_names":
                     names_list = await asyncio.to_thread(bridge.list_names)
                     if not names_list:
                         names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+                    names_list = _merge_names_with_telemetry(names_list)
                     await ws.send_json({"type": "vars_names", "data": names_list})
                     last_names_send = time.monotonic()
                 elif action == "set_alarms":
@@ -2208,6 +2635,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     "hys": v.get("hys"),
                                     "delayMs": v.get("delayMs"),
                                 }
+                    update_shm_read_pause()
                 elif action == "set_send_file_on_finish":
                     send_file_on_finish = bool(cmd.get("value", False))
                 elif action == "start_recording":
@@ -2218,6 +2646,7 @@ async def websocket_endpoint(ws: WebSocket):
                     recording_header_estimated = False
                     last_record_progress_send_at = 0.0
                     recording_col_spec = None
+                    recording_row_layout = None
                     recording_rows_written = 0
                     recording_t0 = None
                     if recording_writer_thread is not None:
@@ -2254,6 +2683,7 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "recording_progress", "bytes": 0, "samples": 0})
                     except Exception:
                         pass
+                    update_shm_read_pause()
                 elif action == "stop_recording":
                     recording = False
                     if recording_write_queue is not None and recording_writer_thread is not None:
@@ -2300,8 +2730,10 @@ async def websocket_endpoint(ws: WebSocket):
                     recording_header_estimated = False
                     last_record_progress_send_at = 0.0
                     recording_col_spec = None
+                    recording_row_layout = None
                     recording_rows_written = 0
                     recording_t0 = None
+                    update_shm_read_pause()
             except asyncio.TimeoutError:
                 pass
             except WebSocketDisconnect:
@@ -2356,6 +2788,9 @@ async def websocket_endpoint(ws: WebSocket):
                 print(f"[VarMonitor Web] No se pudo salvar REC al cerrar WS: {e}", flush=True)
         if shm_reader:
             shm_reader.stop()
+        counts = getattr(ws.app.state, "ws_monitored_counts", None)
+        if isinstance(counts, dict):
+            counts.pop(ws_id, None)
         ACTIVE_WS -= 1
         bridge.disconnect()
         print(f"[VarMonitor Web] WebSocket cerrado (C++ {connection_label})", flush=True)

@@ -1,10 +1,34 @@
 """Lector de SHM + semáforo POSIX para VarMonitor (fase 1). Solo Linux."""
 
+import ctypes
 import mmap
 import os
 import struct
 import threading
-from queue import Queue, Empty
+import time
+from queue import Queue
+
+
+class _SemTimespec(ctypes.Structure):
+    """Una sola definición; crear la clase dentro de _sem_wait() por llamada acumulaba ~10 MiB (tracemalloc)."""
+
+    _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+
+def _ensure_libc_sem_timedwait(libc) -> None:
+    if getattr(libc, "_varmon_sem_timedwait_abi", False):
+        return
+    libc.sem_timedwait.argtypes = [ctypes.c_void_p, ctypes.POINTER(_SemTimespec)]
+    libc.sem_timedwait.restype = ctypes.c_int
+    libc._varmon_sem_timedwait_abi = True
+
+
+def _ensure_libc_sem_trywait(libc) -> None:
+    if getattr(libc, "_varmon_sem_trywait_abi", False):
+        return
+    libc.sem_trywait.argtypes = [ctypes.c_void_p]
+    libc.sem_trywait.restype = ctypes.c_int
+    libc._varmon_sem_trywait_abi = True
 
 # Layout C++: HEADER 32 bytes (magic, version, seq, count, padding, timestamp), ENTRY 137 (name[128], type, double)
 # Debe coincidir con MAX_VARS en libvarmonitor/src/shm_publisher.cpp
@@ -38,7 +62,6 @@ def _open_shm(shm_name: str):
 def _open_sem(sem_name: str) -> tuple[object | None, str | None]:
     """Abre semáforo POSIX existente. Devuelve (handle, None) o (None, mensaje_errno)."""
     try:
-        import ctypes
         # use_errno=True para que ctypes.get_errno() refleje el errno de sem_open
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.sem_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
@@ -65,28 +88,30 @@ def _open_sem(sem_name: str) -> tuple[object | None, str | None]:
         return (None, str(e))
 
 
+def _sem_trywait(libc, sem) -> bool:
+    """Intenta decrementar el semáforo sin bloquear. True si había un post pendiente."""
+    _ensure_libc_sem_trywait(libc)
+    sem_ptr = sem if isinstance(sem, ctypes.c_void_p) else ctypes.c_void_p(sem)
+    return libc.sem_trywait(sem_ptr) == 0
+
+
 def _sem_wait(libc, sem, timeout_sec: float | None = None):
     """Espera al semáforo. Si timeout_sec es None, espera indefinidamente. True si se obtuvo, False si timeout."""
-    import ctypes
-    import time
     sem_ptr = sem if isinstance(sem, ctypes.c_void_p) else ctypes.c_void_p(sem)
     if timeout_sec is None:
         libc.sem_wait(sem_ptr)
         return True
-    class timespec(ctypes.Structure):
-        _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
-    libc.sem_timedwait.argtypes = [ctypes.c_void_p, ctypes.POINTER(timespec)]
+    _ensure_libc_sem_timedwait(libc)
     # sem_timedwait espera tiempo ABSOLUTO (CLOCK_REALTIME), no relativo.
     deadline = time.time() + max(0.0, float(timeout_sec))
     tv_sec = int(deadline)
     tv_nsec = int((deadline - tv_sec) * 1_000_000_000)
-    ts = timespec(tv_sec, tv_nsec)
+    ts = _SemTimespec(tv_sec, tv_nsec)
     ret = libc.sem_timedwait(sem_ptr, ctypes.byref(ts))
     return ret == 0
 
 
 def _sem_close(libc, sem):
-    import ctypes
     sem_ptr = sem if isinstance(sem, ctypes.c_void_p) else ctypes.c_void_p(sem)
     libc.sem_close(sem_ptr)
 
@@ -137,6 +162,20 @@ def read_snapshot(buf: mmap.mmap, max_vars: int | None = None) -> dict | None:
     return {"timestamp": float(timestamp), "data": result, "seq": seq}
 
 
+def peek_shm_seq(buf: mmap.mmap) -> int | None:
+    """Solo seq del header (barato). Para polling: no parsear 2048 entradas si C++ no escribió ciclo nuevo."""
+    if buf.size() < HEADER_SIZE:
+        return None
+    buf.seek(0)
+    raw = buf.read(HEADER_SIZE)
+    if len(raw) < 20:
+        return None
+    magic, version, seq, _count = struct.unpack(HEADER_FMT, raw[:20])
+    if magic != MAGIC:
+        return None
+    return int(seq)
+
+
 class ShmReader:
     """Lee SHM en un hilo: sem_wait (o polling si el semáforo no abre) -> lee snapshot -> pone en queue."""
 
@@ -147,12 +186,17 @@ class ShmReader:
         queue: Queue,
         poll_interval: float = 0.5,
         max_vars: int | None = None,
+        parse_max_hz: float | None = None,
     ):
         self.shm_name = shm_name
         self.sem_name = sem_name
         self.queue = queue
         self.poll_interval = poll_interval
         self._max_vars = max_vars  # None = usar MAX_VARS del módulo (debe coincidir con C++)
+        # Tope de read_snapshot/s cuando set_full_parse_rate(False); None = sin tope.
+        self._parse_max_hz = float(parse_max_hz) if (parse_max_hz is not None and parse_max_hz > 0) else None
+        self._full_parse_rate = False
+        self._last_parse_mono = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._fd = None
@@ -160,6 +204,22 @@ class ShmReader:
         self._sem_handle = None
         self._last_error: str | None = None
         self._polling_only: bool = False
+        # True: no parsear SHM (ahorra RAM/CPU en live sin monitor/alarmas/grabación).
+        self._reads_paused: bool = False
+
+    def set_reads_paused(self, paused: bool) -> None:
+        self._reads_paused = bool(paused)
+
+    def reads_paused(self) -> bool:
+        return self._reads_paused
+
+    def set_full_parse_rate(self, full: bool) -> None:
+        """True: sin tope Hz (grabación/alarmas). False: aplicar parse_max_hz."""
+        self._full_parse_rate = bool(full)
+
+    def _enqueue_snapshot(self, snapshot) -> None:
+        """FIFO: encola cada snapshot parseado. Si la cola tiene maxsize, put() bloquea (backpressure al hilo lector)."""
+        self.queue.put(snapshot)
 
     def start(self) -> bool:
         """Abre SHM (y sem si es posible), arranca hilo. False solo si SHM no se pudo abrir. Ver last_error."""
@@ -212,39 +272,77 @@ class ShmReader:
             self._sem_handle = None
 
     def _run(self):
-        import time
         buf = self._buf
         if self._sem_handle is not None:
             libc, sem = self._sem_handle
             while not self._stop.is_set():
+                if self._reads_paused:
+                    got = _sem_wait(libc, sem, timeout_sec=1.0)
+                    if self._stop.is_set():
+                        break
+                    if got:
+                        while _sem_trywait(libc, sem):
+                            pass
+                    continue
                 got = _sem_wait(libc, sem, timeout_sec=self.poll_interval)
                 if self._stop.is_set():
                     break
                 if not got:
                     continue
+                # Varios sem_post seguidos = un solo snapshot en SHM; sin esto se hace read_snapshot por post (CPU al 100%).
+                while _sem_trywait(libc, sem):
+                    pass
+                if (
+                    not self._full_parse_rate
+                    and self._parse_max_hz is not None
+                    and self._parse_max_hz > 0
+                ):
+                    min_iv = 1.0 / self._parse_max_hz
+                    elapsed = time.monotonic() - self._last_parse_mono
+                    if elapsed < min_iv:
+                        time.sleep(min_iv - elapsed)
+                        while _sem_trywait(libc, sem):
+                            pass
                 try:
                     buf.seek(0)
                     snapshot = read_snapshot(buf, self._max_vars)
                     if snapshot is not None:
-                        self.queue.put(snapshot)
+                        self._enqueue_snapshot(snapshot)
                 except Exception:
                     pass
+                finally:
+                    self._last_parse_mono = time.monotonic()
         else:
             last_seq: int | None = None
             poll_s = max(0.001, min(0.5, self.poll_interval))
             if poll_s > 0.01:
                 poll_s = 0.005
             while not self._stop.is_set():
+                if self._reads_paused:
+                    time.sleep(1.0)
+                    continue
                 time.sleep(poll_s)
                 if self._stop.is_set():
                     break
                 try:
+                    seq = peek_shm_seq(buf)
+                    if seq is None or seq == last_seq:
+                        continue
+                    if (
+                        not self._full_parse_rate
+                        and self._parse_max_hz is not None
+                        and self._parse_max_hz > 0
+                    ):
+                        min_iv = 1.0 / self._parse_max_hz
+                        elapsed = time.monotonic() - self._last_parse_mono
+                        if elapsed < min_iv:
+                            time.sleep(min_iv - elapsed)
                     buf.seek(0)
                     snapshot = read_snapshot(buf, self._max_vars)
+                    last_seq = seq
                     if snapshot is not None:
-                        seq = snapshot.get("seq")
-                        if seq is not None and seq != last_seq:
-                            last_seq = seq
-                            self.queue.put(snapshot)
+                        self._enqueue_snapshot(snapshot)
                 except Exception:
                     pass
+                else:
+                    self._last_parse_mono = time.monotonic()

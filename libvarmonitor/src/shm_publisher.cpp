@@ -17,6 +17,8 @@
 #include <csignal>
 #include <mutex>
 #include <unordered_set>
+#include <type_traits>
+#include <variant>
 
 namespace varmon {
 namespace shm_publisher {
@@ -174,13 +176,20 @@ void shutdown() {
     g_sem_name.clear();
 }
 
+/** Convierte a double según el tipo activo del variant (no usar s.type: puede desincronizarse y provocar std::bad_variant_access). */
 static double scalar_to_double(const VarMonitor::VarSnapshot& s) {
-    switch (s.type) {
-        case VarType::Double: return std::get<double>(s.value);
-        case VarType::Int32:  return static_cast<double>(std::get<int32_t>(s.value));
-        case VarType::Bool:   return std::get<bool>(s.value) ? 1.0 : 0.0;
-        default: return 0.0;
-    }
+    return std::visit([](const auto& arg) -> double {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, double>) {
+            return static_cast<double>(arg);
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            return static_cast<double>(arg);
+        } else if constexpr (std::is_same_v<T, bool>) {
+            return arg ? 1.0 : 0.0;
+        } else {
+            return 0.0;
+        }
+    }, s.value);
 }
 
 void write_snapshot(VarMonitor* mon) {
