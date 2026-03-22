@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarMonitor</title>
-    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/style.css?v=7">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -59,12 +59,13 @@
                 <span id="advUiRenderMs" class="adv-val">render: —</span>
                 <span id="advUiFps" class="adv-val">fps: —</span>
                 <span id="advUiPts" class="adv-val">pts: —</span>
-                <span id="advShmCycle" class="adv-val">shm: —</span>
+                <span id="advShmCycle" class="adv-val" title="">ciclo SHM: —</span>
             </div>
         </div>
         <div class="header-right">
             <button id="docsBtn" class="btn-small" type="button" title="Documentación">Docs</button>
             <button id="logBtn" class="btn-small" type="button" title="Registro del servidor (Python y opcionalmente C++)">Log</button>
+            <button id="perfBtn" class="btn-small" type="button" title="Rendimiento por fases (activa medición al abrir; también con estadísticas avanzadas)">Perf</button>
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <div id="offlineControls" class="offline-controls" style="display:none">
                 <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar</button>
@@ -301,6 +302,20 @@
         </div>
     </div>
 
+    <div id="perfOverlay" class="help-overlay" style="display:none">
+        <div class="perf-modal">
+            <div class="help-modal-header">
+                <h2 id="perfPanelTitle">Rendimiento (fases)</h2>
+                <button id="perfCloseBtn" class="help-close" type="button">&times;</button>
+            </div>
+            <p class="perf-intro" id="perfIntro">
+                La medición está <strong>desactivada por defecto</strong> y solo corre mientras este panel está abierto o la tira de estadísticas avanzadas está visible.
+                C++ / Python: tiempos por ciclo reciente; navegador: render de gráficos en esta pestaña.
+            </p>
+            <div id="perfPanelBody" class="perf-panel-body"></div>
+        </div>
+    </div>
+
     <div id="helpOverlay" class="help-overlay" style="display:none">
         <div class="help-modal">
             <div class="help-modal-header">
@@ -390,7 +405,9 @@
                     </div>
                 </div>
             </div>
-            <div id="monitorList" class="monitor-list"></div>
+            <div id="monitorListScroll" class="monitor-list-scroll">
+                <div id="monitorList" class="monitor-list"></div>
+            </div>
         </section>
         <div id="monitorResizeHandle" class="monitor-resize-handle" role="separator" aria-orientation="vertical" title="Redimensionar panel de monitorización"></div>
 

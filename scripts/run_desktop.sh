@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# Arranca app.py y abre la UI en ventana nativa (pywebview). Ver run_desktop.py.
+# Arranca demo_server (C++) en segundo plano, app.py y la UI (pywebview). Ver run_desktop.py.
+#
+# En Linux, si existe `taskset`, se fija afinidad por defecto: núcleos distintos para
+# el demo C++ y para el proceso Python (menos interferencia en pruebas). Personalizar:
+#   export VARMON_TASKSET_CPP=0-1
+#   export VARMON_TASKSET_PY=2-3
+# No arrancar el binario de demo (p. ej. ya tienes otro VarMonitor):
+#   export VARMON_SKIP_DEMO=1
+# Ruta al ejecutable C++:
+export VARMON_DEMO_SERVER_BIN=../build/demo_app/demo_server
 #
 # Opciones:
 #   --memtrace   Activa VARMON_MEMTRACE=1 en el backend (tracemalloc; top asignaciones en consola ~cada 30s).

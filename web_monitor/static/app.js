@@ -122,6 +122,9 @@
     const selectNoneBtn = document.getElementById("selectNone");
     const refreshNamesBtn = document.getElementById("refreshNames");
     const monitorListEl = document.getElementById("monitorList");
+    /** Contenedor con overflow; #monitorList solo tiene column-count (evita bug Firefox multicol+scroll). */
+    const monitorListScrollEl = document.getElementById("monitorListScroll");
+    const monitorListScrollPort = monitorListScrollEl || monitorListEl;
     /** Lista virtualizada: solo filas visibles en DOM; evita miles de nodos y RAM. */
     const MONITOR_VM_THRESHOLD = 150;
     /** Filas extra arriba/abajo del viewport; más buffer = scroll rápido sin “huecos” (todo pre-renderizado en ~1 frame). */
@@ -2816,6 +2819,10 @@
         const l = line.toLowerCase();
         if (/\b(200|ok|success)\b/.test(l) || /-> 200\b/.test(line)) return "log-line-ok";
         if (/\b(500|404|503|error|exception|failed|fail|incorrecta|denied)\b/.test(l) || /-> (4|5)\d{2}\b/.test(line)) return "log-line-error";
+        if (/\[varmonitor shm\]/i.test(line)) {
+            if (/pérdida|perdida/i.test(line)) return "log-line-error";
+            if (/warning/i.test(line)) return "log-line-warn";
+        }
         if (/\b(4\d{2}|warn|warning|aviso)\b/.test(l)) return "log-line-warn";
         if (/\[req\]/.test(l)) return "log-line-req";
         return "";
@@ -2976,6 +2983,182 @@
     }
     if (logSaveBtn) {
         logSaveBtn.addEventListener("click", () => downloadLogViewer());
+    }
+
+    // --- Panel Perf (fases; lease renovado solo con panel abierto o stats avanzadas) ---
+    const perfBtn = document.getElementById("perfBtn");
+    const perfOverlay = document.getElementById("perfOverlay");
+    const perfCloseBtn = document.getElementById("perfCloseBtn");
+    const perfPanelBody = document.getElementById("perfPanelBody");
+    let perfPollInterval = null;
+
+    const PERF_BAR_COLORS = ["#6c8cff", "#4ade80", "#fb923c", "#a78bfa", "#f472b6", "#22d3ee", "#eab308"];
+
+    function perfBarColorAt(i) {
+        return PERF_BAR_COLORS[i % PERF_BAR_COLORS.length];
+    }
+
+    /** Barra apilada + leyenda (mismo orden izquierda→derecha que la barra). */
+    function buildPerfBarSegments(phases) {
+        if (!phases || phases.length === 0) {
+            return '<div class="perf-bar perf-bar-empty">Sin datos</div>';
+        }
+        let sum = 0;
+        phases.forEach((p) => {
+            sum += Math.max(0, Number(p.ema_us) || 0);
+        });
+        if (sum <= 0) sum = 1;
+        let barHtml = '<div class="perf-bar">';
+        let legendHtml =
+            '<div class="perf-bar-legend"><span class="perf-bar-legend-title">Leyenda:</span>';
+        phases.forEach((p, i) => {
+            const w = (Math.max(0, Number(p.ema_us) || 0) / sum) * 100;
+            const title = escapeLogHtml(String(p.id || ""));
+            const col = perfBarColorAt(i);
+            barHtml +=
+                '<div class="perf-bar-seg" style="width:' +
+                w.toFixed(1) +
+                "%;background:" +
+                col +
+                '" title="' +
+                title +
+                '"></div>';
+            legendHtml +=
+                '<span class="perf-legend-item"><span class="perf-legend-swatch" style="background:' +
+                col +
+                '"></span><span class="perf-legend-label">' +
+                title +
+                "</span></span>";
+        });
+        barHtml += "</div>";
+        legendHtml += "</div>";
+        return '<div class="perf-bar-block">' + barHtml + legendHtml + "</div>";
+    }
+
+    function renderPerfPanel(data) {
+        if (!perfPanelBody) return;
+        if (!data) {
+            perfPanelBody.innerHTML = '<p class="perf-hint">No se pudo cargar /api/perf.</p>';
+            return;
+        }
+        if (!data.lease_active) {
+            perfPanelBody.innerHTML =
+                '<p class="perf-hint">Sesión de medición inactiva. Cierra y vuelve a abrir, o activa la tira de estadísticas avanzadas.</p>';
+            return;
+        }
+        const layers = data.layers || {};
+        const layerOrder = [
+            ["cpp", "C++ (write_snapshot → SHM)"],
+            ["sidecar", "Sidecar (varmon_sidecar, grabación)"],
+            ["python", "Python (backend)"],
+            ["browser", "Navegador (gráficos, esta pestaña)"],
+        ];
+        let html = "";
+        layerOrder.forEach(([key, title]) => {
+            let phases = (layers[key] && layers[key].phases) ? layers[key].phases.slice() : [];
+            if (key === "browser") {
+                const r = renderStats;
+                phases = [
+                    {
+                        id: "browser.plot_render_ms",
+                        last_us: (Number(r.lastMs) || 0) * 1000,
+                        ema_us: (Number(r.avgMs) || 0) * 1000,
+                        samples: Number(r.ticks) || 0,
+                    },
+                ];
+            }
+            html += '<section class="perf-layer"><h3>' + escapeLogHtml(title) + "</h3>";
+            if (key === "cpp") {
+                html +=
+                    '<p class="perf-layer-note">Las fases C++ miden el <strong>tiempo de CPU</strong> dentro de una ejecución de <code>write_snapshot</code> (suele ser muy pequeño). ' +
+                    "El <strong>ciclo SHM</strong> de la tira de estadísticas avanzadas es el <strong>intervalo entre snapshots</strong> (ritmo del proceso RT; p. ej. ~50&nbsp;ms si publicas cada 50&nbsp;ms): " +
+                    "no es la suma de estas fases ni el “coste” de escribir SHM en milisegundos de pared.</p>";
+            }
+            if (key === "sidecar") {
+                html +=
+                    '<p class="perf-layer-note">Tiempos de <strong>reloj monótono</strong> (pared) por ciclo de consumo SHM durante <strong>REC sidecar</strong>: <code>sem_wait</code> incluye bloqueo hasta el siguiente <code>post</code> del C++. ' +
+                    "Ruta <strong>anillo v2</strong>: fases <code>ring_*</code>; ruta snapshot: <code>parse_snapshot</code>, <code>snap_*</code>. Sin grabación activa esta capa suele estar vacía.</p>";
+            }
+            html += buildPerfBarSegments(phases);
+            html +=
+                '<table class="perf-table"><thead><tr><th class="perf-th-swatch"></th><th>Fase</th><th>Último (ms)</th><th>EMA (ms)</th><th>Muestras</th></tr></thead><tbody>';
+            if (!phases.length) {
+                html += '<tr><td colspan="5">Sin datos</td></tr>';
+            } else {
+                phases.forEach((p, i) => {
+                    const id = escapeLogHtml(String(p.id || ""));
+                    const lu = ((Number(p.last_us) || 0) / 1000).toFixed(3);
+                    const em = ((Number(p.ema_us) || 0) / 1000).toFixed(3);
+                    const sm = Number(p.samples) || 0;
+                    const col = perfBarColorAt(i);
+                    html +=
+                        '<tr><td class="perf-td-swatch"><span class="perf-row-swatch" style="background:' +
+                        col +
+                        '" title="' +
+                        id +
+                        '"></span></td><td>' +
+                        id +
+                        "</td><td>" +
+                        lu +
+                        "</td><td>" +
+                        em +
+                        "</td><td>" +
+                        sm +
+                        "</td></tr>";
+                });
+            }
+            html += "</tbody></table></section>";
+        });
+        perfPanelBody.innerHTML = html;
+    }
+
+    async function fetchPerfPanel() {
+        try {
+            const r = await fetch("/api/perf");
+            if (!r.ok) {
+                renderPerfPanel(null);
+                return;
+            }
+            const d = await r.json();
+            renderPerfPanel(d);
+        } catch (e) {
+            if (perfPanelBody) {
+                perfPanelBody.innerHTML =
+                    '<p class="perf-hint">Error: ' + escapeLogHtml(e.message || String(e)) + "</p>";
+            }
+        }
+    }
+
+    function stopPerfPolling() {
+        if (perfPollInterval) {
+            clearInterval(perfPollInterval);
+            perfPollInterval = null;
+        }
+    }
+
+    if (perfBtn && perfOverlay) {
+        perfBtn.addEventListener("click", () => {
+            perfOverlay.style.display = "flex";
+            fetchPerfPanel();
+            stopPerfPolling();
+            perfPollInterval = setInterval(() => {
+                if (perfOverlay && perfOverlay.style.display === "flex") fetchPerfPanel();
+            }, 1000);
+        });
+    }
+    if (perfCloseBtn && perfOverlay) {
+        perfCloseBtn.addEventListener("click", () => {
+            perfOverlay.style.display = "none";
+            stopPerfPolling();
+        });
+    }
+    if (perfOverlay) {
+        perfOverlay.addEventListener("click", (e) => {
+            if (e.target === perfOverlay) {
+                perfOverlay.style.display = "none";
+                stopPerfPolling();
+            }
+        });
     }
 
     // --- Variable browser drawer (columna 1 como panel lateral derecho) ---
@@ -4092,7 +4275,7 @@
             }
         }
         try {
-            const r = await fetch("/api/advanced_stats");
+            const r = await fetch("/api/advanced_stats?perf=1");
             if (r.ok) {
                 const d = await r.json();
                 if (advRamPython) advRamPython.textContent = "Py: " + formatAdvNum(d.python_ram_mb) + " MB";
@@ -4105,10 +4288,15 @@
                     advCpuCpp.textContent = (d.cpp_cpu_percent != null && !isNaN(d.cpp_cpu_percent))
                         ? "C++: " + formatAdvNum(d.cpp_cpu_percent) + "%"
                         : "C++: —";
-                if (advShmCycle)
-                    advShmCycle.textContent = (d.shm_cycle_ms != null && !isNaN(d.shm_cycle_ms))
-                        ? "shm: " + formatAdvNum(d.shm_cycle_ms) + " ms"
-                        : "shm: —";
+                if (advShmCycle) {
+                    advShmCycle.title =
+                        "Período entre publicaciones SHM (EMA en Python). Con C++ reciente el valor viene del campo publish_period_sec en cabecera (diferencia de timestamps entre ciclos del publicador), no del ritmo al que Python procesa la cola. " +
+                        "Con segmentos antiguos sin ese campo se usa el Δt entre timestamps de snapshots consecutivos procesados. No es el tiempo de CPU de write_snapshot.";
+                    advShmCycle.textContent =
+                        d.shm_cycle_ms != null && !isNaN(d.shm_cycle_ms)
+                            ? "ciclo SHM: " + formatAdvNum(d.shm_cycle_ms) + " ms"
+                            : "ciclo SHM: —";
+                }
                 if (advMonCount) {
                     const mc = d.monitored_var_count;
                     advMonCount.textContent = (typeof mc === "number" && Number.isFinite(mc))
@@ -4121,7 +4309,10 @@
             if (advRamCpp) advRamCpp.textContent = "C++: —";
             if (advCpuPython) advCpuPython.textContent = "Py: —";
             if (advCpuCpp) advCpuCpp.textContent = "C++: —";
-            if (advShmCycle) advShmCycle.textContent = "shm: —";
+            if (advShmCycle) {
+                advShmCycle.textContent = "ciclo SHM: —";
+                advShmCycle.title = "";
+            }
             if (advMonCount) advMonCount.textContent = "vars: —";
         }
         const now = Date.now();
@@ -6508,8 +6699,8 @@
             return;
         }
 
-        const viewportH = monitorListEl.clientHeight || 400;
-        const scrollTop = monitorListEl.scrollTop;
+        const viewportH = monitorListScrollPort.clientHeight || 400;
+        const scrollTop = monitorListScrollPort.scrollTop;
         let start = Math.floor(scrollTop / rowH) - MONITOR_VM_BUFFER;
         let end = Math.ceil((scrollTop + viewportH) / rowH) + MONITOR_VM_BUFFER;
         if (start < 0) start = 0;
@@ -6654,9 +6845,9 @@
         updateMonitorItemStyles();
     }
 
-    if (monitorListEl && !monitorListEl._vmScrollBound) {
-        monitorListEl._vmScrollBound = true;
-        monitorListEl.addEventListener("scroll", () => {
+    if (monitorListEl && monitorListScrollPort && !monitorListScrollPort._vmScrollBound) {
+        monitorListScrollPort._vmScrollBound = true;
+        monitorListScrollPort.addEventListener("scroll", () => {
             if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
             if (!monitorVmScrollPending) {
                 monitorVmScrollPending = true;
@@ -6681,7 +6872,7 @@
                     syncMonitorVirtualWindow();
                 }, 120);
             });
-            ro.observe(monitorListEl);
+            ro.observe(monitorListScrollPort);
         }
         /* Scroll con rueda/trackpad nativo: el listener custom con preventDefault provocaba sensación
            de scroll “atascado” al usar la lista virtual. La sincronización va solo por el evento scroll. */
@@ -8477,7 +8668,7 @@
                     '<button id="compCancel" class="btn-comp-cancel">&times;</button>' +
                     '</div>' +
                     '<div id="compError" class="comp-error" style="display:none"></div>';
-                monitorListEl.parentNode.insertBefore(form, monitorListEl);
+                monitorListScrollPort.parentNode.insertBefore(form, monitorListScrollPort);
                 document.getElementById("compOk").addEventListener("click", submitComputed);
                 document.getElementById("compCancel").addEventListener("click", () => {
                     computedFormVisible = false;

@@ -57,3 +57,29 @@ Ver [Protocolos — Sistema de actualización de variables monitorizadas](protoc
 ---
 
 En conjunto, estas medidas permiten usar VarMonitor con muchas variables y alta frecuencia de actualización sin sobrecargar la red ni la máquina.
+
+## Panel «Perf» y API `/api/perf`
+
+- **UI**: En la cabecera, el botón **Perf** abre un panel que hace *polling* de `GET /api/perf` mientras está visible. Muestra tres capas en tablas y barras apiladas:
+  - **Python** (`perf_agg`): fases del backend (p. ej. manejo de snapshots SHM, empaquetado/envío de `vars_update`).
+  - **C++** (`server_info.shm_perf_us`): tiempos de CPU dentro de `write_shm_snapshot` cuando la medición está activa en el publicador.
+  - **Sidecar**: fases del proceso `varmon_sidecar` durante la grabación **`sidecar_cpp`**, leídas del fichero JSON escrito con **`--perf-file`** (p. ej. `*.part.sidecar_perf.json`).
+- **Lease**: Abrir el panel o la tira de estadísticas avanzadas con `?perf=1` en `GET /api/advanced_stats` **renueva un lease** en el servidor; sin lease, el C++ deja de rellenar `shm_perf_us` tras ~1 s para no medir en vacío.
+- **Respuesta JSON** (resumen): `ts`, `lease_active`, `layers.python|cpp|sidecar`, cada una con `phases: [{ id, last_us, ema_us, samples }, ...]`. Los tiempos del sidecar y de Python suelen estar en **microsegundos**; la UI los muestra en **milisegundos**.
+
+## Grabación nativa (`varmon_sidecar`): optimizaciones de coste
+
+Con miles de variables en SHM (`shm_max_vars` alto) y pocas columnas en el TSV, el coste dominante solía ser **recorrer toda la tabla** en cada `sem_post` y construir mapas por nombre. El sidecar aplica entre otras:
+
+1. **Caché de layout (`RecordingLayoutCache`)**: Tras validar cabecera (`version`, `count`, `table_off`, `stride`, tamaño del mmap) y los nombres en las filas cacheadas, una sola pasada O(N) rellena `name_to_row_off` y los offsets por columna del `names-file`. Mientras el layout sea válido, la lectura de **snapshot** para grabar es **O(k)** en el número de columnas TSV (`read_recording_snapshot_columns`), no O(N).
+2. **Replay de anillo v2 sin mapa por muestra**: Si todas las columnas son modo anillo y los índices encajan, se emiten líneas TSV **directamente** desde las ranuras (`v2_ring_replay_extract_lines`); solo si hay **reglas de alarma** en el sidecar se reconstruye un mapa nombre→valor por fila para evaluarlas.
+3. **Reutilización del mapa nombre→offset**: Con caché válida, la resolución de columnas para el anillo evita re-escanear las N filas (la fase de perf `sidecar.ring_col_resolve_scan` pasa a ser esencialmente O(k)).
+4. **Formateo TSV**: Celdas escalares con `std::to_chars` donde el estándar lo permite; menos `ostringstream` y menos strings temporales por celda.
+5. **Fichero de perf del sidecar**: `VARMON_SIDECAR_PERF_FLUSH_EVERY` (1–512, por defecto interno 4) reduce la frecuencia de `fopen`/`fwrite` del JSON de diagnóstico cuando se usa `--perf-file`.
+
+Los identificadores de fase (`sidecar.*`) están definidos en el fuente de `varmon_sidecar` (`kSidecarPerfIds`); incluyen por ejemplo `sem_wait`, `parse_snapshot` / cuerpo parse, `ring_extract`, `ring_replay_build_rows`, `snap_format`, `cycle_wall_wake_to_fwrite_done`, etc. La suma documentada en el JSON (`sum_to_fwrite_us`, …) encaja con el desglose del ciclo de grabación.
+
+## Python durante REC `sidecar_cpp`
+
+- **`shm_parse_hz_sidecar_recording`** (por defecto **30** Hz en `app.py`): tope de parseos SHM en el hilo lector para mantener **`latest_snapshot`** y los valores en pantalla; el TSV lo escribe el sidecar en el sem dedicado (`sem_sidecar_name`).
+- **`0`**: el lector solo **drena** el sem principal (`sem_name`) por intervalos (`shm_sidecar_sem_drain_interval_sec`) sin parsear mmap: la UI deja de actualizar variables C++ desde SHM (telemetría y progreso de grabación siguen).

@@ -17,6 +17,7 @@
 #include <limits.h>
 #include <map>
 #include <cstdlib>
+#include <cstdint>
 #include <type_traits>
 #include <variant>
 
@@ -200,6 +201,19 @@ static double json_get_number(const std::string& json, const std::string& key) {
     return std::strtod(json.c_str() + pos, nullptr);
 }
 
+static bool json_get_bool(const std::string& json, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    auto pos = json.find(needle);
+    if (pos == std::string::npos) return false;
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos) return false;
+    pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+    if (pos < json.size() && json.compare(pos, 4, "true") == 0) return true;
+    if (pos < json.size() && json.compare(pos, 5, "false") == 0) return false;
+    return std::strtod(json.c_str() + pos, nullptr) != 0.0;
+}
+
 static bool send_all(int fd, const char* data, size_t len) {
     while (len > 0) {
         ssize_t n = ::send(fd, data, len, MSG_NOSIGNAL);
@@ -298,6 +312,15 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             if (varmon::shm_publisher::is_active()) {
                 ss << ",\"shm_name\":\"" << json_escape(varmon::shm_publisher::get_shm_name()) << "\"";
                 ss << ",\"sem_name\":\"" << json_escape(varmon::shm_publisher::get_sem_name()) << "\"";
+                ss << ",\"sem_sidecar_name\":\"" << json_escape(varmon::shm_publisher::get_sem_sidecar_name())
+                   << "\"";
+                ss << ",\"shm_layout_version\":2";
+                const uint32_t sn = varmon::shm_publisher::get_shm_publish_slice_count();
+                const bool sff = varmon::shm_publisher::get_shm_publish_slice_force_full();
+                ss << ",\"shm_publish_slice_n\":" << sn;
+                ss << ",\"shm_publish_slice_force_full\":" << (sff ? "true" : "false");
+                ss << ",\"shm_publish_slice_partial\":" << ((sn > 1u && !sff) ? "true" : "false");
+                varmon::shm_publisher::append_perf_json(ss);
             }
             if (!g_uds_path.empty()) {
                 ss << ",\"uds_path\":\"" << json_escape(g_uds_path) << "\"";
@@ -416,6 +439,21 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
             }
             varmon::shm_publisher::set_subscription(names);
             response = "{\"type\":\"shm_subscription_result\",\"ok\":true}";
+        }
+        else if (cmd == "set_shm_publish_slice") {
+            unsigned max_r = get_config_uint("update_ratio_max", 512);
+            if (max_r < 1u) max_r = 1u;
+            uint32_t cnt = static_cast<uint32_t>(json_get_number(request, "count"));
+            if (cnt < 1u) cnt = 1u;
+            if (cnt > max_r) cnt = max_r;
+            bool ff = json_get_bool(request, "force_full");
+            varmon::shm_publisher::set_shm_publish_slice(cnt, ff);
+            response = "{\"type\":\"shm_publish_slice_result\",\"ok\":true}";
+        }
+        else if (cmd == "set_perf_collect") {
+            bool en = json_get_bool(request, "enabled");
+            varmon::shm_publisher::set_perf_collect(en);
+            response = "{\"type\":\"set_perf_result\",\"ok\":true}";
         }
         else {
             response = "{\"type\":\"error\",\"message\":\"unknown command\"}";

@@ -40,6 +40,13 @@ The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `inde
 
 - A **ResizeObserver** watches `#plotArea`. On size change, **Plotly.relayout** each chart container to current `getBoundingClientRect()`.
 
+## Perf panel
+
+- Header **Perf** button: full-screen overlay that polls **`GET /api/perf`** while open.
+- Three sections: **Python**, **C++** (`write_shm_snapshot`), and **sidecar** (only when `sidecar_cpp` recording is active and the binary writes the `--perf-file` JSON). Tables show last time, EMA, and sample count; stacked bar charts per layer.
+- The first request **renews the measurement lease** on the server (same as `GET /api/advanced_stats?perf=1` from the advanced stats strip). If the lease expires, the panel shows a hint until it is opened again or advanced stats refreshes the lease.
+- Sidecar phase details and optimizations: [Performance](performance.md).
+
 ## Shortcuts and more
 
 - Keyboard: Escape (close overlays), Space (pause/resume charts), Ctrl+Z / Ctrl+Y (undo/redo layout), R (record), S (screenshot), etc.

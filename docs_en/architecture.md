@@ -81,6 +81,7 @@ The network is not scanned by IP/port. C++ instances are discovered via **Unix s
 
 - **C++**: each cycle (e.g. every 10 ms) calls `write_shm_snapshot()` → writes SHM and `sem_post(sem)`.
 - **Python**: the `ShmReader` thread does `sem_timedwait(sem, timeout)`; on signal, reads the snapshot, parses it and enqueues it. The WebSocket loop drains that queue, evaluates alarms, fills recording buffers and, at visual rate (Rel act), sends `vars_update` to the browser.
+- **`sidecar_cpp` recording**: the publisher also `sem_post`s **`sem_sidecar_name`**; **`varmon_sidecar`** consumes that semaphore and writes the TSV in C++. Python keeps **`sem_name`**; SHM parsing for the UI during REC can be capped with **`shm_parse_hz_sidecar_recording`** (see [Performance](performance.md)).
 
 ## Two rates: visual vs monitoring
 

@@ -52,3 +52,29 @@ See [Protocols — Monitored variable update system](protocols.md#monitored-vari
 - Frontend `historyCache` follows the same window as the header **Visual buffer** control (and the advanced default): time-based trimming, a sample budget scaled to those seconds, and live chart X range. The server can set an initial default via `visual_buffer_sec` in `varmon.conf` (see `docs_en/setup.md`) when the user has no saved preference.
 
 Together, these allow many variables and high update rates without saturating the machine or network.
+
+## Perf panel and `/api/perf`
+
+- **UI**: The header **Perf** button opens a panel that polls `GET /api/perf` while visible. It shows three layers in tables and stacked bars:
+  - **Python** (`perf_agg`): backend phases (e.g. SHM snapshot handling, `vars_update` pack/send).
+  - **C++** (`server_info.shm_perf_us`): CPU time inside `write_shm_snapshot` when the publisher has measurement enabled.
+  - **Sidecar**: phases from the `varmon_sidecar` process during **`sidecar_cpp` recording**, read from the JSON file written via **`--perf-file`** (e.g. `*.part.sidecar_perf.json`).
+- **Lease**: Opening the panel or the advanced stats strip with `?perf=1` on `GET /api/advanced_stats` **renews a server lease**; without it, C++ stops filling `shm_perf_us` after ~1 s so idle processes are not measured constantly.
+- **JSON shape** (summary): `ts`, `lease_active`, `layers.python|cpp|sidecar`, each with `phases: [{ id, last_us, ema_us, samples }, ...]`. Sidecar and Python times are usually in **microseconds**; the UI displays **milliseconds**.
+
+## Native recording (`varmon_sidecar`): cost optimizations
+
+With a large SHM table (`shm_max_vars`) and a small TSV column set, the dominant cost used to be **scanning every row** on each `sem_post` and building name-keyed maps. The sidecar applies several techniques:
+
+1. **Layout cache (`RecordingLayoutCache`)**: After validating the header (`version`, `count`, `table_off`, `stride`, mmap size) and cached row names, a single O(N) pass fills `name_to_row_off` and per-column offsets from the `names-file`. While the layout stays valid, **snapshot** recording reads are **O(k)** in the number of TSV columns (`read_recording_snapshot_columns`), not O(N).
+2. **v2 ring replay without a per-sample map**: When all columns are ring mode and indices align, TSV lines are built **directly** from ring slots (`v2_ring_replay_extract_lines`); a name→value map per row is built **only if** sidecar alarm rules are enabled.
+3. **Reusing the name→offset map**: With a valid cache, ring column resolution avoids rescanning all N rows (perf phase `sidecar.ring_col_resolve_scan` becomes essentially O(k)).
+4. **TSV formatting**: Scalar cells use `std::to_chars` where available; fewer temporary strings and no `ostringstream` on the hot path.
+5. **Sidecar perf file**: `VARMON_SIDECAR_PERF_FLUSH_EVERY` (1–512, default 4 internally) throttles how often the diagnostic JSON is rewritten when using `--perf-file`.
+
+Phase ids (`sidecar.*`) are defined in `varmon_sidecar` (`kSidecarPerfIds`), e.g. `sem_wait`, parse body, `ring_extract`, `ring_replay_build_rows`, `snap_format`, `cycle_wall_wake_to_fwrite_done`. The JSON also carries aggregates such as `sum_to_fwrite_us` for cross-checking the recording cycle.
+
+## Python while `sidecar_cpp` recording is active
+
+- **`shm_parse_hz_sidecar_recording`** (default **30** Hz in `app.py`): caps how often the reader thread mmap-parses SHM so **`latest_snapshot`** and on-screen C++ values keep updating; the TSV is still written by the sidecar on the dedicated semaphore (`sem_sidecar_name`).
+- **`0`**: the reader **only drains** the main semaphore (`sem_name`) on a timer (`shm_sidecar_sem_drain_interval_sec`) without parsing: C++ variable values from SHM freeze in the UI (telemetry and recording progress still update).

@@ -3,6 +3,7 @@
 import asyncio
 import collections
 import getpass
+import glob
 import logging
 import json
 import os
@@ -28,9 +29,13 @@ import threading
 from queue import Empty, Queue
 
 from uds_client import UdsBridge
-from shm_reader import ShmReader
+from shm_reader import ShmReader, open_shm_rw, write_shm_import_row
+import perf_agg
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+# Lease de medición de rendimiento: se renueva al abrir el panel Perf o la tira de estadísticas avanzadas.
+PERF_LEASE_SEC = 2.5
 
 DEFAULTS = {
     "web_port": 8080,
@@ -39,13 +44,19 @@ DEFAULTS = {
     "bind_host": "",
     "auth_password": "",
     "cycle_interval_ms": 100,
-    "update_ratio_max": 100,
+    "update_ratio_max": 512,
     "server_state_dir": "",
     "log_buffer_size": 5000,
     "log_file_cpp": "",
     "shm_max_vars": 2048,
-    # Máx. parseos SHM/s solo monitorizando (0 = sin tope). Con REC o alarmas no se aplica tope.
-    "shm_parse_max_hz": 40,
+    # Opcional: tope de parseos SHM/s solo monitorizando (>0). 0 = sin tope (un snapshot por despertar del sem,
+    # ritmo del proceso C++). Solo usar >0 para limitar CPU en casos raros. REC Python y alarmas ignoran este tope.
+    "shm_parse_max_hz": 0,
+    # Con grabación sidecar_cpp: Hz máx. de parseo SHM en Python para vars_update al navegador (el TSV lo escribe el
+    # sidecar). 0 = solo vaciar sem principal a intervalos (UI SHM congelada). >0 = UI viva; p. ej. 30 sin cargar mucho.
+    "shm_parse_hz_sidecar_recording": 30,
+    # Solo si shm_parse_hz_sidecar_recording == 0: cada cuántos s dormir entre ráfagas de sem_trywait (drenar posts C++).
+    "shm_sidecar_sem_drain_interval_sec": 0.2,
     # Snapshots en cola reader→drain (0 = ilimitada; >0 = FIFO acotada, put bloquea si llena = backpressure).
     "shm_queue_max_size": 512,
     # Ventana por defecto del buffer visual (s); el frontend la aplica si no hay preferencia guardada.
@@ -54,8 +65,10 @@ DEFAULTS = {
     "recording_backend": "python",
     # Ruta al ejecutable varmon_sidecar (vacío = VARMON_SIDECAR_BIN, PATH, o build típico).
     "recording_sidecar_bin": "",
-    # Alarmas con variables SHM: sidecar_cpp (buffer + TSV + eval en C++, polling SHM) | python (legado).
+    # Alarmas con variables SHM: sidecar_cpp (semáforo SHM + mmap, autónomo del ritmo Python) | python (legado).
     "alarms_backend": "sidecar_cpp",
+    # Linux: CPUs para varmon_sidecar (grabación + alarmas), p. ej. "3" o "2,5" o "4-7". Vacío = sin afinidad.
+    "sidecar_cpu_affinity": "",
 }
 
 CONFIG_ABS_PATH = ""
@@ -93,6 +106,10 @@ def load_config() -> dict:
                     cfg[key] = max(64, min(100000, int(val)))
                 elif key == "shm_parse_max_hz":
                     cfg[key] = max(0.0, min(5000.0, float(val)))
+                elif key == "shm_parse_hz_sidecar_recording":
+                    cfg[key] = max(0.0, min(500.0, float(val)))
+                elif key == "shm_sidecar_sem_drain_interval_sec":
+                    cfg[key] = max(0.05, min(5.0, float(val)))
                 elif key == "shm_queue_max_size":
                     cfg[key] = max(0, min(100000, int(val)))
                 elif key == "visual_buffer_sec":
@@ -106,6 +123,7 @@ def load_config() -> dict:
                     "recording_backend",
                     "recording_sidecar_bin",
                     "alarms_backend",
+                    "sidecar_cpu_affinity",
                 ):
                     cfg[key] = val
         CONFIG_ABS_PATH = os.path.abspath(path)
@@ -137,9 +155,19 @@ _LOG_BUFFER: collections.deque = collections.deque(
 
 class _LogTee:
     """Escribe en el stream original y duplica cada línea (con timestamp) al buffer de log."""
+
     def __init__(self, stream):
         self._stream = stream
         self._linebuf: list[str] = []
+
+    @staticmethod
+    def _level_for_line(line: str) -> str:
+        u = line.upper()
+        if "PÉRDIDA DE DATOS" in u or "PERDIDA DE DATOS" in u:
+            return "error"
+        if "WARNING:" in u or " WARNING " in u or u.startswith("WARNING"):
+            return "warning"
+        return "info"
 
     def write(self, data: str):
         self._stream.write(data)
@@ -154,7 +182,7 @@ class _LogTee:
                             _LOG_BUFFER.append({
                                 "seq": _LOG_SEQ,
                                 "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                                "level": "info",
+                                "level": _LogTee._level_for_line(line),
                                 "msg": line,
                             })
                         self._linebuf.clear()
@@ -170,7 +198,9 @@ class _LogTee:
 
 
 _ORIGINAL_STDOUT = sys.stdout
+_ORIGINAL_STDERR = sys.stderr
 sys.stdout = _LogTee(_ORIGINAL_STDOUT)
+sys.stderr = _LogTee(_ORIGINAL_STDERR)
 
 # Numero de conexiones WebSocket activas
 ACTIVE_WS = 0
@@ -182,6 +212,28 @@ FAILED_AUTH_ATTEMPTS = 0
 
 # Tiempo sin C++ ni clientes tras el cual se cierra el proceso (segundos)
 WATCHDOG_IDLE_SEC = 300  # 5 minutos
+
+async def _startup_uds_hint():
+    """Tras arrancar: si no hay ningún VarMonitor C++ en /tmp, avisar en consola (run_desktop solo levanta Python)."""
+    await asyncio.sleep(0.4)
+    try:
+        inst = await asyncio.to_thread(_list_uds_instances, None)
+        if inst:
+            return
+    except Exception:
+        return
+    try:
+        u = getpass.getuser()
+    except Exception:
+        u = "USUARIO"
+    print(
+        "[VarMonitor Web] AVISO: No se encontró ninguna instancia UDS de VarMonitor en /tmp "
+        f"(patrón varmon-{u}-<pid>.sock). El escritorio/web solo arranca Python; hace falta el **proceso C++** "
+        "en la misma máquina y usuario (monitor.start() o tu binario enlazado a libvarmonitor). "
+        "Sin eso la cabecera muestra “No hay instancias VarMonitor (UDS)”.",
+        flush=True,
+    )
+
 
 async def _watchdog_no_cpp():
     """Cierra el proceso si durante WATCHDOG_IDLE_SEC no hay C++ (UDS) accesible ni clientes activos."""
@@ -319,7 +371,22 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, "ws_monitored_counts"):
         # id(WebSocket) -> len(monitored_names); para /api/advanced_stats y varmon.telemetry.*
         app.state.ws_monitored_counts = {}
+    app.state.perf_lease_until = 0.0
+    app.state._cpp_perf_target = None
+    app.state.sidecar_perf_json_path = None
+    _unregister_sidecar_perf_session()
+
+    async def _perf_cpp_gc_loop() -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                await sync_cpp_perf_collect(app.state)
+            except Exception:
+                pass
+
+    asyncio.create_task(_perf_cpp_gc_loop())
     asyncio.create_task(_watchdog_no_cpp())
+    asyncio.create_task(_startup_uds_hint())
     _mt = (os.environ.get("VARMON_MEMTRACE") or "").strip().lower()
     if _mt in ("1", "true", "yes", "on"):
         import tracemalloc
@@ -341,7 +408,7 @@ async def log_requests_middleware(request: Request, call_next):
     elapsed_ms = (time.perf_counter() - start) * 1000
     path = getattr(request.url, "path", "") or ""
     # Evita bucle de ruido y picos de RAM: el visor hace polling frecuente a /api/log.
-    if path != "/api/log":
+    if path not in ("/api/log", "/api/perf"):
         query = getattr(request.url, "query", "") or ""
         if query:
             path_display = path + "?" + (query if len(query) <= 100 else query[:100] + "...")
@@ -661,6 +728,211 @@ def _ensure_recordings_dir():
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 
+# Ruta absoluta al JSON de perf del sidecar (una línea). HTTP /api/perf no comparte memoria con el WebSocket
+# en multi-worker; este fichero + ref en memoria enlazan ambos.
+_SIDECAR_PERF_ACTIVE_NAME = "sidecar_perf_active.path"
+_SIDECAR_PERF_JSON_PATH_LOCK = threading.Lock()
+_SIDECAR_PERF_JSON_PATH_REF: str | None = None
+# Mismos ids que varmon_sidecar/main.cpp kSidecarPerfIds
+_SIDECAR_PERF_PHASE_IDS: tuple[str, ...] = (
+    "sidecar.sem_wait",
+    "sidecar.preflight",
+    "sidecar.ring_extract",
+    "sidecar.ring_format",
+    "sidecar.ring_fwrite",
+    "sidecar.ring_alarms",
+    "sidecar.parse_snapshot",
+    "sidecar.snap_format",
+    "sidecar.snap_fwrite",
+    "sidecar.snap_alarms_status",
+    "sidecar.post_wake_overhead",
+    "sidecar.preflight_read_shm_seq",
+    "sidecar.preflight_seq_gap_emit",
+    "sidecar.preflight_ring_overflow",
+    "sidecar.snap_ostream_stream",
+    "sidecar.snap_row_str",
+    "sidecar.perf_json_flush",
+    "sidecar.cycle_wall_wake_to_fwrite_done",
+    "sidecar.parse_header_meta",
+    "sidecar.parse_body_rows",
+    "sidecar.ring_col_resolve_scan",
+    "sidecar.ring_replay_build_rows",
+    "sidecar.gap_preflight_to_ring_extract",
+    "sidecar.gap_ring_extract_to_parse",
+)
+
+
+def _sidecar_perf_active_pointer_abspath() -> str:
+    return os.path.join(RECORDINGS_DIR, _SIDECAR_PERF_ACTIVE_NAME)
+
+
+def _write_sidecar_perf_active_pointer(abs_perf_json: str) -> None:
+    _ensure_recordings_dir()
+    p = _sidecar_perf_active_pointer_abspath()
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(abs_perf_json + "\n")
+    os.replace(tmp, p)
+
+
+def _read_sidecar_perf_active_pointer() -> str | None:
+    p = _sidecar_perf_active_pointer_abspath()
+    try:
+        with open(p, encoding="utf-8") as f:
+            line = (f.readline() or "").strip()
+        return line if line else None
+    except OSError:
+        return None
+
+
+def _register_sidecar_perf_session(abs_perf_json: str) -> None:
+    """Registra la ruta del JSON de perf (proceso actual + puntero en disco para otros workers)."""
+    global _SIDECAR_PERF_JSON_PATH_REF
+    ap = os.path.abspath(abs_perf_json)
+    with _SIDECAR_PERF_JSON_PATH_LOCK:
+        _SIDECAR_PERF_JSON_PATH_REF = ap
+    _write_sidecar_perf_active_pointer(ap)
+
+
+_SIDECAR_REC_SESSION_NAME = "sidecar_rec_session.json"
+
+
+def _sidecar_rec_session_abspath() -> str:
+    return os.path.join(RECORDINGS_DIR, _SIDECAR_REC_SESSION_NAME)
+
+
+def _write_sidecar_rec_session_file(
+    *,
+    pid: int,
+    perf_json_abs: str | None,
+    bin_path: str,
+    running: bool,
+    exit_code: int | None,
+) -> None:
+    _ensure_recordings_dir()
+    obj = {
+        "pid": pid,
+        "perf_json": perf_json_abs,
+        "sidecar_bin": bin_path,
+        "running": running,
+        "exit_code": exit_code,
+        "started_ts": time.time(),
+    }
+    p = _sidecar_rec_session_abspath()
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, p)
+
+
+def _clear_sidecar_rec_session_file() -> None:
+    try:
+        os.remove(_sidecar_rec_session_abspath())
+    except OSError:
+        pass
+
+
+def _unregister_sidecar_perf_session() -> None:
+    global _SIDECAR_PERF_JSON_PATH_REF
+    with _SIDECAR_PERF_JSON_PATH_LOCK:
+        _SIDECAR_PERF_JSON_PATH_REF = None
+    try:
+        os.remove(_sidecar_perf_active_pointer_abspath())
+    except OSError:
+        pass
+    _clear_sidecar_rec_session_file()
+
+
+def _write_sidecar_perf_stub_json(path: str) -> None:
+    """Crea JSON válido antes del primer ciclo del sidecar (el panel muestra filas en ceros al instante)."""
+    phases = [{"id": pid, "last_us": 0.0, "ema_us": 0.0, "samples": 0} for pid in _SIDECAR_PERF_PHASE_IDS]
+    tmp = path + ".tmp"
+    _ensure_recordings_dir()
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "phases": phases,
+                "sum_to_fwrite_us": -1.0,
+                "post_fwrite_work_us": -1.0,
+                "cycle_wall_wake_to_fwrite_us": -1.0,
+            },
+            f,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _resolve_sidecar_perf_json_path(state) -> str | None:
+    candidates: list[str | None] = []
+    with _SIDECAR_PERF_JSON_PATH_LOCK:
+        candidates.append(_SIDECAR_PERF_JSON_PATH_REF)
+    try:
+        candidates.append(getattr(state, "sidecar_perf_json_path", None))
+    except Exception:
+        candidates.append(None)
+    candidates.append(_read_sidecar_perf_active_pointer())
+    seen: set[str] = set()
+    for c in candidates:
+        if not c:
+            continue
+        ap = os.path.abspath(os.path.expanduser(str(c).strip()))
+        if ap in seen:
+            continue
+        seen.add(ap)
+        if os.path.isfile(ap):
+            return ap
+    # Último recurso: JSON reciente en recordings (mismo patrón que genera el backend)
+    try:
+        _ensure_recordings_dir()
+        pat = os.path.join(RECORDINGS_DIR, "*.part.sidecar_perf.json")
+        files = glob.glob(pat)
+        now = time.time()
+        best: str | None = None
+        best_m = -1.0
+        for fp in files:
+            try:
+                m = os.path.getmtime(fp)
+            except OSError:
+                continue
+            if now - m > 900.0:
+                continue
+            if m > best_m:
+                best_m = m
+                best = fp
+        if best and os.path.isfile(best):
+            return os.path.abspath(best)
+    except OSError:
+        pass
+    return None
+
+
+def _set_var_uds_and_shm_import(
+    bridge: UdsBridge,
+    name: str,
+    value,
+    var_type: str,
+    shm_write_mmap,
+    shm_subscription_order: list[str] | None,
+    shm_layout_ver: int,
+) -> bool:
+    """UDS set_var inmediato; si SHM v2 y el nombre está en la suscripción, también escribe fila IMPORT (one-shot)."""
+    if (
+        shm_write_mmap is not None
+        and int(shm_layout_ver) >= 2
+        and shm_subscription_order
+        and name in shm_subscription_order
+    ):
+        try:
+            idx = shm_subscription_order.index(name)
+            write_shm_import_row(shm_write_mmap, idx, name, var_type, value)
+        except (OSError, TypeError, ValueError):
+            pass
+    return bridge.set_var(name, value, var_type)
+
+
 def _shm_subscription_real_names(monitored_names: set[str], alarms_config: dict) -> list[str]:
     """Nombres que deben publicarse en SHM: monitorizadas ∪ variables con alarma (excl. telemetría sintética)."""
     out: set[str] = {n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET}
@@ -668,6 +940,22 @@ def _shm_subscription_real_names(monitored_names: set[str], alarms_config: dict)
         if k not in VARMON_TELEMETRY_NAME_SET:
             out.add(k)
     return sorted(out)
+
+
+def _bootstrap_monitored_vars_rows(monitored_names: set[str], bridge: UdsBridge, app_state) -> list[dict]:
+    """UDS inmediato para la UI al elegir monitorizadas; SHM puede tardar uno o más ciclos C++ tras set_shm_subscription."""
+    rows: list[dict] = []
+    for n in sorted(monitored_names):
+        if n in VARMON_TELEMETRY_NAME_SET:
+            continue
+        try:
+            v = bridge.get_var(n)
+        except Exception:
+            v = None
+        if v:
+            rows.append(v)
+    rows.extend(_telemetry_snapshot_rows(monitored_names, app_state))
+    return rows
 
 
 def _alarms_sidecar_eligible(alarms_config: dict) -> bool:
@@ -725,6 +1013,116 @@ def _resolve_recording_sidecar_bin(config: dict) -> str | None:
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
     return None
+
+
+def _parse_cpu_affinity_spec(spec: str) -> frozenset[int] | None:
+    """Parsea '2', '2,3', '1-3', '0,4-5' → índices de CPU. Cadena vacía → None."""
+    s = (spec or "").strip()
+    if not s:
+        return None
+    out: set[int] = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                lo, hi = int(a.strip()), int(b.strip())
+            except ValueError:
+                continue
+            if lo > hi:
+                lo, hi = hi, lo
+            for c in range(lo, hi + 1):
+                if c >= 0:
+                    out.add(c)
+        else:
+            try:
+                c = int(part)
+            except ValueError:
+                continue
+            if c >= 0:
+                out.add(c)
+    return frozenset(out) if out else None
+
+
+def _apply_sidecar_cpu_affinity(pid: int, config: dict, label: str) -> None:
+    """Tras Popen de varmon_sidecar: fija CPUs del hijo (Linux) para reducir contienda con el backend Python."""
+    if pid is None or pid <= 0:
+        return
+    if not getattr(os, "sched_setaffinity", None):
+        return
+    spec = (config.get("sidecar_cpu_affinity") or "").strip()
+    cpus = _parse_cpu_affinity_spec(spec)
+    if not cpus:
+        return
+    try:
+        os.sched_setaffinity(pid, cpus)
+        cs = ",".join(str(c) for c in sorted(cpus))
+        print(f"[VarMonitor Web] {label}: afinidad CPU pid={pid} cpus={cs}", flush=True)
+    except OSError as e:
+        print(
+            f"[VarMonitor Web] {label}: no se pudo aplicar sidecar_cpu_affinity={spec!r} a pid {pid}: {e}",
+            flush=True,
+        )
+
+
+def _shm_sem_name_for_sidecar(info: dict | None) -> str | None:
+    """Sem POSIX solo para varmon_sidecar (un post del C++ por consumidor). Monitores antiguos: mismo `sem_name`."""
+    if not info:
+        return None
+    sc = (info.get("sem_sidecar_name") or "").strip()
+    if sc:
+        return sc
+    return (info.get("sem_name") or "").strip() or None
+
+
+def _read_ndjson_lines_from_offset(path: str, start_off: int) -> tuple[list[dict], int]:
+    """Lee líneas NDJSON nuevas desde start_off; devuelve (objetos JSON, nuevo offset)."""
+    out: list[dict] = []
+    if not path or not os.path.isfile(path):
+        return out, start_off
+    off = start_off
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            f.seek(start_off)
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                off = f.tell()
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                    if isinstance(o, dict):
+                        out.append(o)
+                except json.JSONDecodeError:
+                    pass
+    except OSError:
+        return out, start_off
+    return out, off
+
+
+def _log_sidecar_shm_health_line(obj: dict, label: str) -> None:
+    """Escribe en stdout (visor de log) avisos SHM emitidos por varmon_sidecar."""
+    if obj.get("source") != "varmon_sidecar":
+        return
+    kind = obj.get("kind")
+    if kind == "seq_gap":
+        skipped = obj.get("skipped")
+        fr = obj.get("from_seq")
+        to = obj.get("to_seq")
+        print(
+            f"[VarMonitor SHM sidecar{label}] Salto de secuencia: omitidos {skipped} snapshot(s) (seq {fr} → {to})",
+            flush=True,
+        )
+    elif kind == "ring_loss":
+        print(
+            f"[VarMonitor SHM sidecar{label}] Anillo SHM v2: posible pérdida por desbordamiento",
+            flush=True,
+        )
 
 
 def _ensure_state_dirs():
@@ -2100,6 +2498,110 @@ def _get_python_cpu_percent(state) -> float | None:
     return None
 
 
+def renew_perf_lease(state) -> None:
+    state.perf_lease_until = time.monotonic() + PERF_LEASE_SEC
+
+
+def perf_lease_active(state) -> bool:
+    return time.monotonic() < float(getattr(state, "perf_lease_until", 0.0) or 0.0)
+
+
+def _uds_set_perf_collect(want: bool) -> None:
+    b = _first_uds_bridge()
+    if b is None:
+        return
+    try:
+        b.set_perf_collect(want)
+    finally:
+        b.disconnect()
+
+
+async def sync_cpp_perf_collect(state) -> None:
+    want = perf_lease_active(state)
+    if want == getattr(state, "_cpp_perf_target", None):
+        return
+    state._cpp_perf_target = want
+    await asyncio.to_thread(_uds_set_perf_collect, want)
+
+
+def _fetch_server_info_raw_sync() -> dict | None:
+    try:
+        b = _first_uds_bridge()
+        if b is None:
+            return None
+        try:
+            return b.get_server_info()
+        finally:
+            b.disconnect()
+    except Exception:
+        return None
+
+
+def _sidecar_perf_phases_from_state_sync(state) -> list[dict]:
+    """Lee JSON escrito por varmon_sidecar (--perf-file) durante grabación sidecar_cpp."""
+    path = _resolve_sidecar_perf_json_path(state)
+    if not path:
+        return []
+    last_err: Exception | None = None
+    for attempt in range(5):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+            if not raw.strip():
+                raise ValueError("empty perf json")
+            data = json.loads(raw)
+            phases = data.get("phases")
+            if not isinstance(phases, list):
+                return []
+            out: list[dict] = []
+            for item in phases:
+                if not isinstance(item, dict):
+                    continue
+                pid = item.get("id")
+                if not pid:
+                    continue
+                out.append(
+                    {
+                        "id": str(pid),
+                        "last_us": round(float(item.get("last_us", 0)), 3),
+                        "ema_us": round(float(item.get("ema_us", 0)), 3),
+                        "samples": int(float(item.get("samples", 0))),
+                    }
+                )
+            return out
+        except Exception as e:
+            last_err = e
+            time.sleep(0.001 * (attempt + 1))
+    if last_err is not None:
+        print(f"[VarMonitor Web] sidecar perf: no se pudo leer {path!r}: {last_err}", flush=True)
+    return []
+
+
+def _cpp_phases_from_server_info(state, info: dict | None) -> list[dict]:
+    if not info:
+        return []
+    raw = info.get("shm_perf_us")
+    if not isinstance(raw, list):
+        return []
+    ema_store = getattr(state, "perf_cpp_phase_ema", None)
+    if not isinstance(ema_store, dict):
+        ema_store = {}
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("id")
+        if not pid:
+            continue
+        last = float(item.get("last_us", 0))
+        prev = float(ema_store.get(pid, last))
+        ema = prev * 0.85 + last * 0.15
+        ema_store[pid] = ema
+        out.append({"id": str(pid), "last_us": round(last, 2), "ema_us": round(ema, 2), "samples": 1})
+    state.perf_cpp_phase_ema = ema_store
+    return out
+
+
 def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | None, float | None, bool]:
     """Conecta al C++ por UDS y devuelve (ram_mb, cpu_percent, shm_cycle_hint_ms, shm_active)."""
     try:
@@ -2132,9 +2634,12 @@ def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | N
 
 
 @app.get("/api/advanced_stats")
-async def api_advanced_stats(request: Request):
-    """RAM y CPU % del proceso Python; RAM del C++ (si se puede conectar por UDS)."""
+async def api_advanced_stats(request: Request, perf: int = Query(0)):
+    """RAM y CPU % del proceso Python; RAM del C++ (si se puede conectar por UDS). perf=1 renueva el lease de medición de fases."""
     state = request.app.state
+    if perf:
+        renew_perf_lease(state)
+    await sync_cpp_perf_collect(state)
     python_ram_mb = _get_process_ram_mb()
     python_cpu_percent = _get_python_cpu_percent(state)
     cpp_ram_mb, cpp_cpu_percent, shm_cycle_hint_ms, shm_active = await asyncio.to_thread(_fetch_cpp_stats_sync)
@@ -2155,6 +2660,30 @@ async def api_advanced_stats(request: Request):
         "shm_cycle_ms": shm_cycle_ms,
         "monitored_var_count": _ws_monitored_count_aggregate(state),
     }
+
+
+@app.get("/api/perf")
+async def api_perf(request: Request):
+    """Fases de tiempo C++/Python; esta ruta renueva el lease (panel abierto)."""
+    state = request.app.state
+    renew_perf_lease(state)
+    await sync_cpp_perf_collect(state)
+    ts = time.time()
+    py_phases = perf_agg.snapshot_phases()
+    info = await asyncio.to_thread(_fetch_server_info_raw_sync)
+    cpp_phases = _cpp_phases_from_server_info(state, info)
+    sidecar_phases = await asyncio.to_thread(_sidecar_perf_phases_from_state_sync, state)
+    return JSONResponse(
+        {
+            "ts": ts,
+            "lease_active": perf_lease_active(state),
+            "layers": {
+                "python": {"phases": py_phases},
+                "cpp": {"phases": cpp_phases},
+                "sidecar": {"phases": sidecar_phases},
+            },
+        }
+    )
 
 
 @app.get("/api/uptime")
@@ -2192,7 +2721,7 @@ async def api_connection_info(request: Request):
         "suggested_web_port": suggested_web_port,
         "uptime_seconds": uptime,
         "cycle_interval_ms": _config.get("cycle_interval_ms", 100),
-        "update_ratio_max": _config.get("update_ratio_max", 100),
+        "update_ratio_max": _config.get("update_ratio_max", 512),
         "visual_buffer_sec": max(1, min(7200, int(_config.get("visual_buffer_sec", 10)))),
     }
     try:
@@ -2291,6 +2820,10 @@ async def websocket_endpoint(ws: WebSocket):
     alarm_sidecar_names_path: str | None = None
     alarm_sidecar_alarms_path: str | None = None
     alarm_sidecar_events_off: int = 0
+    alarm_sidecar_shm_health_path: str | None = None
+    alarm_sidecar_shm_health_off: int = 0
+    recording_sidecar_shm_health_path: str | None = None
+    recording_sidecar_shm_health_off: int = 0
 
     # Conexión solo por UDS
     query_uds = ws.query_params.get("uds_path")
@@ -2314,14 +2847,31 @@ async def websocket_endpoint(ws: WebSocket):
         return
     connection_label = query_uds
 
+    async def _refresh_server_info() -> None:
+        """Actualiza shm/sem desde el C++ (p. ej. `sem_sidecar_name` tras reinicio del monitor)."""
+        nonlocal info
+        try:
+            fresh = await asyncio.to_thread(bridge.get_server_info)
+            if isinstance(fresh, dict) and fresh.get("shm_name") and fresh.get("sem_name"):
+                info = fresh
+        except Exception:
+            pass
+
     shm_reader: ShmReader | None = None
     shm_queue: Queue | None = None
+    shm_write_mmap = None
+    shm_write_fd = None
+    shm_layout_ver = int((info or {}).get("shm_layout_version") or 1)
+    shm_subscription_order: list[str] = []
     if info and info.get("shm_name") and info.get("sem_name"):
         qmax = int(_config.get("shm_queue_max_size", 512))
         shm_queue = Queue(0 if qmax <= 0 else qmax)
         shm_max_vars = int(_config.get("shm_max_vars", 2048))
-        shm_hz = float(_config.get("shm_parse_max_hz", 40) or 0)
+        shm_hz = float(_config.get("shm_parse_max_hz", 0) or 0)
         shm_parse_cap = None if shm_hz <= 0 else shm_hz
+        sample_ms = int(info.get("sample_interval_ms") or 100)
+        if sample_ms < 1:
+            sample_ms = 1
         shm_reader = ShmReader(
             info["shm_name"],
             info["sem_name"],
@@ -2329,6 +2879,7 @@ async def websocket_endpoint(ws: WebSocket):
             poll_interval=0.5,
             max_vars=shm_max_vars,
             parse_max_hz=shm_parse_cap,
+            sample_interval_ms=sample_ms,
         )
         if shm_reader.start():
             # Hasta update_shm_read_pause() puede pasar mucho tiempo (list_names/list_vars enormes). Si _reads_paused
@@ -2341,14 +2892,20 @@ async def websocket_endpoint(ws: WebSocket):
                 if shm_parse_cap is not None:
                     print(
                         f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote}; solo monitorización ≤{shm_parse_cap:.0f} parseos/s "
-                        f"(REC/alarmas a tasa completa; `shm_parse_max_hz=0` quita el tope)",
+                        f"(REC/alarmas sin tope; `shm_parse_max_hz=0` = ritmo nativo del C++/sem)",
                         flush=True,
                     )
                 else:
                     print(
-                        f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote} (sin tope Hz de parseo)",
+                        f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote} "
+                        f"(parseo al ritmo del monitor: sem + ciclo ~{sample_ms} ms del C++; polling SHM alineado a ese intervalo)",
                         flush=True,
                     )
+            if shm_layout_ver >= 2:
+                fd_w, mmap_w = open_shm_rw(info["shm_name"])
+                if mmap_w is not None:
+                    shm_write_mmap = mmap_w
+                    shm_write_fd = fd_w
         else:
             reason = getattr(shm_reader, "_last_error", None) or "desconocido"
             print(f"[VarMonitor Web] SHM no disponible: {reason}", flush=True)
@@ -2432,137 +2989,156 @@ async def websocket_endpoint(ws: WebSocket):
             nonlocal alarm_buffer, prev_alarm_state, alarm_pending_since_ms
             nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_row_layout, recording_t0
             nonlocal recording_header_estimated, recording_rows_written, recording_size_est_bytes, last_record_progress_send_at
-            if isinstance(snapshot_item, dict):
-                snapshot = snapshot_item.get("data")
-                t_snap = float(snapshot_item.get("timestamp") or time.time())
-            else:
-                snapshot = snapshot_item
-                t_snap = time.time()
-            if not snapshot:
-                return
-            if shm_reader is not None and shm_reader.reads_paused():
-                return
-            if shm_last_snap_ts is not None:
-                dt_ms = max(0.0, (t_snap - shm_last_snap_ts) * 1000.0)
-                shm_cycle_ema_ms = dt_ms if shm_cycle_ema_ms is None else (shm_cycle_ema_ms * 0.85 + dt_ms * 0.15)
-                ws.app.state.shm_cycle_ms = round(shm_cycle_ema_ms, 3)
-            shm_last_snap_ts = t_snap
-            # No es un buffer histórico: solo el último frame. Con alarmas/REC el snapshot debe ser
-            # completo para evaluación y TSV. Si solo monitorizas, recortar a `monitored_names` libera
-            # referencias a dicts de variables SHM que no están en el monitor (p. ej. 2048 vs 2000).
-            if not alarms_config and not recording and monitored_names:
-                mn = monitored_names
-                latest_snapshot = [v for v in snapshot if (v.get("name") or "") in mn]
-            else:
-                latest_snapshot = snapshot
-            _sidecar_alarm_delegate_active = bool(
-                recording_sidecar_alarm_delegate and recording and recording_sidecar_proc is not None
-            )
-            alarms_backend_sc = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower() == "sidecar_cpp"
-            alarm_sidecar_live = bool(
-                alarms_backend_sc
-                and alarm_sidecar_proc is not None
-                and alarm_sidecar_proc.poll() is None
-            )
-            delegate_shm_alarms = bool(alarm_sidecar_live and _alarms_sidecar_eligible(alarms_config))
-            alarms_eval_cfg = alarms_config
-            if _sidecar_alarm_delegate_active:
-                alarms_eval_cfg = {
-                    k: v
-                    for k, v in alarms_config.items()
-                    if k in VARMON_TELEMETRY_NAME_SET
-                }
-            elif delegate_shm_alarms:
-                alarms_eval_cfg = {}
-            if alarms_config and not delegate_shm_alarms:
-                alarm_buffer.append((t_snap, snapshot))
-                cutoff = t_snap - ALARM_BUFFER_SEC
-                while alarm_buffer and alarm_buffer[0][0] < cutoff:
-                    alarm_buffer.popleft()
-            if alarms_eval_cfg:
-                prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
-                    snapshot, alarms_eval_cfg, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
-                )
-                await _notify_alarm_events(cleared, triggered)
-            if recording:
-                if recording_sidecar_proc is not None:
-                    if (t_snap - last_record_progress_send_at) >= 0.5:
-                        last_record_progress_send_at = t_snap
-                        try:
-                            est_bytes = 0
-                            samples = 0
-                            if recording_tmp_path and os.path.isfile(recording_tmp_path):
-                                try:
-                                    est_bytes = int(os.path.getsize(recording_tmp_path))
-                                except OSError:
-                                    est_bytes = 0
-                            sp = recording_sidecar_status_path
-                            if sp and os.path.isfile(sp):
-                                try:
-                                    with open(sp, encoding="utf-8") as sf:
-                                        line = (sf.readline() or "").strip()
-                                    if line.isdigit():
-                                        samples = int(line)
-                                except OSError:
-                                    pass
-                            await ws.send_json({
-                                "type": "recording_progress",
-                                "bytes": est_bytes,
-                                "samples": samples,
-                            })
-                        except Exception:
-                            pass
+            _perf_snap_t0 = time.perf_counter()
+            try:
+                if isinstance(snapshot_item, dict):
+                    snapshot = snapshot_item.get("data")
+                    t_snap = float(snapshot_item.get("timestamp") or time.time())
                 else:
-                    if recording_t0 is None:
-                        recording_t0 = t_snap
-                    t_rel = 0.0 if (recording_rows_written_ref and recording_rows_written_ref[0] == 0) else max(0.0, t_snap - float(recording_t0))
-                    if recording_write_queue is not None:
-                        recording_write_queue.put((t_rel, snapshot))
-                        if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
+                    snapshot = snapshot_item
+                    t_snap = time.time()
+                if not snapshot:
+                    return
+                if shm_reader is not None and shm_reader.reads_paused():
+                    return
+                # Periodo entre publicaciones: preferir double en cabecera SHM (+52) escrito por C++; evita que el ritmo de Python altere la medida.
+                dt_ms = None
+                if isinstance(snapshot_item, dict):
+                    pp = snapshot_item.get("publish_period_sec")
+                    if isinstance(pp, (int, float)) and float(pp) > 0.0:
+                        dt_ms = float(pp) * 1000.0
+                if dt_ms is None and shm_last_snap_ts is not None:
+                    dt_ms = max(0.0, (t_snap - shm_last_snap_ts) * 1000.0)
+                if dt_ms is not None:
+                    shm_cycle_ema_ms = dt_ms if shm_cycle_ema_ms is None else (shm_cycle_ema_ms * 0.85 + dt_ms * 0.15)
+                    ws.app.state.shm_cycle_ms = round(shm_cycle_ema_ms, 3)
+                shm_last_snap_ts = t_snap
+                # No es un buffer histórico: solo el último frame. Con alarmas/REC el snapshot debe ser
+                # completo para evaluación y TSV. Si solo monitorizas, recortar a `monitored_names` libera
+                # referencias a dicts de variables SHM que no están en el monitor (p. ej. 2048 vs 2000).
+                if not alarms_config and not recording and monitored_names:
+                    mn = monitored_names
+                    from_shm = [v for v in snapshot if (v.get("name") or "") in mn]
+                    prev_by_name = {v["name"]: v for v in (latest_snapshot or []) if (v.get("name") or "") in mn}
+                    shm_ns = {v["name"] for v in from_shm}
+                    merged = list(from_shm)
+                    for nm, row in prev_by_name.items():
+                        if nm not in shm_ns:
+                            merged.append(row)
+                    latest_snapshot = merged
+                else:
+                    latest_snapshot = snapshot
+                _sidecar_alarm_delegate_active = bool(
+                    recording_sidecar_alarm_delegate and recording and recording_sidecar_proc is not None
+                )
+                alarms_backend_sc = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower() == "sidecar_cpp"
+                alarm_sidecar_live = bool(
+                    alarms_backend_sc
+                    and alarm_sidecar_proc is not None
+                    and alarm_sidecar_proc.poll() is None
+                )
+                delegate_shm_alarms = bool(alarm_sidecar_live and _alarms_sidecar_eligible(alarms_config))
+                alarms_eval_cfg = alarms_config
+                if _sidecar_alarm_delegate_active:
+                    alarms_eval_cfg = {
+                        k: v
+                        for k, v in alarms_config.items()
+                        if k in VARMON_TELEMETRY_NAME_SET
+                    }
+                elif delegate_shm_alarms:
+                    alarms_eval_cfg = {}
+                if alarms_config and not delegate_shm_alarms:
+                    alarm_buffer.append((t_snap, snapshot))
+                    cutoff = t_snap - ALARM_BUFFER_SEC
+                    while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                        alarm_buffer.popleft()
+                if alarms_eval_cfg:
+                    prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                        snapshot, alarms_eval_cfg, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                    )
+                    await _notify_alarm_events(cleared, triggered)
+                if recording:
+                    if recording_sidecar_proc is not None:
+                        if (t_snap - last_record_progress_send_at) >= 0.5:
                             last_record_progress_send_at = t_snap
                             try:
                                 est_bytes = 0
+                                samples = 0
                                 if recording_tmp_path and os.path.isfile(recording_tmp_path):
                                     try:
                                         est_bytes = int(os.path.getsize(recording_tmp_path))
-                                    except Exception:
+                                    except OSError:
                                         est_bytes = 0
+                                sp = recording_sidecar_status_path
+                                if sp and os.path.isfile(sp):
+                                    try:
+                                        with open(sp, encoding="utf-8") as sf:
+                                            line = (sf.readline() or "").strip()
+                                        if line.isdigit():
+                                            samples = int(line)
+                                    except OSError:
+                                        pass
                                 await ws.send_json({
                                     "type": "recording_progress",
                                     "bytes": est_bytes,
-                                    "samples": recording_rows_written_ref[0],
+                                    "samples": samples,
                                 })
                             except Exception:
                                 pass
                     else:
-                        if recording_tmp_fp is None:
-                            _ensure_recordings_dir()
-                            recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
-                            recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
-                        if recording_col_spec is None:
-                            names = recording_var_names or sorted(set(e["name"] for e in snapshot))
-                            recording_col_spec = _build_record_col_spec(names, snapshot)
-                            recording_row_layout = _record_row_layout(recording_col_spec)
-                        if not recording_header_estimated and recording_col_spec:
-                            recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
-                            recording_header_estimated = True
-                        if recording_col_spec:
-                            t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
-                            recording_size_est_bytes += _write_record_row_stream(
-                                recording_tmp_fp, t_rel_local, snapshot, recording_col_spec, recording_row_layout
-                            )
-                            recording_rows_written += 1
-                        if (t_snap - last_record_progress_send_at) >= 0.5:
-                            last_record_progress_send_at = t_snap
-                            try:
-                                await ws.send_json({
-                                    "type": "recording_progress",
-                                    "bytes": int(max(0, recording_size_est_bytes)),
-                                    "samples": recording_rows_written,
-                                })
-                            except Exception:
-                                pass
+                        if recording_t0 is None:
+                            recording_t0 = t_snap
+                        t_rel = 0.0 if (recording_rows_written_ref and recording_rows_written_ref[0] == 0) else max(0.0, t_snap - float(recording_t0))
+                        if recording_write_queue is not None:
+                            recording_write_queue.put((t_rel, snapshot))
+                            if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
+                                last_record_progress_send_at = t_snap
+                                try:
+                                    est_bytes = 0
+                                    if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                                        try:
+                                            est_bytes = int(os.path.getsize(recording_tmp_path))
+                                        except Exception:
+                                            est_bytes = 0
+                                    await ws.send_json({
+                                        "type": "recording_progress",
+                                        "bytes": est_bytes,
+                                        "samples": recording_rows_written_ref[0],
+                                    })
+                                except Exception:
+                                    pass
+                        else:
+                            if recording_tmp_fp is None:
+                                _ensure_recordings_dir()
+                                recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                                recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
+                            if recording_col_spec is None:
+                                names = recording_var_names or sorted(set(e["name"] for e in snapshot))
+                                recording_col_spec = _build_record_col_spec(names, snapshot)
+                                recording_row_layout = _record_row_layout(recording_col_spec)
+                            if not recording_header_estimated and recording_col_spec:
+                                recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
+                                recording_header_estimated = True
+                            if recording_col_spec:
+                                t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
+                                recording_size_est_bytes += _write_record_row_stream(
+                                    recording_tmp_fp, t_rel_local, snapshot, recording_col_spec, recording_row_layout
+                                )
+                                recording_rows_written += 1
+                            if (t_snap - last_record_progress_send_at) >= 0.5:
+                                last_record_progress_send_at = t_snap
+                                try:
+                                    await ws.send_json({
+                                        "type": "recording_progress",
+                                        "bytes": int(max(0, recording_size_est_bytes)),
+                                        "samples": recording_rows_written,
+                                    })
+                                except Exception:
+                                    pass
 
+            finally:
+                if perf_lease_active(ws.app.state):
+                    perf_agg.record_phase_sec("py.shm_handle_snapshot", time.perf_counter() - _perf_snap_t0)
         while True:
             batch: list = []
             try:
@@ -2586,20 +3162,65 @@ async def websocket_endpoint(ws: WebSocket):
                 await _handle_snapshot_item(snapshot_item)
 
     def update_shm_read_pause() -> None:
-        """Sin monitor, grabación ni alarmas: no parsear SHM (ahorra CPU/RAM). Con alarmas activas hace falta SHM a tasa C++."""
+        """Sin monitor, grabación ni alarmas: no parsear SHM (ahorra CPU/RAM)."""
         nonlocal latest_snapshot
         if not shm_reader:
             return
         idle = not monitored_names and not recording and not alarms_config
         shm_reader.set_reads_paused(bool(idle))
-        # Grabación y alarmas: sin tope Hz (cada snapshot que entrega el lector SHM). Solo UI usa shm_parse_max_hz.
-        shm_reader.set_full_parse_rate(bool(alarms_config or recording))
+        sidecar_rec_live = (
+            bool(recording)
+            and recording_sidecar_proc is not None
+            and recording_sidecar_proc.poll() is None
+        )
+        # Grabación Python (cola → TSV) o alarmas evaluadas aquí: sin tope Hz. Grabación sidecar: el TSV lo escribe
+        # otro proceso; `shm_parse_hz_sidecar_recording` limita solo el parseo Python para la UI (sem sidecar aparte).
+        need_full_parse = bool(alarms_config or (recording and not sidecar_rec_live))
+        shm_reader.set_full_parse_rate(need_full_parse)
+        if sidecar_rec_live:
+            cap = float(_config.get("shm_parse_hz_sidecar_recording", 0) or 0)
+            drain_iv = float(_config.get("shm_sidecar_sem_drain_interval_sec", 0.2) or 0.2)
+            drain_iv = max(0.05, min(5.0, drain_iv))
+            if cap <= 0:
+                shm_reader.set_sidecar_sem_pump_only(True, drain_iv)
+                shm_reader.set_parse_max_hz(None)
+            else:
+                shm_reader.set_sidecar_sem_pump_only(False)
+                shm_reader.set_parse_max_hz(max(1.0, min(500.0, cap)))
+        else:
+            shm_reader.set_sidecar_sem_pump_only(False)
+            shm_hz = float(_config.get("shm_parse_max_hz", 0) or 0)
+            shm_reader.set_parse_max_hz(None if shm_hz <= 0 else max(0.01, min(5000.0, shm_hz)))
         if idle:
             latest_snapshot = None
+
+    async def push_shm_publish_slice() -> None:
+        """Alinea troceo de publicación SHM en C++ con Rel act (idle) vs tasa plena (REC / alarmas)."""
+        try:
+            max_r = int(_config.get("update_ratio_max", 512))
+            idle_slice = bool(monitored_names) and not recording and not alarms_config
+            force_full = not idle_slice
+            count = max(1, min(max_r, int(update_ratio))) if idle_slice else 1
+            await asyncio.to_thread(bridge.set_shm_publish_slice, count, force_full)
+        except Exception:
+            pass
 
     if shm_reader and shm_queue is not None:
         shm_drain_task = asyncio.create_task(_shm_drain_loop())
         update_shm_read_pause()
+    await push_shm_publish_slice()
+    await _refresh_server_info()
+    if info and (info.get("sem_sidecar_name") or "").strip():
+        print(
+            f"[VarMonitor Web] SHM: sem sidecar para grabación/alarmas nativas: {info['sem_sidecar_name']}",
+            flush=True,
+        )
+    elif info and info.get("shm_name") and info.get("sem_name"):
+        print(
+            "[VarMonitor Web] SHM: server_info sin `sem_sidecar_name` — el sidecar usará el sem principal "
+            "(compite con Python). Recompila y reinicia el proceso C++ con libvarmonitor actual.",
+            flush=True,
+        )
 
     ws_id = id(ws)
     if not hasattr(ws.app.state, "ws_monitored_counts"):
@@ -2608,7 +3229,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     def _stop_alarm_sidecar() -> None:
         nonlocal alarm_sidecar_proc, alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path
-        nonlocal alarm_sidecar_events_off
+        nonlocal alarm_sidecar_events_off, alarm_sidecar_shm_health_path, alarm_sidecar_shm_health_off
         if alarm_sidecar_proc is not None:
             p = alarm_sidecar_proc
             alarm_sidecar_proc = None
@@ -2620,7 +3241,12 @@ async def websocket_endpoint(ws: WebSocket):
                     p.kill()
                 except Exception:
                     pass
-        for aux in (alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path):
+        for aux in (
+            alarm_sidecar_events_path,
+            alarm_sidecar_names_path,
+            alarm_sidecar_alarms_path,
+            alarm_sidecar_shm_health_path,
+        ):
             if aux and os.path.isfile(aux):
                 try:
                     os.remove(aux)
@@ -2630,10 +3256,14 @@ async def websocket_endpoint(ws: WebSocket):
         alarm_sidecar_names_path = None
         alarm_sidecar_alarms_path = None
         alarm_sidecar_events_off = 0
+        alarm_sidecar_shm_health_path = None
+        alarm_sidecar_shm_health_off = 0
 
-    def _try_start_alarm_sidecar() -> None:
+    async def _try_start_alarm_sidecar() -> None:
         nonlocal alarm_sidecar_proc, alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path
-        nonlocal alarm_sidecar_events_off
+        nonlocal alarm_sidecar_events_off, alarm_sidecar_shm_health_path, alarm_sidecar_shm_health_off
+        nonlocal info
+        await _refresh_server_info()
         _stop_alarm_sidecar()
         ab = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower()
         if ab != "sidecar_cpp" or not shm_reader or not alarms_config or not info:
@@ -2648,11 +3278,14 @@ async def websocket_endpoint(ws: WebSocket):
             return
         _ensure_recordings_dir()
         ev_path = os.path.join(RECORDINGS_DIR, f".alarm_ev_{ws_id}_{int(time.time() * 1000)}.ndjson")
+        shm_health_path = os.path.join(RECORDINGS_DIR, f".alarm_shm_health_{ws_id}_{int(time.time() * 1000)}.ndjson")
         names_path = os.path.join(RECORDINGS_DIR, f".alarm_names_{ws_id}_{int(time.time() * 1000)}.txt")
         al_path = os.path.join(RECORDINGS_DIR, f".alarm_rules_{ws_id}_{int(time.time() * 1000)}.tsv")
         try:
             if os.path.isfile(ev_path):
                 os.remove(ev_path)
+            if os.path.isfile(shm_health_path):
+                os.remove(shm_health_path)
         except OSError:
             pass
         sub = _shm_subscription_real_names(monitored_names, alarms_config)
@@ -2671,13 +3304,15 @@ async def websocket_endpoint(ws: WebSocket):
                 pass
             return
         shm_max = int(_config.get("shm_max_vars", 2048))
+        sem_sc = (info.get("sem_sidecar_name") or "").strip()
+        sem_arg = str(_shm_sem_name_for_sidecar(info) or info["sem_name"])
         args = [
             bin_path,
             "--alarm-monitor",
             "--shm-name",
             str(info["shm_name"]),
             "--sem-name",
-            str(info["sem_name"]),
+            sem_arg,
             "--names-file",
             names_path,
             "--alarms-file",
@@ -2688,20 +3323,35 @@ async def websocket_endpoint(ws: WebSocket):
             RECORDINGS_DIR,
             "--max-vars",
             str(shm_max),
+            "--shm-health-file",
+            shm_health_path,
         ]
         try:
             alarm_sidecar_proc = subprocess.Popen(
                 args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=sys.stderr,
                 start_new_session=True,
             )
+            _apply_sidecar_cpu_affinity(alarm_sidecar_proc.pid, _config, "Alarmas sidecar")
             alarm_sidecar_events_path = ev_path
             alarm_sidecar_names_path = names_path
             alarm_sidecar_alarms_path = al_path
+            alarm_sidecar_shm_health_path = shm_health_path
             alarm_sidecar_events_off = 0
-            print(f"[VarMonitor Web] Alarmas SHM delegadas al sidecar (eventos: {ev_path})", flush=True)
+            alarm_sidecar_shm_health_off = 0
+            if sem_sc:
+                print(
+                    f"[VarMonitor Web] Alarmas sidecar: sem dedicado {sem_arg} (eventos: {ev_path})",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[VarMonitor Web] Alarmas sidecar: sin sem_sidecar_name en server_info → --sem-name={sem_arg} "
+                    f"(mismo sem que Python; recompila/reinicia VarMonitor). Eventos: {ev_path}",
+                    flush=True,
+                )
         except Exception as e:
             print(f"[VarMonitor Web] No se pudo arrancar alarm-sidecar: {e}", flush=True)
             _stop_alarm_sidecar()
@@ -2760,6 +3410,34 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception:
                     pass
 
+    async def _drain_alarm_sidecar_shm_health() -> None:
+        nonlocal alarm_sidecar_shm_health_off
+        hp = alarm_sidecar_shm_health_path
+        if not hp:
+            return
+        so = alarm_sidecar_shm_health_off
+
+        def _go() -> tuple[list[dict], int]:
+            return _read_ndjson_lines_from_offset(hp, so)
+
+        objs, alarm_sidecar_shm_health_off = await asyncio.to_thread(_go)
+        for o in objs:
+            _log_sidecar_shm_health_line(o, " · alarmas")
+
+    async def _drain_recording_sidecar_shm_health() -> None:
+        nonlocal recording_sidecar_shm_health_off
+        hp = recording_sidecar_shm_health_path
+        if not hp:
+            return
+        so = recording_sidecar_shm_health_off
+
+        def _go() -> tuple[list[dict], int]:
+            return _read_ndjson_lines_from_offset(hp, so)
+
+        objs, recording_sidecar_shm_health_off = await asyncio.to_thread(_go)
+        for o in objs:
+            _log_sidecar_shm_health_line(o, " · grabación")
+
     async def _finalize_recording_after_sidecar_exit(alarm_payload: dict | None) -> None:
         """Sidecar terminó solo (p. ej. alarma): cerrar TSV, notificar y limpiar sin SIGTERM."""
         nonlocal recording, recording_sidecar_proc, recording_sidecar_status_path, recording_sidecar_names_path
@@ -2767,6 +3445,7 @@ async def websocket_endpoint(ws: WebSocket):
         nonlocal recording_tmp_fp, recording_tmp_path, recording_rows_written, recording_size_est_bytes
         nonlocal recording_header_estimated, last_record_progress_send_at, recording_col_spec, recording_row_layout
         nonlocal recording_t0, record_buffer, recording_var_names
+        nonlocal recording_sidecar_shm_health_path, recording_sidecar_shm_health_off
         recording = False
         recording_sidecar_alarm_delegate = False
         recording_sidecar_proc = None
@@ -2787,21 +3466,29 @@ async def websocket_endpoint(ws: WebSocket):
             except OSError:
                 rows_done = 0
         recording_rows_written = rows_done
+        await _drain_recording_sidecar_shm_health()
+        _sp_perf = getattr(ws.app.state, "sidecar_perf_json_path", None)
         for aux in (
             recording_sidecar_status_path,
             recording_sidecar_names_path,
             recording_sidecar_alarms_path,
             recording_sidecar_alarm_exit_path,
+            recording_sidecar_shm_health_path,
+            _sp_perf,
         ):
             if aux and os.path.isfile(aux):
                 try:
                     os.remove(aux)
                 except OSError:
                     pass
+        ws.app.state.sidecar_perf_json_path = None
+        _unregister_sidecar_perf_session()
         recording_sidecar_status_path = None
         recording_sidecar_names_path = None
         recording_sidecar_alarms_path = None
         recording_sidecar_alarm_exit_path = None
+        recording_sidecar_shm_health_path = None
+        recording_sidecar_shm_health_off = 0
         if recording_tmp_fp is not None:
             try:
                 recording_tmp_fp.flush()
@@ -2861,7 +3548,8 @@ async def websocket_endpoint(ws: WebSocket):
         recording_rows_written = 0
         recording_t0 = None
         update_shm_read_pause()
-        _try_start_alarm_sidecar()
+        await push_shm_publish_slice()
+        await _try_start_alarm_sidecar()
 
     ws_close_detail: str | None = None
     try:
@@ -2876,8 +3564,10 @@ async def websocket_endpoint(ws: WebSocket):
                             flush=True,
                         )
                         _stop_alarm_sidecar()
-                    elif alarm_sidecar_events_path:
-                        await _drain_alarm_sidecar_events()
+                    else:
+                        if alarm_sidecar_events_path:
+                            await _drain_alarm_sidecar_events()
+                        await _drain_alarm_sidecar_shm_health()
 
                 if recording and recording_sidecar_proc is not None:
                     if recording_sidecar_proc.poll() is not None:
@@ -2891,6 +3581,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 alarm_payload = None
                         await _finalize_recording_after_sidecar_exit(alarm_payload)
                         continue
+                    await _drain_recording_sidecar_shm_health()
 
                 catalog_idle = not monitored_names and not recording
                 refresh_iv = names_refresh_interval_idle if catalog_idle else names_refresh_interval
@@ -2949,24 +3640,29 @@ async def websocket_endpoint(ws: WebSocket):
                     if monitored_names and (now - last_vars_update_at >= interval_between_updates):
                         last_vars_update_at = now
                         name_set = set(monitored_names)
-                        pack, should_send = _merge_shm_and_telemetry_vars_updates(
-                            latest_snapshot,
-                            name_set,
-                            ws.app.state,
-                            vars_update_sig_cache,
-                            force_full_vars_update,
-                        )
-                        if should_send:
-                            await ws.send_json({"type": "vars_update", "data": pack})
-                            if force_full_vars_update:
-                                shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
-                                shm_sent = {
-                                    v["name"]
-                                    for v in pack
-                                    if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
-                                }
-                                if not shm_only or shm_only.issubset(shm_sent):
-                                    force_full_vars_update = False
+                        _t_vu = time.perf_counter()
+                        try:
+                            pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                latest_snapshot,
+                                name_set,
+                                ws.app.state,
+                                vars_update_sig_cache,
+                                force_full_vars_update,
+                            )
+                            if should_send:
+                                await ws.send_json({"type": "vars_update", "data": pack})
+                                if force_full_vars_update:
+                                    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                    shm_sent = {
+                                        v["name"]
+                                        for v in pack
+                                        if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                    }
+                                    if not shm_only or shm_only.issubset(shm_sent):
+                                        force_full_vars_update = False
+                        finally:
+                            if perf_lease_active(ws.app.state):
+                                perf_agg.record_phase_sec("py.vars_update_pack_send", time.perf_counter() - _t_vu)
                 else:
                     # Sin SHM: tomar snapshot completo cada ciclo (backend-first para alarmas/grabación).
                     if monitored_names:
@@ -3026,24 +3722,29 @@ async def websocket_endpoint(ws: WebSocket):
                     if monitored_names and (now - last_vars_update_at >= interval_between_updates):
                         last_vars_update_at = now
                         name_set = set(monitored_names)
-                        pack, should_send = _merge_shm_and_telemetry_vars_updates(
-                            latest_snapshot,
-                            name_set,
-                            ws.app.state,
-                            vars_update_sig_cache,
-                            force_full_vars_update,
-                        )
-                        if should_send:
-                            await ws.send_json({"type": "vars_update", "data": pack})
-                            if force_full_vars_update:
-                                shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
-                                shm_sent = {
-                                    v["name"]
-                                    for v in pack
-                                    if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
-                                }
-                                if not shm_only or shm_only.issubset(shm_sent):
-                                    force_full_vars_update = False
+                        _t_vu = time.perf_counter()
+                        try:
+                            pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                latest_snapshot,
+                                name_set,
+                                ws.app.state,
+                                vars_update_sig_cache,
+                                force_full_vars_update,
+                            )
+                            if should_send:
+                                await ws.send_json({"type": "vars_update", "data": pack})
+                                if force_full_vars_update:
+                                    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                    shm_sent = {
+                                        v["name"]
+                                        for v in pack
+                                        if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                    }
+                                    if not shm_only or shm_only.issubset(shm_sent):
+                                        force_full_vars_update = False
+                        finally:
+                            if perf_lease_active(ws.app.state):
+                                perf_agg.record_phase_sec("py.vars_update_pack_send", time.perf_counter() - _t_vu)
 
             except Exception as e:
                 msg_err = str(e)
@@ -3080,9 +3781,10 @@ async def websocket_endpoint(ws: WebSocket):
                 action = cmd.get("action")
 
                 if action == "set_update_ratio":
-                    max_r = _config.get("update_ratio_max", 100)
+                    max_r = _config.get("update_ratio_max", 512)
                     v = int(cmd.get("value", 1))
                     update_ratio = max(1, min(max_r, v))
+                    await push_shm_publish_slice()
                 elif action == "set_monitored":
                     monitored_names = set(cmd.get("names", []))
                     force_full_vars_update = True
@@ -3090,12 +3792,56 @@ async def websocket_endpoint(ws: WebSocket):
                     # SHM: monitorizadas ∪ alarmas (si no, las alarmas solo verían get_var lento o nada en SHM).
                     try:
                         sub_real = _shm_subscription_real_names(monitored_names, alarms_config)
+                        shm_subscription_order = list(sub_real)
                         await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
                     except Exception:
                         pass
                     update_shm_read_pause()
+                    await push_shm_publish_slice()
                     if alarms_config:
-                        _try_start_alarm_sidecar()
+                        await _try_start_alarm_sidecar()
+                    # Evitar "--" varios segundos: UDS ahora + vars_update inmediato; SHM rellena después.
+                    if monitored_names:
+                        try:
+                            boot = await asyncio.to_thread(
+                                _bootstrap_monitored_vars_rows, monitored_names, bridge, ws.app.state
+                            )
+                        except Exception:
+                            boot = []
+                        if boot:
+                            by_name = {v["name"]: v for v in boot if v.get("name")}
+                            for v in latest_snapshot or []:
+                                nn = v.get("name")
+                                if nn and nn in monitored_names and nn not in by_name:
+                                    by_name[nn] = v
+                            latest_snapshot = [by_name[n] for n in sorted(monitored_names) if n in by_name]
+                        try:
+                            name_set = set(monitored_names)
+                            _t_vu = time.perf_counter()
+                            try:
+                                pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                    latest_snapshot,
+                                    name_set,
+                                    ws.app.state,
+                                    vars_update_sig_cache,
+                                    force_full_vars_update,
+                                )
+                                if should_send:
+                                    await ws.send_json({"type": "vars_update", "data": pack})
+                                    last_vars_update_at = time.monotonic()
+                                    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                    shm_sent = {
+                                        v["name"]
+                                        for v in pack
+                                        if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                    }
+                                    if not shm_only or shm_only.issubset(shm_sent):
+                                        force_full_vars_update = False
+                            finally:
+                                if perf_lease_active(ws.app.state):
+                                    perf_agg.record_phase_sec("py.vars_update_pack_send", time.perf_counter() - _t_vu)
+                        except Exception:
+                            pass
                 # Historial en vivo eliminado: se mantiene solo vía SHM y grabaciones TSV.
                 elif action == "set_var":
                     sn = cmd.get("name") or ""
@@ -3103,7 +3849,14 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "set_result", "success": False, "name": sn})
                     else:
                         ok = await asyncio.to_thread(
-                            bridge.set_var, sn, cmd["value"], cmd.get("var_type", "double")
+                            _set_var_uds_and_shm_import,
+                            bridge,
+                            sn,
+                            cmd["value"],
+                            cmd.get("var_type", "double"),
+                            shm_write_mmap,
+                            shm_subscription_order,
+                            shm_layout_ver,
                         )
                         await ws.send_json({"type": "set_result", "success": ok, "name": sn})
                 elif action == "set_array_element":
@@ -3138,11 +3891,13 @@ async def websocket_endpoint(ws: WebSocket):
                                 }
                     try:
                         sub_real = _shm_subscription_real_names(monitored_names, alarms_config)
+                        shm_subscription_order = list(sub_real)
                         await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
                     except Exception:
                         pass
                     update_shm_read_pause()
-                    _try_start_alarm_sidecar()
+                    await push_shm_publish_slice()
+                    await _try_start_alarm_sidecar()
                 elif action == "set_send_file_on_finish":
                     send_file_on_finish = bool(cmd.get("value", False))
                 elif action == "start_recording":
@@ -3168,21 +3923,28 @@ async def websocket_endpoint(ws: WebSocket):
                                 p0.kill()
                             except Exception:
                                 pass
+                    _sp0 = getattr(ws.app.state, "sidecar_perf_json_path", None)
                     for aux in (
                         recording_sidecar_status_path,
                         recording_sidecar_names_path,
                         recording_sidecar_alarms_path,
                         recording_sidecar_alarm_exit_path,
+                        recording_sidecar_shm_health_path,
+                        _sp0,
                     ):
                         if aux and os.path.isfile(aux):
                             try:
                                 os.remove(aux)
                             except OSError:
                                 pass
+                    ws.app.state.sidecar_perf_json_path = None
+                    _unregister_sidecar_perf_session()
                     recording_sidecar_status_path = None
                     recording_sidecar_names_path = None
                     recording_sidecar_alarms_path = None
                     recording_sidecar_alarm_exit_path = None
+                    recording_sidecar_shm_health_path = None
+                    recording_sidecar_shm_health_off = 0
                     recording_sidecar_alarm_delegate = False
                     if recording_writer_thread is not None:
                         if recording_write_queue:
@@ -3203,6 +3965,7 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             pass
                     recording_tmp_path = None
+                    await _refresh_server_info()
                     rb = (_config.get("recording_backend") or "python").strip().lower()
                     want_sidecar = (
                         rb == "sidecar_cpp"
@@ -3233,6 +3996,7 @@ async def websocket_endpoint(ws: WebSocket):
                             recording_sidecar_alarm_delegate = False
                             nv = list(monitored_names) if monitored_names else []
                             recording_var_names = nv if nv else None
+                            rec_shm_health_path: str | None = None
                             try:
                                 with open(names_path, "w", encoding="utf-8") as nf:
                                     for n in nv:
@@ -3245,12 +4009,27 @@ async def websocket_endpoint(ws: WebSocket):
                                         recording_sidecar_alarm_exit_path = recording_tmp_path + ".alarm_exit"
                                         recording_sidecar_alarm_delegate = True
                                 shm_max = int(_config.get("shm_max_vars", 2048))
-                                args = [
+                                rec_shm_health_path = (recording_tmp_path or "") + ".shm_health.ndjson"
+                                rec_perf_json = (recording_tmp_path or "") + ".sidecar_perf.json"
+                                try:
+                                    if os.path.isfile(rec_shm_health_path):
+                                        os.remove(rec_shm_health_path)
+                                except OSError:
+                                    pass
+                                try:
+                                    if os.path.isfile(rec_perf_json):
+                                        os.remove(rec_perf_json)
+                                except OSError:
+                                    pass
+                                abs_perf_json = os.path.abspath(rec_perf_json)
+                                sem_sc = (info.get("sem_sidecar_name") or "").strip()
+                                sem_arg = str(_shm_sem_name_for_sidecar(info) or info["sem_name"])
+                                args_base = [
                                     bin_path,
                                     "--shm-name",
                                     str(info["shm_name"]),
                                     "--sem-name",
-                                    str(info["sem_name"]),
+                                    sem_arg,
                                     "--output",
                                     recording_tmp_path,
                                     "--names-file",
@@ -3259,9 +4038,11 @@ async def websocket_endpoint(ws: WebSocket):
                                     str(shm_max),
                                     "--status-file",
                                     recording_sidecar_status_path,
+                                    "--shm-health-file",
+                                    rec_shm_health_path,
                                 ]
                                 if recording_sidecar_alarms_path and recording_sidecar_alarm_exit_path:
-                                    args.extend(
+                                    args_base.extend(
                                         [
                                             "--alarms-file",
                                             recording_sidecar_alarms_path,
@@ -3269,32 +4050,115 @@ async def websocket_endpoint(ws: WebSocket):
                                             recording_sidecar_alarm_exit_path,
                                         ]
                                     )
+                                # Binarios antiguos no reconocen --perf-file (salen con código 2 al parsear).
+                                ws.app.state.sidecar_perf_json_path = abs_perf_json
+                                _register_sidecar_perf_session(abs_perf_json)
+                                _write_sidecar_perf_stub_json(abs_perf_json)
+                                args_with_perf = list(args_base) + [
+                                    "--perf-file",
+                                    abs_perf_json,
+                                ]
                                 recording_sidecar_proc = subprocess.Popen(
-                                    args,
+                                    args_with_perf,
                                     stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
+                                    stderr=sys.stderr,
                                     close_fds=True,
                                 )
-                                if recording_sidecar_alarm_delegate:
+                                time.sleep(0.05)
+                                _ex_immediate = recording_sidecar_proc.poll()
+                                if _ex_immediate == 2:
                                     print(
-                                        f"[VarMonitor Web] Grabación sidecar C++ (alarmas en sidecar → parada automática): {bin_path}",
+                                        "[VarMonitor Web] Sidecar salió con código 2 (p. ej. --perf-file no soportado). "
+                                        "Reintentando sin --perf-file; recompila varmon_sidecar para métricas de perf.",
+                                        flush=True,
+                                    )
+                                    ws.app.state.sidecar_perf_json_path = None
+                                    _unregister_sidecar_perf_session()
+                                    try:
+                                        if os.path.isfile(abs_perf_json):
+                                            os.remove(abs_perf_json)
+                                    except OSError:
+                                        pass
+                                    recording_sidecar_proc = subprocess.Popen(
+                                        args_base,
+                                        stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=sys.stderr,
+                                        close_fds=True,
+                                    )
+                                    time.sleep(0.05)
+                                    _ex_immediate = recording_sidecar_proc.poll()
+                                _apply_sidecar_cpu_affinity(
+                                    recording_sidecar_proc.pid, _config, "Grabación sidecar"
+                                )
+                                _perf_active = getattr(
+                                    ws.app.state, "sidecar_perf_json_path", None
+                                )
+                                try:
+                                    _stub_sz = (
+                                        os.path.getsize(_perf_active)
+                                        if _perf_active and os.path.isfile(_perf_active)
+                                        else -1
+                                    )
+                                except OSError:
+                                    _stub_sz = -1
+                                _write_sidecar_rec_session_file(
+                                    pid=int(recording_sidecar_proc.pid),
+                                    perf_json_abs=_perf_active,
+                                    bin_path=bin_path,
+                                    running=_ex_immediate is None,
+                                    exit_code=_ex_immediate,
+                                )
+                                if _ex_immediate is not None:
+                                    print(
+                                        f"[VarMonitor Web] varmon_sidecar terminó al arrancar (exit={_ex_immediate}). "
+                                        f"Bin={bin_path!r} perf={_perf_active!r} stub_bytes={_stub_sz}. "
+                                        "¿Error de sem/SHM u opciones? Ver stderr.",
                                         flush=True,
                                     )
                                 else:
-                                    print(f"[VarMonitor Web] Grabación sidecar C++: {bin_path}", flush=True)
+                                    print(
+                                        f"[VarMonitor Web] varmon_sidecar en marcha pid={recording_sidecar_proc.pid} "
+                                        f"perf_json={_perf_active!r} stub_bytes={_stub_sz}",
+                                        flush=True,
+                                    )
+                                recording_sidecar_shm_health_path = rec_shm_health_path
+                                recording_sidecar_shm_health_off = 0
+                                if sem_sc:
+                                    sc_note = f"sem sidecar {sem_arg}"
+                                else:
+                                    sc_note = (
+                                        f"sin sem_sidecar_name → {sem_arg} (comparte sem con Python; "
+                                        "recompila/reinicia VarMonitor)"
+                                    )
+                                if recording_sidecar_alarm_delegate:
+                                    print(
+                                        f"[VarMonitor Web] Grabación sidecar C++ ({sc_note}; alarmas en sidecar): "
+                                        f"{bin_path}",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(
+                                        f"[VarMonitor Web] Grabación sidecar C++ ({sc_note}): {bin_path}",
+                                        flush=True,
+                                    )
                             except Exception as e:
                                 recording = False
                                 recording_sidecar_proc = None
                                 recording_tmp_path = None
                                 recording_sidecar_status_path = None
                                 recording_sidecar_names_path = None
+                                recording_sidecar_shm_health_path = None
+                                recording_sidecar_shm_health_off = 0
+                                ws.app.state.sidecar_perf_json_path = None
+                                _unregister_sidecar_perf_session()
                                 ap = recording_sidecar_alarms_path
                                 aex = recording_sidecar_alarm_exit_path
                                 recording_sidecar_alarms_path = None
                                 recording_sidecar_alarm_exit_path = None
                                 recording_sidecar_alarm_delegate = False
-                                for aux in (ap, aex):
+                                for aux in (ap, aex, rec_shm_health_path):
                                     if aux and os.path.isfile(aux):
                                         try:
                                             os.remove(aux)
@@ -3323,6 +4187,7 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             pass
                     update_shm_read_pause()
+                    await push_shm_publish_slice()
                 elif action == "stop_recording":
                     recording = False
                     if recording_sidecar_proc is not None:
@@ -3359,21 +4224,29 @@ async def websocket_endpoint(ws: WebSocket):
                                 rows_done = 0
                         recording_rows_written = rows_done
                         recording_sidecar_alarm_delegate = False
+                        await _drain_recording_sidecar_shm_health()
+                        _sp_stop = getattr(ws.app.state, "sidecar_perf_json_path", None)
                         for aux in (
                             recording_sidecar_status_path,
                             recording_sidecar_names_path,
                             recording_sidecar_alarms_path,
                             recording_sidecar_alarm_exit_path,
+                            recording_sidecar_shm_health_path,
+                            _sp_stop,
                         ):
                             if aux and os.path.isfile(aux):
                                 try:
                                     os.remove(aux)
                                 except OSError:
                                     pass
+                        ws.app.state.sidecar_perf_json_path = None
+                        _unregister_sidecar_perf_session()
                         recording_sidecar_status_path = None
                         recording_sidecar_names_path = None
                         recording_sidecar_alarms_path = None
                         recording_sidecar_alarm_exit_path = None
+                        recording_sidecar_shm_health_path = None
+                        recording_sidecar_shm_health_off = 0
                     elif recording_write_queue is not None and recording_writer_thread is not None:
                         recording_write_queue.put(None)
                         recording_writer_thread.join(timeout=5.0)
@@ -3422,7 +4295,8 @@ async def websocket_endpoint(ws: WebSocket):
                     recording_rows_written = 0
                     recording_t0 = None
                     update_shm_read_pause()
-                    _try_start_alarm_sidecar()
+                    await push_shm_publish_slice()
+                    await _try_start_alarm_sidecar()
             except asyncio.TimeoutError:
                 pass
             except WebSocketDisconnect:
@@ -3469,21 +4343,28 @@ async def websocket_endpoint(ws: WebSocket):
                             recording_rows_written = max(0, rf.read().count(b"\n") - 1)
                     except OSError:
                         pass
+        _sp_fin = getattr(ws.app.state, "sidecar_perf_json_path", None)
         for aux in (
             recording_sidecar_status_path,
             recording_sidecar_names_path,
             recording_sidecar_alarms_path,
             recording_sidecar_alarm_exit_path,
+            recording_sidecar_shm_health_path,
+            _sp_fin,
         ):
             if aux and os.path.isfile(aux):
                 try:
                     os.remove(aux)
                 except OSError:
                     pass
+        ws.app.state.sidecar_perf_json_path = None
+        _unregister_sidecar_perf_session()
         recording_sidecar_status_path = None
         recording_sidecar_names_path = None
         recording_sidecar_alarms_path = None
         recording_sidecar_alarm_exit_path = None
+        recording_sidecar_shm_health_path = None
+        recording_sidecar_shm_health_off = 0
         recording_sidecar_alarm_delegate = False
         if recording_write_queue is not None and recording_writer_thread is not None:
             try:
@@ -3518,6 +4399,18 @@ async def websocket_endpoint(ws: WebSocket):
                 )
             except Exception as e:
                 print(f"[VarMonitor Web] No se pudo salvar REC al cerrar WS: {e}", flush=True)
+        if shm_write_mmap is not None:
+            try:
+                shm_write_mmap.close()
+            except OSError:
+                pass
+            shm_write_mmap = None
+        if shm_write_fd is not None:
+            try:
+                os.close(shm_write_fd)
+            except OSError:
+                pass
+            shm_write_fd = None
         if shm_reader:
             shm_reader.stop()
         counts = getattr(ws.app.state, "ws_monitored_counts", None)
@@ -3593,10 +4486,10 @@ def _find_available_port(host: str, start_port: int, max_offset: int = 10) -> in
 
 
 class _SuppressAdvancedStatsAccessLog(logging.Filter):
-    """No registrar en access log las peticiones OK a /api/advanced_stats (solo errores)."""
+    """No registrar en access log peticiones OK ruidosas (stats / perf)."""
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        if "/api/advanced_stats" in msg and " 200 " in msg:
+        if " 200 " in msg and ("/api/advanced_stats" in msg or "/api/perf" in msg):
             return False
         return True
 

@@ -40,6 +40,13 @@ El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.
 
 - Un **ResizeObserver** observa el nodo `#plotArea`. Cuando cambia el tamaño del área (p. ej. redimensionar ventana), se hace **Plotly.relayout** de cada contenedor de gráfico con el tamaño actual (`getBoundingClientRect()`), para que los gráficos se adapten al espacio disponible.
 
+## Panel Perf
+
+- Botón **Perf** en la cabecera: overlay a pantalla completa que consulta periódicamente **`GET /api/perf`** mientras está abierto.
+- Tres bloques: fases **Python**, **C++** (`write_shm_snapshot`) y **sidecar** (solo si hay grabación `sidecar_cpp` activa y el binario escribe el JSON de `--perf-file`). Tablas con último tiempo, EMA y número de muestras; barras apiladas por capa.
+- La primera petición **renueva el lease** de medición en el servidor (igual que `GET /api/advanced_stats?perf=1` desde la tira de estadísticas). Si el lease expira, el panel muestra un aviso hasta que se vuelva a abrir o se use estadísticas avanzadas.
+- Detalle de fases y optimizaciones del sidecar: [Rendimiento](performance.md).
+
 ## Atajos y otros
 
 - Teclado: Escape (cerrar overlays), Espacio (pausar/reanudar gráficos), Ctrl+Z / Ctrl+Y (deshacer/rehacer layout), R (grabación), S (screenshot), etc.

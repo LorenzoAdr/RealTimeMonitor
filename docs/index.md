@@ -11,6 +11,7 @@ Sistema de monitorización de variables en tiempo real para aplicaciones C++20. 
 - **[Backend (Python)](backend.md)**: `app.py`, descubrimiento de instancias, WebSocket, UdsBridge, ShmReader, alarmas y grabación.
 - **[Frontend](frontend.md)**: Estructura de `app.js`, columnas, gráficos Plotly, estado y persistencia.
 - **[Protocolos](protocols.md)**: Formato UDS (longitud + JSON), comandos, layout SHM, mensajes WebSocket.
+- **[Rendimiento](performance.md)**: SHM/UDS, panel Perf, `/api/perf`, optimizaciones del sidecar de grabación.
 - **[Integración C++](cpp-integration.md)**: Cómo enlazar `libvarmonitor`, VarMonitor, `write_shm_snapshot`, macros.
 - **[Resolución de problemas](troubleshooting.md)**: WSL/semáforos, "no conecta", gráficos vacíos, etc.
 

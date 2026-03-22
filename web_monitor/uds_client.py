@@ -108,3 +108,23 @@ class UdsBridge:
             return resp.get("ok", False)
         except Exception:
             return False
+
+    def set_perf_collect(self, enabled: bool) -> bool:
+        try:
+            resp = self._request({"cmd": "set_perf_collect", "enabled": bool(enabled)})
+            return bool(resp.get("ok", False))
+        except Exception:
+            return False
+
+    def set_shm_publish_slice(self, count: int, force_full: bool) -> bool:
+        try:
+            resp = self._request(
+                {
+                    "cmd": "set_shm_publish_slice",
+                    "count": int(count),
+                    "force_full": bool(force_full),
+                }
+            )
+            return resp.get("ok", False)
+        except Exception:
+            return False

@@ -560,8 +560,7 @@ main {
     min-width: calc(240px * var(--monitor-columns));
     flex-shrink: 0;
     max-width: 60%;
-    /* Solo la lista (#monitorList) hace scroll; si el panel también overflow-y:auto, algunos Chrome/OS
-       ocultan la barra del hijo o delegan el scroll al padre de forma confusa. */
+    /* Solo #monitorListScroll hace scroll; el panel sin overflow-y evita barras duplicadas (Chrome/OS). */
     min-height: 0;
     overflow: hidden;
     display: flex;
@@ -1513,14 +1512,29 @@ main {
     color: var(--text-dim);
 }
 
-/* --- Monitor list --- */
-.monitor-list {
-    flex: 1 1 auto;
+/*
+ * Puerto de scroll separado del cuerpo con column-count: en Firefox, multicol + overflow en el mismo
+ * nodo suele impedir un scrollport correcto (sin overflow → sin barra). Chromium/pywebview lo toleraba.
+ */
+.monitor-list-scroll {
+    flex: 1 1 0;
     min-height: 0;
-    /* Scroll explícito en la lista; reserva hueco para barra (evita overlay “invisible” en Chrome). */
+    min-width: 0;
     overflow-y: auto;
     overflow-x: hidden;
     scrollbar-gutter: stable;
+    /* Firefox ignora ::-webkit-scrollbar; auto suele mostrar barra clásica más visible que thin. */
+    scrollbar-width: auto;
+    scrollbar-color: var(--border) rgba(15, 17, 23, 0.35);
+}
+
+body.theme-light .monitor-list-scroll {
+    scrollbar-color: var(--border) rgba(0, 0, 0, 0.06);
+}
+
+/* --- Monitor list (cuerpo: columnas; el scroll lo hace .monitor-list-scroll) --- */
+.monitor-list {
+    width: 100%;
     padding: 4px;
     column-count: var(--monitor-columns);
     column-gap: 8px;
@@ -2826,6 +2840,163 @@ body.monitor-compact .stats-panel {
 #logOverlay .log-line.log-line-error { color: #ef4444; }
 #logOverlay .log-line.log-line-warn { color: #f59e0b; }
 #logOverlay .log-line.log-line-req { color: #3b82f6; }
+
+/* Panel Perf (fases C++ / Python / navegador) */
+#perfOverlay .perf-modal {
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    width: min(920px, 94vw);
+    max-height: min(720px, 82vh);
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+}
+#perfOverlay .perf-intro {
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--text-dim);
+    padding: 0 18px 10px;
+    margin: 0;
+    border-bottom: 1px solid var(--border);
+}
+#perfOverlay .perf-panel-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 18px 16px;
+}
+#perfOverlay .perf-layer {
+    margin-bottom: 20px;
+}
+#perfOverlay .perf-layer h3 {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--accent);
+    margin: 0 0 8px;
+}
+#perfOverlay .perf-layer-note {
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--text-dim);
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    background: rgba(108, 140, 255, 0.08);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+#perfOverlay .perf-layer-note code {
+    font-size: 0.85em;
+    color: var(--text);
+}
+#perfOverlay .perf-layer-note strong {
+    color: var(--text);
+    font-weight: 600;
+}
+#perfOverlay .perf-bar {
+    display: flex;
+    height: 14px;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+}
+#perfOverlay .perf-bar-empty {
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
+#perfOverlay .perf-bar-seg {
+    min-width: 2px;
+    height: 100%;
+    transition: width 0.15s ease;
+}
+#perfOverlay .perf-bar-block {
+    margin-bottom: 10px;
+}
+#perfOverlay .perf-bar-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+    margin-top: 8px;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    color: var(--text-dim);
+}
+#perfOverlay .perf-bar-legend-title {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: 4px;
+}
+#perfOverlay .perf-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+}
+#perfOverlay .perf-legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+body.theme-light #perfOverlay .perf-legend-swatch {
+    border-color: rgba(0, 0, 0, 0.12);
+}
+#perfOverlay .perf-legend-label {
+    word-break: break-all;
+    font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 0.7rem;
+}
+#perfOverlay .perf-th-swatch {
+    width: 28px;
+    padding-left: 6px !important;
+    padding-right: 4px !important;
+}
+#perfOverlay .perf-td-swatch {
+    width: 28px;
+    vertical-align: middle;
+    padding: 4px 6px !important;
+}
+#perfOverlay .perf-row-swatch {
+    display: block;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+body.theme-light #perfOverlay .perf-row-swatch {
+    border-color: rgba(0, 0, 0, 0.12);
+}
+#perfOverlay .perf-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.76rem;
+    font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+}
+#perfOverlay .perf-table th,
+#perfOverlay .perf-table td {
+    text-align: left;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+}
+#perfOverlay .perf-table th {
+    color: var(--text-dim);
+    font-weight: 600;
+}
+#perfOverlay .perf-hint {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    margin: 8px 0 0;
+}
 
 .btn-folder {
     font-size: 1em;

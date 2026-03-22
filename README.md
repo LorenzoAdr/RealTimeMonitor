@@ -65,9 +65,10 @@ Minimal example:
 web_port = 8080
 ```
 
-Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**.
+Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**, **`recording_backend`**, **`shm_parse_hz_sidecar_recording`**, `recording_sidecar_bin`, `sidecar_cpu_affinity`, etc.
 
-- **shm_max_vars** (integer, default 2048): maximum variables that fit in the SHM segment. If you monitor more than this, only the first get values; the rest show "--". Segment size ≈ 32 + shm_max_vars×137 bytes (e.g. 2048 → ~274 KiB). Must match in C++ and Python; **restart the C++ process and the Python backend** after changing it.
+- **shm_max_vars** (integer, default 2048): maximum SHM v2 table rows. Segment size ≈ 64 + shm_max_vars×176 + shm_max_vars×shm_ring_depth×16 (default ring depth 64). Must match in C++ and Python; **restart both** after changing `shm_max_vars` or `shm_ring_depth`.
+- **Native recording**: with **`recording_backend = sidecar_cpp`**, the **`varmon_sidecar`** binary writes the TSV while Python keeps updating the UI from SHM at a capped rate (**`shm_parse_hz_sidecar_recording`**, default 30 Hz; `0` = pump-only on the main sem). The **Perf** panel merges Python, C++, and sidecar phase timings via **`GET /api/perf`**. See **`docs/performance.md`** / **`docs_en/performance.md`** and **`docs/backend.md`** / **`docs_en/backend.md`**.
 
 Config file path: environment variable `VARMON_CONFIG` or in C++ `varmon::set_config_path(...)`.
 
