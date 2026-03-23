@@ -9,7 +9,12 @@
 
 services:
   varmonitor-web:
-    build: ./web_monitor
+    build:
+      context: .
+      dockerfile: web_monitor/Dockerfile
+      args:
+        REQUIREMENTS_PATH: web_monitor/requirements-docker.txt
+        APP_COPY: web_monitor
     container_name: varmonitor-web-host
     network_mode: host
     ipc: host

@@ -1,0 +1,12 @@
+# Contexto de build: raíz del repo (docker-compose con args; ver web_monitor/Dockerfile).
+.git
+build
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+web_monitor/.venv
+web_monitor/.venv-build
+web_monitor/dist
+web_monitor/recordings/*.tsv
+web_monitor/recordings/*.log

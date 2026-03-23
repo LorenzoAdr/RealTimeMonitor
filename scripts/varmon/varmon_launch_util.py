@@ -59,6 +59,17 @@ def resolve_packaged_web_bin() -> Path | None:
     return p.resolve()
 
 
+def chdir_for_packaged_web(packaged: Path, *, install_dir_env: str = "VARMON_INSTALL_DIR") -> None:
+    """Cwd típico para el onefile: directorio de instalación si existe; si no, el del binario."""
+    raw = os.environ.get(install_dir_env, "").strip()
+    if raw:
+        d = Path(raw).expanduser()
+        if d.is_dir():
+            os.chdir(d)
+            return
+    os.chdir(str(packaged.parent))
+
+
 def python_exe_for_web(web_dir: Path) -> Path:
     venv_py = web_dir / ".venv" / "bin" / "python"
     if venv_py.is_file():

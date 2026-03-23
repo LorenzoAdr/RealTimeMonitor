@@ -11,6 +11,12 @@ VENV="$WM/.venv-build"
 PY="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 cd "$WM"
+for req in requirements-docker.txt requirements-build.txt; do
+    if [[ ! -f "$req" ]]; then
+        echo "[build_varmonitor_web] No se encuentra $WM/$req (¿repo incompleto o ruta distinta?)" >&2
+        exit 1
+    fi
+done
 if [[ ! -x "$PY" ]]; then
     python3 -m venv "$VENV"
 fi

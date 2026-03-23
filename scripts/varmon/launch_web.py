@@ -16,6 +16,7 @@ APP = WEB / "app.py"
 
 from varmon_launch_util import (
     PACKAGED_WEB_ENV,
+    chdir_for_packaged_web,
     python_exe_for_web,
     resolve_packaged_web_bin,
     resolve_taskset_affinities,
@@ -24,22 +25,34 @@ from varmon_launch_util import (
 
 
 def main() -> None:
-    os.chdir(WEB)
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     vc = os.environ.get("VARMON_CONFIG", "").strip()
     if vc:
         print(f"[launch_web] VARMON_CONFIG={vc}", flush=True)
 
     packaged = resolve_packaged_web_bin()
+    run_mode = (os.environ.get("VARMON_RUN_MODE") or "code").strip().lower()
+
     if packaged is not None:
         print(f"[launch_web] Backend empaquetado: {packaged}", flush=True)
+        chdir_for_packaged_web(packaged)
+    elif run_mode == "package":
+        print(
+            "[launch_web] VARMON_RUN_MODE=package pero no hay backend empaquetado válido. "
+            f"Exporta {PACKAGED_WEB_ENV} (p. ej. `source scripts/simple_config.sh`) "
+            "o coloca el binario en VARMON_INSTALL_DIR.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     else:
         if not APP.is_file():
             print(
-                f"No se encuentra {APP}. Crea el venv (./scripts/varmon/setup.sh) o define {PACKAGED_WEB_ENV}.",
+                f"No se encuentra {APP}. Crea el venv (./scripts/varmon/setup.sh) "
+                f"o usa modo package con {PACKAGED_WEB_ENV}.",
                 file=sys.stderr,
             )
             sys.exit(1)
+        os.chdir(WEB)
 
     _, py_aff = resolve_taskset_affinities()
     if packaged is not None:

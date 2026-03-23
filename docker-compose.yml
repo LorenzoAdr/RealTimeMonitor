@@ -7,7 +7,12 @@
 
 services:
   web-monitor:
-    build: ./web_monitor
+    build:
+      context: .
+      dockerfile: web_monitor/Dockerfile
+      args:
+        REQUIREMENTS_PATH: web_monitor/requirements-docker.txt
+        APP_COPY: web_monitor
     ports:
       - "8080:8080"
     volumes:
