@@ -1582,6 +1582,20 @@ body.theme-light .monitor-list-scroll {
     margin-bottom: 0;
     min-width: 0;
 }
+/* Sin margen inferior del item: el stride ya incluye MONITOR_VM_ROW_GAP en JS (evita doble hueco). */
+.monitor-list.monitor-list--virtual .monitor-item {
+    margin-bottom: 0;
+}
+/*
+ * Con muchas columnas las celdas son estrechas; las etiquetas de estado hacían wrap a 2+ líneas,
+ * la medición de fila subía hasta el tope (80px) y el espaciado parecía “hincharse” al cambiar columnas.
+ */
+.monitor-list.monitor-list--virtual .mon-status-tags {
+    flex-wrap: nowrap;
+    max-width: none;
+    min-width: 0;
+    overflow: hidden;
+}
 
 .monitor-list.mon-drop-over {
     border: 1px dashed var(--accent);

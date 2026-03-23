@@ -6436,18 +6436,18 @@
     function measureMonitorVmRowHeightFromSlice(force) {
         if (!monitorVmRows || !monitorListEl) return;
         if (!force && monitorListEl._vmRowFrozen) return;
+        /*
+         * Medir solo .monitor-item (contenido natural). El .monitor-item-wrap estira al alto del grid
+         * (--monitor-vm-row-h), así que su offsetHeight era casi el stride anterior + bucle +2px hasta 80.
+         */
         let maxH = 0;
-        monitorVmRows.querySelectorAll(".monitor-vm-row").forEach((row) => {
-            const h = row.offsetHeight;
-            if (h > maxH) maxH = h;
-        });
-        monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach((w) => {
-            const h = w.offsetHeight;
+        monitorVmRows.querySelectorAll(".monitor-item").forEach((el) => {
+            const h = el.offsetHeight;
             if (h > maxH) maxH = h;
         });
         if (maxH > 0) {
-            /* stride = contenido + hueco fijo; scrollTop/spacers usan el mismo valor que height de fila. */
-            monitorVmRowPx = Math.max(28, Math.min(80, Math.ceil(maxH) + MONITOR_VM_ROW_GAP));
+            /* stride = contenido + hueco entre filas; scrollTop/spacers usan el mismo valor que height de fila. */
+            monitorVmRowPx = Math.max(28, Math.min(56, Math.ceil(maxH) + MONITOR_VM_ROW_GAP));
             monitorListEl._vmRowFrozen = true;
             monitorListEl.style.setProperty("--monitor-vm-row-h", monitorVmRowPx + "px");
         }
