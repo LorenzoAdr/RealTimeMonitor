@@ -1,8 +1,16 @@
 # VarMonitor — Real-time variable monitor
 
-Real-time variable monitoring for C++20 applications. Communication between your C++ app and the web monitor uses **Unix Domain Sockets (UDS)** and **shared memory (SHM)** with POSIX semaphores. Web UI for visualization, charts, alarms, TSV recording, and more.
+**VarMonitor** links a **C++20** process to a **browser-based** control room: live values, time-series plots, alarms, and disk recording—without TCP on the data path. Your app embeds **libvarmonitor**; the stack talks over **Unix domain sockets (UDS)** for RPC and **POSIX shared memory (SHM)** for high-rate snapshots. The web backend (FastAPI) maps the same SHM segment and pushes filtered updates to clients over **WebSockets**.
 
 > **Spanish:** detailed docs in Spanish live under [`docs/`](docs/); this README is in English for the default GitHub landing page.
+
+### How data moves (short)
+
+1. **UDS**: list/register/get/set variables, SHM subscription, perf lease, etc. (length-prefixed JSON).
+2. **SHM v2**: fixed header + table of subscribed variables + optional **ring-buffer arena** (per-variable time+value slots for ring export mode). Each publish bumps a global `seq` and does **`sem_post` on two semaphores**: one for the Python reader, one for **`varmon_sidecar`** (native recorder / alarm worker) so consumers never steal each other’s wakeups.
+3. **Browser**: only **monitored** names are sent in `vars_update`; rate is throttled (**Rel act**) and can drive **partial SHM export** in C++ during passive viewing to save CPU.
+
+See **[docs_en/protocols.md](docs_en/protocols.md)** for layout, semaphores, and sidecar semantics; **[docs_en/performance.md](docs_en/performance.md)** for dirty/skip-unchanged/slicing/async publish and sidecar recording optimizations.
 
 ## Full documentation
 
@@ -95,10 +103,12 @@ Minimal example:
 web_port = 8080
 ```
 
-Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**, **`recording_backend`**, **`shm_parse_hz_sidecar_recording`**, `recording_sidecar_bin`, `sidecar_cpu_affinity`, etc.
+Optional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_password`, `server_state_dir`, **`shm_max_vars`**, **`shm_ring_depth`**, **`shm_default_export_mode`**, **`shm_publish_*`**, **`shm_async_publish`**, **`recording_backend`**, **`shm_parse_hz_sidecar_recording`**, `recording_sidecar_bin`, **`sidecar_cpu_affinity`**, etc.
 
-- **shm_max_vars** (integer, default 2048): maximum SHM v2 table rows. Segment size ≈ 64 + shm_max_vars×176 + shm_max_vars×shm_ring_depth×16 (default ring depth 64). Must match in C++ and Python; **restart both** after changing `shm_max_vars` or `shm_ring_depth`.
-- **Native recording**: with **`recording_backend = sidecar_cpp`**, the **`varmon_sidecar`** binary writes the TSV while Python keeps updating the UI from SHM at a capped rate (**`shm_parse_hz_sidecar_recording`**, default 30 Hz; `0` = pump-only on the main sem). The **Perf** panel merges Python, C++, and sidecar phase timings via **`GET /api/perf`**. See **`docs/performance.md`** / **`docs_en/performance.md`** and **`docs/backend.md`** / **`docs_en/backend.md`**.
+- **shm_max_vars** / **shm_ring_depth**: size the v2 segment (table + ring arena). Must match C++ and Python; **restart both** after changes.
+- **C++ publisher tuning**: `shm_publish_dirty_mode`, `shm_publish_full_refresh_cycles`, `shm_publish_skip_unchanged`, `shm_publish_slice_count`, `shm_async_publish` — see **[docs_en/performance.md](docs_en/performance.md)**.
+- **Native recording**: **`recording_backend = sidecar_cpp`** runs **`varmon_sidecar`** on **`sem_sidecar_name`**; Python uses **`sem_name`**. UI refresh from SHM can be capped (**`shm_parse_hz_sidecar_recording`**, default 30 Hz; `0` = drain main sem without parsing — values freeze). **`sidecar_cpu_affinity`** (Linux) pins sidecar PIDs via `sched_setaffinity`.
+- **Perf**: header **Perf** + **`GET /api/perf`** aggregate Python, C++ (`shm_perf_us`), and sidecar (`--perf-file`) phases when a lease is active.
 
 Config file path: environment variable `VARMON_CONFIG` or in C++ `varmon::set_config_path(...)`.
 
@@ -124,9 +134,13 @@ With macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
 
 ## Web monitor features
 
-- Three columns: available variables, live monitor, charts.
-- **Live**, **Analysis**, and **hybrid Replay** modes (TSV + SHM/C++ with per-variable imposition).
-- Dynamic charts (Plotly), Hi/Lo alarms, TSV recording (backend), notifications, computed variables, save/load settings, remote access via `web_port`, keyboard shortcuts (R record, S screenshot, etc.).
+- **Layout**: variable browser, monitored list (drag to plots, virtualized when large), multi-plot workspace (Plotly), advanced tools drawer (segments, notes, PDF, etc.).
+- **Modes**: **Live** (SHM + C++), **Analysis** (offline TSV), **Replay** (TSV timeline with optional per-variable imposition onto live SHM).
+- **Formats & ARINC**: per-variable display format (decimal/sci/hex/bin), optional **unit conversion** and ARINC 429 word view where applicable.
+- **Alarms**: Hi/Lo per variable; rolling capture; optional **native** evaluation path via sidecar + rules TSV.
+- **Recording**: Python writer thread or **`varmon_sidecar`** TSV path; progress, path toasts, optional base64 send on finish.
+- **Performance UX**: **Rel act** (WebSocket cadence), linked **SHM publish slice**, adaptive tab throttling, chart downsampling, **Perf** tri-layer panel.
+- **Ops**: optional auth password, multi-instance port scan, built-in log viewer, MkDocs help (`/docs/en/`), settings persistence, keyboard shortcuts (e.g. record, screenshot).
 
 ## Project layout
 

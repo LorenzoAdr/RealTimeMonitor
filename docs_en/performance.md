@@ -10,6 +10,40 @@ The stack targets **maximum performance**: low latency and low CPU/network use b
 
 This avoids network and CPU overhead on the live data path.
 
+## C++ publisher (`libvarmonitor` / `shm_publisher`)
+
+Beyond SHM+UDS, the binary linking **libvarmonitor** applies several optimizations inside **`write_snapshot`** (once per publish cycle). Keys live in `varmon.conf` (C++ only; restart after changes).
+
+### Dirty mode (`shm_publish_dirty_mode`, default 1)
+
+- Variables marked with **`mark_dirty(name)`** (e.g. after UDS `set_var` or after applying a one-shot SHM **import**) go into an in-memory **dirty** set.
+- Between **full refreshes**, the publisher can build a mask and **skip getters** for rows that are neither dirty nor in the current export slice, which helps when most variables are unchanged.
+- **`shm_publish_full_refresh_cycles`** (default **1**): how often a **full** refresh of all export rows is forced. With **1**, *every* cycle is a full refresh: safe default compatible with apps that do **not** call `mark_dirty` when mutating data behind the API. If you raise this (e.g. 5–10) **and** your app marks dirty correctly, you reduce reads on intermediate cycles.
+
+### Skip unchanged (`shm_publish_skip_unchanged`, default 1)
+
+- After the scalar value is obtained, if **type and double value** match the last publish for that row, the publisher **skips writing** the mmap row (less memory traffic and cache churn).
+- **`row_pub_seq`** may stay at the previous value: Python can **reuse** the decoded row when comparing sequences (works with partial slicing).
+
+### Export slice (`shm_publish_slice_count` + UDS `set_shm_publish_slice`)
+
+- Described in [Protocols](protocols.md): in partial mode only a subset of subscription indices is updated per cycle; header (`seq`, `timestamp`) always updates. The backend often aligns **N** with **Rel act** during passive monitoring.
+
+### Async SHM publish thread (`shm_async_publish`)
+
+- With **1**, `write_shm_snapshot()` on the RT thread only sets a **pending** flag and notifies a **dedicated thread** that runs `write_snapshot`. Goal: **lower jitter** on the loop that calls the monitor.
+- With **0**, publishing is **synchronous** in the caller (classic behavior).
+
+### CPU affinity
+
+- **libvarmonitor** does not set affinity for the user’s C++ process (use `taskset`/OS policy).
+- The Python backend may set **`sidecar_cpu_affinity`** for **`varmon_sidecar`** (recording and alarms) via `sched_setaffinity` on Linux, pinning recorder work away from your RT cores. See [Setup](setup.md).
+
+### Other pieces
+
+- **Subscription cache** in the publisher: snapshot of the name list only when the subscription generation changes, avoiding massive per-cycle `std::string` copies.
+- **Reused buffers** in `write_snapshot`: static vectors for masks, export indices, and scalar batch to cut allocations on the hot path.
+
 ## Measures to limit load
 
 ### Monitored variables only

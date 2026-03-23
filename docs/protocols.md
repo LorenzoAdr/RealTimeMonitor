@@ -84,14 +84,15 @@ El C++ devuelve siempre un JSON con al menos `"type"`:
 ### Nombres
 
 - **Segmento SHM** (en `/dev/shm/`): nombre `varmon-<user>-<pid>` (ruta completa `/dev/shm/varmon-<user>-<pid>`).
-- **Semáforo POSIX**: nombre `/varmon-<user>-<pid>` (con barra inicial). Mismo `<user>` y `<pid>` que el segmento.
+- **Semáforo POSIX (lector principal)**: nombre `/varmon-<user>-<pid>` (con barra inicial). Lo espera el hilo **`ShmReader`** de Python para cada snapshot publicado.
+- **Segundo semáforo POSIX (sidecar)**: nombre **`/varmon-<user>-<pid>-sc`**. Mismo `<user>` y `<pid>`. Lo espera **`varmon_sidecar`** (grabación nativa y, si aplica, monitor de alarmas en C++).
 
-Cada proceso C++ tiene un segmento y un semáforo; el mismo par user/pid identifica UDS y SHM.
+Cada proceso C++ tiene **un segmento SHM y dos semáforos**; el par user/pid identifica UDS y SHM. Ver [segundo semáforo y consumidores](#segundo-semáforo-y-consumidores-independientes).
 
 ### Creación y destrucción en C++
 
-- **init()** (tras `cleanup_stale_shm_for_user()`): `shm_open`, `ftruncate`, `mmap`, `sem_open`. Si falla, se desvinculan recursos.
-- **shutdown()**: `sem_close`/`sem_unlink`, `munmap`/`close`, `shm_unlink`.
+- **init()** (tras `cleanup_stale_shm_for_user()`): `shm_open`, `ftruncate`, `mmap`, `sem_open` del sem principal **y** `sem_open` del sem **`-sc`**. Si falla, se desvinculan recursos.
+- **shutdown()**: `sem_close`/`sem_unlink` de **ambos** semáforos, `munmap`/`close`, `shm_unlink`.
 
 ### Limpieza de segmentos zombie
 
@@ -112,6 +113,37 @@ El **orden de filas** es el de `set_shm_subscription` (lista ordenada sin duplic
 **Compatibilidad v1:** segmentos antiguos con `version` = 1: cabecera 32 B y entradas de 137 B; Python y `varmon_sidecar` siguen leyendo esa disposición.
 
 **Tamaño (v2):** `64 + shm_max_vars × 176 + shm_max_vars × shm_ring_depth × 16` bytes. `shm_ring_depth` y `shm_default_export_mode` las lee solo el proceso C++ desde `varmon.conf`.
+
+### Arena de anillos (ring buffer): qué es y para qué sirve
+
+Tras la **tabla de filas** (una fila por variable suscrita, hasta `shm_max_vars`), el segmento incluye una **arena contigua** reservada para los **anillos por variable**.
+
+- **Partición lógica**: para cada índice de fila en modo **export anillo** (`mode = 2`), la fila guarda `ring_rel_off` y `ring_capacity` (= `shm_ring_depth`). Ese offset apunta dentro del arena a un bloque de **`ring_depth × 16` bytes** (16 = dos `double` en little-endian: instante de muestra + valor escalar).
+- **Productor (C++)**: en cada publicación, si la variable está en modo anillo, además del valor en la fila se hace **push** en la ranura `(write_idx % depth)` y se incrementa `write_idx`. El campo **`mirror_value`** mantiene el **último** valor escrito: sirve para UI, alarmas y lectores que solo necesitan el escalar actual sin recorrer el anillo.
+- **Objetivo**:
+  1. **Historial corto embebido** sin asignaciones dinámicas ni otro segmento: todo el layout es predecible y se mapea una sola vez.
+  2. **Grabación y análisis**: el sidecar puede **reproducir** líneas TSV a partir de las ranuras nuevas desde la última lectura (replay de anillo), en lugar de depender solo del valor instantáneo.
+  3. **Coherencia con snapshot**: las filas en modo **snapshot** siguen siendo un único valor por ciclo; el anillo es opcional por variable según `shm_default_export_mode` y transiciones automáticas desde snapshot cuando el defecto es anillo.
+
+Si `shm_ring_depth` es 0 o la fila no está en modo anillo, esa variable no usa ranuras en el arena para datos de serie (la capacidad en fila puede ser 0).
+
+### Segundo semáforo y consumidores independientes
+
+En cada snapshot válido, el C++ ejecuta **`post_shm_readers()`**: hace **`sem_post`** en el semáforo **principal** y otro **`sem_post`** en el semáforo **sidecar** (`…-sc`).
+
+- Un único semáforo compartido entre **Python** y **sidecar** sería problemático: ambos harían `sem_wait`. El contador POSIX mezclaría señales; un consumidor podría **consumir** un `post` destinado al otro, o habría que drenar artificialmente posts “extra”, complicando la semántica **un snapshot → un despertar por consumidor**.
+- Con **dos semáforos**, el productor incrementa **independientemente** el contador de cada lector. Tras un snapshot hay **un post para Python** y **un post para el sidecar**: cada uno hace `sem_wait` en **su** sem sin competir con el otro.
+- **`ShmReader`** (monitor web) usa solo **`sem_name`**. **`varmon_sidecar`** debe usar **`sem_sidecar_name`** (lo devuelve `server_info`). Así la grabación nativa y el bucle de alarmas en C++ no roban ciclos de espera al backend Python.
+
+La limpieza de segmentos zombie en `cleanup_stale_shm_for_user()` debe desvincular **ambos** nombres de semáforo asociados al prefijo del usuario cuando el PID ya no existe (comportamiento actual del publicador).
+
+### Proceso sidecar (`varmon_sidecar`)
+
+El **sidecar** es un binario C++ **aparte** del proceso que ejecuta `VarMonitor` y el lazo RT. Comparte con el monitor web **solo** el segmento SHM (solo lectura/escritura según caso) y el **semáforo `-sc`**, no el socket UDS del servidor de variables.
+
+- **Grabación `sidecar_cpp`**: el backend Python lanza el sidecar con `shm_name`, lista de columnas (`names-file`) y **`sem_sidecar_name`**. El sidecar espera un `sem_post` por snapshot, lee el mmap con el mismo layout que `shm_reader.py`, formatea filas TSV y las escribe a disco. Python puede limitar cuántas veces por segundo **parsea** el mmap para la UI (`shm_parse_hz_sidecar_recording`), sin frenar la escritura del TSV en el sidecar.
+- **Alarmas nativas**: con reglas definidas en TSV, puede ejecutarse en modo `--alarm-monitor`, evaluando umbrales en cada despertar del sem **sidecar** y emitiendo eventos/salidas configuradas.
+- **Motivación**: sacar del proceso Python el trabajo intensivo de barrido de tablas SHM grandes y de formateo TSV, y evitar que el lector web compita por un único semáforo con ese consumidor. Más detalle en [Rendimiento](performance.md) (grabación nativa y fases del sidecar).
 
 ### Flujo de escritura (C++)
 

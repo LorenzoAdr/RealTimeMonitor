@@ -10,6 +10,40 @@ La herramienta está orientada a **máxima performance**: minimizar latencia y u
 
 Con esto se evita sobrecarga de red y de CPU en el camino crítico de datos en vivo.
 
+## Publicador C++ (`libvarmonitor` / `shm_publisher`)
+
+Además de SHM+UDS, el binario que enlaza **libvarmonitor** aplica varias optimizaciones en **`write_snapshot`** (publicación por ciclo). Claves en `varmon.conf` (solo C++; reiniciar proceso tras cambios):
+
+### Modo dirty (`shm_publish_dirty_mode`, por defecto 1)
+
+- Las variables marcadas con **`mark_dirty(nombre)`** (p. ej. tras `set_var` por UDS o tras aplicar un **import** SHM one-shot) entran en un conjunto **dirty** en memoria.
+- Entre **refrescos completos**, el publicador puede construir una máscara y **omitir getters** (`get_var` / lectura de punteros rápidos) para filas no dirty y no incluidas en el troceo del ciclo, reduciendo trabajo cuando muchas variables no cambian.
+- **`shm_publish_full_refresh_cycles`** (por defecto **1**): cada cuántos ciclos de publicación se fuerza un refresco completo de todas las filas export. Con **1**, *cada* ciclo es refresco completo: comportamiento seguro y compatible con aplicaciones que **no** llaman a `mark_dirty` al mutar datos por detrás. Si subes este valor (p. ej. 5 o 10) **y** tu aplicación marca dirty solo donde corresponde, reduces lecturas de variables en ciclos intermedios.
+
+### Skip unchanged (`shm_publish_skip_unchanged`, por defecto 1)
+
+- Tras obtener el valor escalar de una fila, si **tipo y valor double** coinciden con la última publicación en esa fila, se **omite la escritura** en el mmap (menos ancho de banda de memoria y menos invalidación de caché).
+- La fila puede conservar el **`row_pub_seq`** anterior: el lector Python puede **reutilizar** la entrada ya decodificada si compara secuencias (coherente con troceo parcial).
+
+### Troceo de export (`shm_publish_slice_count` + UDS `set_shm_publish_slice`)
+
+- Ya descrito en [Protocolos](protocols.md): en modo parcial, solo un subconjunto de índices de suscripción se actualiza por ciclo; la cabecera (`seq`, `timestamp`) sí se actualiza siempre. El backend alinea a menudo este **N** con **Rel act** en monitorización pasiva.
+
+### Publicación SHM en hilo dedicado (`shm_async_publish`)
+
+- Con **1**, `write_shm_snapshot()` desde el hilo RT solo **enciende** una señal (`condition_variable`); un **hilo dedicado** ejecuta `write_snapshot` real. Objetivo: **menor jitter** en el lazo que llama al monitor (p. ej. control a tiempo real).
+- Con **0**, la publicación es **síncrona** en el llamador (comportamiento clásico).
+
+### Afinidad de CPU
+
+- **libvarmonitor** no fija afinidad del proceso C++ del usuario: eso queda a `taskset`/política del sistema.
+- El backend Python puede fijar **`sidecar_cpu_affinity`** para los procesos **`varmon_sidecar`** (grabación y alarmas) mediante `sched_setaffinity` en Linux, aislando núcleos para E/S y formato TSV sin robar del núcleo del RT del usuario. Ver [Instalación y configuración](setup.md).
+
+### Otras piezas
+
+- **Caché de suscripción** en el publicador: copia de la lista de nombres solo cuando cambia la generación de suscripción, evitando miles de copias de `std::string` por ciclo.
+- **Buffers reutilizados** (`write_snapshot`): vectores estáticos para máscaras, índices de export y batch de escalares, para reducir reservas en el camino caliente.
+
 ## Medidas para evitar sobrecarga de red y de máquina
 
 Además del uso de SHM y UDS, se aplican varias medidas para no saturar ni la red ni el navegador ni el backend.
