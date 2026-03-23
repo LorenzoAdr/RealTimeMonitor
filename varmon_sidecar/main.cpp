@@ -579,7 +579,7 @@ bool parse_snapshot(const uint8_t* base, size_t map_size, uint32_t max_vars, dou
     return false;
 }
 
-/** Añade representación TSV de una celda sin string temporal por valor (to_chars si está disponible). */
+/** Añade representación TSV de una celda sin string temporal por valor (to_chars solo enteros; ver nota). */
 static void append_tsv_cell(std::string& out, uint8_t type_byte, double raw) {
     if (type_byte == 2) { /* Bool */
         out += (raw != 0.0) ? "True" : "False";
@@ -591,15 +591,11 @@ static void append_tsv_cell(std::string& out, uint8_t type_byte, double raw) {
         if (r.ec == std::errc{}) out.append(ibuf, static_cast<size_t>(r.ptr - ibuf));
         return;
     }
+    /*
+     * No usar std::to_chars para double: en libstdc++ la sobrecarga float existe solo desde GCC 11;
+     * fuera (p. ej. GCC 9 en muchas distros) falla la resolución de sobrecarga en tiempo de compilación.
+     */
     char buf[64];
-    const auto r = std::to_chars(buf, buf + sizeof(buf), raw, std::chars_format::general, 17);
-    if (r.ec == std::errc{}) {
-        if (r.ptr - buf == 2 && buf[0] == '-' && buf[1] == '0')
-            out += '0';
-        else
-            out.append(buf, static_cast<size_t>(r.ptr - buf));
-        return;
-    }
     std::snprintf(buf, sizeof(buf), "%.17g", raw);
     if (std::strcmp(buf, "-0") == 0) {
         out += '0';
