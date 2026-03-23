@@ -582,10 +582,19 @@ void write_snapshot(VarMonitor* mon) {
             if (i < g_last_pub_valid.size())
                 g_last_pub_valid[static_cast<size_t>(i)] = 0;
             const uint8_t keep_mode = mode;
-            std::memset(row, 0, TABLE_ROW_SIZE);
-            size_t nl = std::min(sub_name.size(), NAME_MAX_LEN);
-            std::memcpy(row, sub_name.c_str(), nl);
-            row[ROW_MODE_OFF] = keep_mode;
+            if (keep_mode == MODE_EXPORT_RING) {
+                /* read_idx es propiedad del consumidor (sidecar); no tocarlo aquí. */
+                std::memset(row, 0, NAME_MAX_LEN);
+                size_t nl = std::min(sub_name.size(), NAME_MAX_LEN);
+                std::memcpy(row, sub_name.c_str(), nl);
+                row[ROW_MODE_OFF] = keep_mode;
+                ensure_ring_meta(row, i);
+            } else {
+                std::memset(row, 0, TABLE_ROW_SIZE);
+                size_t nl = std::min(sub_name.size(), NAME_MAX_LEN);
+                std::memcpy(row, sub_name.c_str(), nl);
+                row[ROW_MODE_OFF] = keep_mode;
+            }
             row_write_pub_seq(row, seq);
             continue;
         }
@@ -601,11 +610,20 @@ void write_snapshot(VarMonitor* mon) {
 
         const uint8_t export_mode = mode;
         size_t name_len = std::min(sub_name.size(), NAME_MAX_LEN);
-        std::memset(row, 0, TABLE_ROW_SIZE);
-        std::memcpy(row, sub_name.c_str(), name_len);
-        row[ROW_TYPE_OFF] = type_byte;
-        std::memcpy(row + ROW_VALUE_OFF, &val, 8);
-        row[ROW_MODE_OFF] = export_mode;
+        if (export_mode == MODE_EXPORT_RING) {
+            /* Preservar índices/metadatos del anillo; en especial read_idx (solo sidecar). */
+            std::memset(row, 0, NAME_MAX_LEN);
+            std::memcpy(row, sub_name.c_str(), name_len);
+            row[ROW_TYPE_OFF] = type_byte;
+            std::memcpy(row + ROW_VALUE_OFF, &val, 8);
+            row[ROW_MODE_OFF] = export_mode;
+        } else {
+            std::memset(row, 0, TABLE_ROW_SIZE);
+            std::memcpy(row, sub_name.c_str(), name_len);
+            row[ROW_TYPE_OFF] = type_byte;
+            std::memcpy(row + ROW_VALUE_OFF, &val, 8);
+            row[ROW_MODE_OFF] = export_mode;
+        }
 
         if (i < g_last_pub_valid.size()) {
             g_last_pub_valid[static_cast<size_t>(i)] = 1;

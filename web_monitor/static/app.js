@@ -10671,19 +10671,32 @@
         // Acumular buffer para gráficos desde el poll de monitorización (solo escalares; arrays en arrayElemHistory, computed en evalComputedVars).
         if (appendHistory) {
             const now = tsForHistBase;
-            for (let i = 0; i < accepted.length; i++) {
-                const v = accepted[i];
-                if (isComputed(v.name)) continue;
-                if (isArincDerivedName(v.name)) continue;
-                if (Array.isArray(v.value)) continue;
+            // Importante: vars_update en live puede venir en delta (solo cambios). Si aquí
+            // usáramos únicamente `accepted`, las señales constantes quedarían "a saltos".
+            // Para trazas continuas, empujamos el valor actual de todas las variables que
+            // realmente requieren histórico de plot.
+            const namesToSample = new Set();
+            for (let i = 0; i < accepted.length; i++) namesToSample.add(accepted[i].name);
+            for (const n of monitoredNames) {
+                if (needsScalarPlotHistory(n)) namesToSample.add(n);
+            }
+            for (const name of namesToSample) {
+                if (isComputed(name)) continue;
+                if (isArincDerivedName(name)) continue;
                 // En replay, solo bloqueamos histórico SHM para variables TSV impuestas.
-                if (isReplayMode() && isVarInTsv(v.name) && impositionNames.has(v.name)) continue;
-                const num = typeof v.value === "number" ? v.value : (v.value === true ? 1 : v.value === false ? 0 : Number(v.value));
+                if (isReplayMode() && isVarInTsv(name) && impositionNames.has(name)) continue;
+                const v = varsByName[name];
+                if (!v) continue;
+                if (Array.isArray(v.value)) continue;
+                if (!needsScalarPlotHistory(name)) continue;
+                const num =
+                    typeof v.value === "number"
+                        ? v.value
+                        : (v.value === true ? 1 : v.value === false ? 0 : Number(v.value));
                 if (!isFinite(num)) continue;
-                if (!needsScalarPlotHistory(v.name)) continue;
-                if (!historyCache[v.name]) historyCache[v.name] = { timestamps: [], values: [] };
-                historyCache[v.name].timestamps.push(now);
-                historyCache[v.name].values.push(num);
+                if (!historyCache[name]) historyCache[name] = { timestamps: [], values: [] };
+                historyCache[name].timestamps.push(now);
+                historyCache[name].values.push(num);
             }
             if (!isReplayMode()) trimLocalHistory();
         }

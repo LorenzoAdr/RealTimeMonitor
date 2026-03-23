@@ -62,6 +62,19 @@ constexpr size_t kHeaderRingArenaOff = 44u;
 #endif
 
 std::atomic<bool> g_stop{false};
+static bool g_ring_trace_env_cached = false;
+static bool g_ring_trace_enabled = false;
+
+static bool ring_trace_enabled() {
+    if (!g_ring_trace_env_cached) {
+        g_ring_trace_env_cached = true;
+        const char* v = std::getenv("VARMON_SIDECAR_RING_TRACE");
+        g_ring_trace_enabled =
+            (v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0 && std::strcmp(v, "false") != 0 &&
+             std::strcmp(v, "FALSE") != 0);
+    }
+    return g_ring_trace_enabled;
+}
 
 /** NDJSON append para que Python muestre en el visor de log retrasos SHM “reales” (grabación / alarmas sidecar). */
 class ShmHealthEmitter {
@@ -924,6 +937,14 @@ static int v2_ring_replay_extract_impl(uint8_t* base, size_t map_size, uint32_t 
     if (w0 < r0) return 0;
     const uint64_t pending = w0 - r0;
     if (pending == 0) return 0;
+    if (ring_trace_enabled()) {
+        std::fprintf(stderr,
+                     "[ring_trace] replay_probe pending=%llu r0=%llu w0=%llu cols=%zu cap0=%u map_ready=%d\n",
+                     static_cast<unsigned long long>(pending), static_cast<unsigned long long>(r0),
+                     static_cast<unsigned long long>(w0), cols.size(), static_cast<unsigned>(cols[0].cap),
+                     shared_map_ready ? 1 : 0);
+        std::fflush(stderr);
+    }
     for (const RingColInfo& c : cols) {
         if (c.r != r0 || c.w != w0) return 0;
         if (c.w - c.r > c.cap) return 0;
@@ -985,6 +1006,22 @@ static int v2_ring_replay_extract_impl(uint8_t* base, size_t map_size, uint32_t 
     }
     const auto t_build1 = rclock::now();
     if (perf_detail) perf_detail->record(21, SidecarPerf::micros(t_build0, t_build1));
+    if (ring_trace_enabled()) {
+        double ts_first = 0.0;
+        double ts_last = 0.0;
+        if (out_snap && !out_snap->empty()) {
+            ts_first = out_snap->front().first;
+            ts_last = out_snap->back().first;
+        } else if (out_lines && !out_lines->empty()) {
+            ts_first = out_lines->front().first;
+            ts_last = out_lines->back().first;
+        }
+        std::fprintf(stderr,
+                     "[ring_trace] replay_emit rows=%llu ts_first=%.9f ts_last=%.9f span_ms=%.3f\n",
+                     static_cast<unsigned long long>(pending), ts_first, ts_last,
+                     (ts_last >= ts_first ? (ts_last - ts_first) * 1000.0 : -1.0));
+        std::fflush(stderr);
+    }
 
     if (out_snap) return static_cast<int>(out_snap->size());
     return static_cast<int>(out_lines->size());
@@ -1552,6 +1589,13 @@ int main(int argc, char** argv) {
         const sc_clock::time_point t_rs0 = sc_clock::now();
         uint64_t cur_seq = 0;
         if (!read_shm_seq(base, map_size, cur_seq)) continue;
+        if (ring_trace_enabled()) {
+            std::fprintf(stderr, "[ring_trace] wake_seq cur=%llu last=%llu have_seq=%d\n",
+                         static_cast<unsigned long long>(cur_seq), static_cast<unsigned long long>(last_seq),
+                         have_seq ? 1 : 0);
+            std::fflush(stderr);
+        }
+        if (have_seq && cur_seq == last_seq) continue;
         const sc_clock::time_point t_rs1 = sc_clock::now();
         const uint64_t prev_seq = last_seq;
         const sc_clock::time_point t_sg0 = sc_clock::now();
@@ -1599,6 +1643,11 @@ int main(int argc, char** argv) {
             mbase, map_size, max_vars, col_names, replay_lines,
             alarm_rules.empty() ? nullptr : &replay_entries, row_time_fn, sc_perf.get(), ring_name_map,
             layout_cache.valid);
+        if (ring_trace_enabled()) {
+            std::fprintf(stderr, "[ring_trace] replay_n=%d cur_seq=%llu\n", replay_n,
+                         static_cast<unsigned long long>(cur_seq));
+            std::fflush(stderr);
+        }
         const sc_clock::time_point t_re1 = sc_clock::now();
         if (sc_perf) sc_perf->record(2, SidecarPerf::micros(t_re0, t_re1));
         if (replay_n > 0) {
