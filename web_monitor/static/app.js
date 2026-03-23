@@ -127,7 +127,7 @@
     const MONITOR_VM_THRESHOLD = 150;
     /** Filas extra arriba/abajo del viewport; más buffer = scroll rápido sin “huecos” (todo pre-renderizado en ~1 frame). */
     const MONITOR_VM_BUFFER = 12;
-    /** Separación vertical entre filas virtuales (debe coincidir con la lógica de altura en measure + CSS). */
+    /** Separación vertical entre filas virtuales (stride en measure + spacers). */
     const MONITOR_VM_ROW_GAP = 2;
     /**
      * Al arrastrar al gráfico, si la variable está en la preselección del monitor se asignan todas
@@ -213,6 +213,7 @@
     const recordPathAnalyzeBtn = document.getElementById("recordPathAnalyzeBtn");
     const monitorResizeHandle = document.getElementById("monitorResizeHandle");
     const compactMonitorSlider = document.getElementById("compactMonitorSlider");
+    const monitorGridLinesCheck = document.getElementById("monitorGridLinesCheck");
     const adaptiveLoadCheckbox = document.getElementById("adaptiveLoadCheckbox");
     const layoutUndoBtn = document.getElementById("layoutUndoBtn");
     const layoutRedoBtn = document.getElementById("layoutRedoBtn");
@@ -392,6 +393,8 @@
     let offlineSegments = [];
     let advancedPlotOpen = false;
     let compactMonitorLevel = 0;
+    /** Líneas de cuadrícula visibles en el panel de monitorización. */
+    let monitorGridLines = false;
     let adaptiveLoadEnabled = true;
     let downsampleMaxPoints = 2000;
     let renderStats = { lastMs: 0, avgMs: 0, fps: 0, traces: 0, points: 0, ticks: 0, lastTick: 0 };
@@ -1161,6 +1164,8 @@
             newGraphDropText: "Nuevo gráfico: suelta aquí para crear uno",
             removeGraphTitle: "Eliminar gráfico",
             monitorMenuTitle: "Más opciones",
+            monitorGridLinesLabel: "Mostrar cuadrícula",
+            monitorGridLinesTitle: "Bordes de celda alrededor de cada variable (fondo opaco para que no se mezcle con el panel).",
             timeAxisTitle: "t (s)",
             resetTimeBtn: "Reset tiempo",
             resetTimeTitle: "Reiniciar origen de tiempo y borrar historial de gráficos",
@@ -1252,6 +1257,8 @@
             newGraphDropText: "New plot: drop here to create one",
             removeGraphTitle: "Remove plot",
             monitorMenuTitle: "More options",
+            monitorGridLinesLabel: "Show grid",
+            monitorGridLinesTitle: "Cell borders around each variable (opaque fill so the panel grid does not show through).",
             timeAxisTitle: "t (s)",
             resetTimeBtn: "Reset time",
             resetTimeTitle: "Reset time origin and clear all graph history",
@@ -1524,6 +1531,10 @@
         if (advInfoLabel) advInfoLabel.textContent = tr.advInfoLabel || "Adv info";
         const monitorMenuBtnEl = document.getElementById("monitorMenuBtn");
         if (monitorMenuBtnEl) monitorMenuBtnEl.title = tr.monitorMenuTitle;
+        const monitorGridLinesLabelEl = document.getElementById("monitorGridLinesLabel");
+        if (monitorGridLinesLabelEl && tr.monitorGridLinesTitle) monitorGridLinesLabelEl.title = tr.monitorGridLinesTitle;
+        const monitorGridLinesLabelSpan = document.getElementById("monitorGridLinesLabelSpan");
+        if (monitorGridLinesLabelSpan && tr.monitorGridLinesLabel) monitorGridLinesLabelSpan.textContent = tr.monitorGridLinesLabel;
         const monitorFilterMenuBtnEl = document.getElementById("monitorFilterMenuBtn");
         if (monitorFilterMenuBtnEl) {
             monitorFilterMenuBtnEl.title = currentLang === "en"
@@ -1592,6 +1603,11 @@
         document.body.classList.toggle("monitor-compact", compactMonitorLevel > 0);
         document.documentElement.style.setProperty("--monitor-compact-level", String(Math.max(0, Math.min(100, compactMonitorLevel))));
         if (compactMonitorSlider) compactMonitorSlider.value = String(Math.max(0, Math.min(100, compactMonitorLevel)));
+    }
+
+    function applyMonitorGridLines() {
+        document.body.classList.toggle("monitor-grid-lines", monitorGridLines);
+        if (monitorGridLinesCheck) monitorGridLinesCheck.checked = monitorGridLines;
     }
 
     function renderPerfTelemetry() {
@@ -1810,6 +1826,7 @@
                 offlineRecordingName: offlineRecordingName || "",
                 offlineSpeed: offlineSpeedSelect ? offlineSpeedSelect.value : "1",
                 compactMonitor: compactMonitorLevel,
+                monitorGridLines: monitorGridLines,
                 adaptiveLoad: adaptiveLoadEnabled,
                 downsampleMaxPoints: downsampleMaxPoints,
                 notesByTs: notesByTs,
@@ -1908,6 +1925,10 @@
             }
             if (typeof cfg.compactMonitor === "boolean") compactMonitorLevel = cfg.compactMonitor ? 70 : 0;
             if (typeof cfg.compactMonitor === "number") compactMonitorLevel = Math.max(0, Math.min(100, cfg.compactMonitor));
+            if (typeof cfg.monitorGridLines === "boolean") monitorGridLines = cfg.monitorGridLines;
+            else if (typeof cfg.monitorGridDense === "boolean") {
+                /* legado: cuadrícula densa (layout); no migrar a líneas */
+            }
             if (typeof cfg.adaptiveLoad === "boolean") adaptiveLoadEnabled = cfg.adaptiveLoad;
             if (typeof cfg.downsampleMaxPoints === "number" && Number.isFinite(cfg.downsampleMaxPoints)) {
                 downsampleMaxPoints = Math.max(200, Math.floor(cfg.downsampleMaxPoints));
@@ -1978,6 +1999,7 @@
         notesByTs = [];
         offlineSegments = [];
         compactMonitorLevel = 0;
+        monitorGridLines = false;
         adaptiveLoadEnabled = true;
         downsampleMaxPoints = 2000;
         offlineFullLoadMaxMb = DEFAULT_OFFLINE_FULL_LOAD_MAX_MB;
@@ -1989,6 +2011,7 @@
         layoutHistoryPast = [];
         layoutHistoryFuture = [];
         updateCompactMonitorUi();
+        applyMonitorGridLines();
         if (adaptiveLoadCheckbox) adaptiveLoadCheckbox.checked = true;
         if (downsampleMaxPointsInput) downsampleMaxPointsInput.value = "2000";
         if (offlineFullLoadMaxMbInput) offlineFullLoadMaxMbInput.value = String(offlineFullLoadMaxMb);
@@ -2013,6 +2036,7 @@
     applyLanguage(currentLang);
     applyMonitorColumns();
     updateCompactMonitorUi();
+    applyMonitorGridLines();
     if (adaptiveLoadCheckbox) adaptiveLoadCheckbox.checked = !!adaptiveLoadEnabled;
     if (compactMonitorSlider) compactMonitorSlider.value = String(compactMonitorLevel);
     if (downsampleMaxPointsInput) downsampleMaxPointsInput.value = String(downsampleMaxPoints);
@@ -3296,7 +3320,7 @@
             toggleSettingsPanel();
         });
         document.addEventListener("click", (e) => {
-            if (!settingsPanel.contains(e.target) && e.target !== settingsBtn) {
+            if (!settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) {
                 settingsPanel.style.display = "none";
             }
         });
@@ -3320,7 +3344,7 @@
             if (!isVisible) refreshAlarmListPanel();
         });
         document.addEventListener("click", (e) => {
-            if (!monitorMenuPanel.contains(e.target) && e.target !== monitorMenuBtn) {
+            if (!monitorMenuPanel.contains(e.target) && !monitorMenuBtn.contains(e.target)) {
                 monitorMenuPanel.style.display = "none";
             }
         });
@@ -3345,7 +3369,7 @@
             }
         });
         document.addEventListener("click", (e) => {
-            if (!monitorFilterPanel.contains(e.target) && e.target !== monitorFilterMenuBtn) {
+            if (!monitorFilterPanel.contains(e.target) && !monitorFilterMenuBtn.contains(e.target)) {
                 monitorFilterPanel.style.display = "none";
                 monitorFilterMenuBtn.setAttribute("aria-expanded", "false");
             }
@@ -3388,6 +3412,13 @@
                 measureMonitorVmRowHeightFromSlice(true);
                 syncMonitorVirtualWindow();
             }
+            saveConfig();
+        });
+    }
+    if (monitorGridLinesCheck) {
+        monitorGridLinesCheck.addEventListener("change", () => {
+            monitorGridLines = !!monitorGridLinesCheck.checked;
+            applyMonitorGridLines();
             saveConfig();
         });
     }
@@ -3512,6 +3543,7 @@
             monitorColumns: monitorColumnsCount,
             monitorPaneWidth: monitorPaneWidthPx,
             compactMonitor: compactMonitorLevel,
+            monitorGridLines: monitorGridLines,
             adaptiveLoad: adaptiveLoadEnabled,
             downsampleMaxPoints: downsampleMaxPoints,
             notesByTs: notesByTs,
@@ -3599,6 +3631,7 @@
         if (typeof cfg.monitorPaneWidth === "number" && Number.isFinite(cfg.monitorPaneWidth) && cfg.monitorPaneWidth > 0) monitorPaneWidthPx = cfg.monitorPaneWidth; else monitorPaneWidthPx = null;
         if (typeof cfg.compactMonitor === "boolean") compactMonitorLevel = cfg.compactMonitor ? 70 : 0;
         if (typeof cfg.compactMonitor === "number") compactMonitorLevel = Math.max(0, Math.min(100, cfg.compactMonitor));
+        if (typeof cfg.monitorGridLines === "boolean") monitorGridLines = cfg.monitorGridLines;
         if (typeof cfg.adaptiveLoad === "boolean") adaptiveLoadEnabled = cfg.adaptiveLoad;
         if (typeof cfg.downsampleMaxPoints === "number" && Number.isFinite(cfg.downsampleMaxPoints)) downsampleMaxPoints = Math.max(200, Math.floor(cfg.downsampleMaxPoints));
         if (Array.isArray(cfg.notesByTs)) notesByTs = cfg.notesByTs;
@@ -3635,6 +3668,8 @@
         applyTheme(currentTheme);
         applyLanguage(currentLang);
         applyMonitorColumns();
+        updateCompactMonitorUi();
+        applyMonitorGridLines();
         restorePendingGeneratorsIfPossible();
     }
 
@@ -6367,8 +6402,13 @@
         return getVisibleMonitorNames().length >= MONITOR_VM_THRESHOLD;
     }
 
-    /** Panel de detalle (stats/ARINC) en zona de gráficos: se mantiene en 1 columna para no romper densidad visual. */
+    /**
+     * Panel de detalle (stats/ARINC): en 1 columna sin lista virtual va al dock junto a gráficos.
+     * Con 2+ columnas el detalle va inline en cada fila — salvo en lista virtual, donde las filas
+     * no son estables en el DOM y el detalle debe seguir en el dock (updateStatsPanel(null, …)).
+     */
     function monitorDetailPanelUsesDock() {
+        if (shouldUseMonitorVirtualList()) return true;
         return monitorColumnsCount <= 1;
     }
 
@@ -6625,7 +6665,8 @@
         nameEl.className = "mon-name";
         nameEl.textContent = formatNameWithHiddenLevels(name, hideLevels);
         nameEl.title = name;
-        nameEl.addEventListener("click", () => {
+        nameEl.addEventListener("click", (e) => {
+            e.stopPropagation();
             const useDock = monitorDetailPanelUsesDock();
             if (expandedStats.has(name)) expandedStats.delete(name);
             else {

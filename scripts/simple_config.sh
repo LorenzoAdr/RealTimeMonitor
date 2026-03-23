@@ -13,7 +13,7 @@
 
 # --- Usuario: edita debajo ---
 # Modo de ejecución: code | package
-VARMON_RUN_MODE="${VARMON_RUN_MODE:-package}"
+VARMON_RUN_MODE="${VARMON_RUN_MODE:-code}"
 
 # Con package: directorio tipo INSTALL_DIR (varmonitor-web, varmon_sidecar, varmon.conf, data/).
 # Déjalo vacío para usar por defecto: <repo>/web_monitor_version/

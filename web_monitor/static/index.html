@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarMonitor</title>
-    <link rel="stylesheet" href="/static/style.css?v=12">
+    <link rel="stylesheet" href="/static/style.css?v=15">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body class="theme-light">
@@ -371,6 +371,10 @@
                         <label class="settings-adv-checkbox">Compactado monitor:
                             <input type="range" id="compactMonitorSlider" min="0" max="100" step="1" value="0" title="Más a la derecha = monitor más compacto">
                         </label>
+                        <label class="settings-adv-checkbox" id="monitorGridLinesLabel">
+                            <input type="checkbox" id="monitorGridLinesCheck">
+                            <span id="monitorGridLinesLabelSpan">Mostrar cuadrícula</span>
+                        </label>
                         <div class="monitor-menu-row">
                             <button id="expandAllMonBtn" class="btn-small" title="Desplegar paneles de todas las variables monitorizadas">Desplegar todo</button>
                             <button id="collapseAllMonBtn" class="btn-small" title="Colapsar paneles de todas las variables monitorizadas">Colapsar todo</button>
@@ -494,6 +498,6 @@
         </section>
     </main>
 
-    <script src="/static/app.js?v=12"></script>
+    <script src="/static/app.js?v=15"></script>
 </body>
 </html>

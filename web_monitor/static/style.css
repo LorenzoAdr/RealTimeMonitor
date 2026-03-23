@@ -639,6 +639,8 @@ main {
 
 .col-monitor-header {
     position: relative;
+    z-index: 2;
+    background: var(--surface);
     flex-direction: column;
     align-items: stretch;
     justify-content: flex-start;
@@ -710,6 +712,7 @@ main {
 .monitor-menu-row .btn-small {
     flex: 1;
 }
+
 .template-row select {
     flex: 1;
     min-width: 100px;
@@ -1524,6 +1527,8 @@ main {
  * nodo suele impedir un scrollport correcto (sin overflow → sin barra). Chromium/pywebview lo toleraba.
  */
 .monitor-list-scroll {
+    position: relative;
+    z-index: 0;
     flex: 1 1 0;
     min-height: 0;
     min-width: 0;
@@ -1544,9 +1549,9 @@ body.theme-light .monitor-list-scroll {
 /* --- Monitor list (cuerpo: columnas; el scroll lo hace .monitor-list-scroll) --- */
 .monitor-list {
     width: 100%;
-    padding: 4px;
+    padding: 3px;
     column-count: var(--monitor-columns);
-    column-gap: 8px;
+    column-gap: 7px;
 }
 
 /* Lista virtual: altura total simulada con spacers + filas virtuales (1..N columnas). */
@@ -1564,7 +1569,7 @@ body.theme-light .monitor-list-scroll {
 .monitor-list.monitor-list--virtual .monitor-vm-row {
     display: grid;
     grid-template-columns: repeat(var(--monitor-vm-columns, 1), minmax(0, 1fr));
-    column-gap: 8px;
+    column-gap: 7px;
     margin-bottom: 0;
     flex-shrink: 0;
     box-sizing: border-box;
@@ -1597,12 +1602,29 @@ body.theme-light .monitor-list-scroll {
     overflow: hidden;
 }
 
+/*
+ * Cuadrícula visible: solo bordes de celda (sin patrón de fondo en el scroll: el gradiente
+ * se veía a través de las filas porque .monitor-item no tenía fondo opaco → “rejilla dentro” de cada caja).
+ */
+body.monitor-grid-lines .monitor-item {
+    background-color: var(--surface);
+    border-color: color-mix(in srgb, var(--border) 62%, transparent);
+}
+body.monitor-grid-lines .monitor-item:hover {
+    background-color: var(--surface-hover);
+}
+body.monitor-grid-lines .monitor-item-wrap {
+    outline: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+    outline-offset: -1px;
+    border-radius: 2px;
+}
+
 .monitor-list.mon-drop-over {
     border: 1px dashed var(--accent);
 }
 
 .monitor-item-wrap {
-    margin-bottom: 2px;
+    margin-bottom: 1px;
     break-inside: avoid;
     position: relative;
 }
@@ -1621,19 +1643,8 @@ body.theme-light .monitor-list-scroll {
 .monitor-item-wrap.monitor-drop-before::before { top: -1px; }
 .monitor-item-wrap.monitor-drop-after::after { bottom: -1px; }
 
-.monitor-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
-    border-radius: 4px;
-    border: 1px solid transparent;
-    transition: background 0.1s, border-color 0.15s;
-}
-.monitor-item:hover { background: var(--surface-hover); }
-
 body.monitor-compact .monitor-item {
-    padding: calc(5px - (var(--monitor-compact-level) * 0.03px)) calc(8px - (var(--monitor-compact-level) * 0.03px));
+    padding: calc(4px - (var(--monitor-compact-level) * 0.03px)) calc(7px - (var(--monitor-compact-level) * 0.03px));
     margin-bottom: 1px;
 }
 body.monitor-compact .monitor-item .mon-name {
@@ -1660,9 +1671,9 @@ body.monitor-compact .stats-panel {
 .monitor-item {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
-    margin-bottom: 2px;
+    gap: 5px;
+    padding: 4px 7px;
+    margin-bottom: 1px;
     border-radius: 4px;
     border: 1px solid transparent;
     transition: background 0.1s, border-color 0.15s;
