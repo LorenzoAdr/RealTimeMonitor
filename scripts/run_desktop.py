@@ -5,7 +5,9 @@ Arranca web_monitor/app.py y muestra la interfaz:
 • Linux/macOS/Windows “de verdad”: ventana embebida con pywebview + Qt WebEngine
   (pip: requirements-desktop.txt).
 
-• WSL: sin WSLg se abre el navegador de Windows. La URL usa la IP virtual de WSL
+• WSL: se abre el navegador de Windows en modo aplicación (`--app=URL`) si existe
+  Chrome/Edge/Brave bajo `C:\\Program Files\\...` (visto desde WSL como `/mnt/c/...`).
+  Override: `VARMON_WINDOWS_BROWSER` con ruta al .exe. La URL usa la IP virtual de WSL
   (hostname -I), alcanzable desde Windows sin depender solo del reenvío de
   localhost. Opcional: variable VARMON_WSL_BROWSER_URL con {port} y {wsl_ip}.
   El backend debe escuchar en todas las interfaces (bind_host vacío o 0.0.0.0 en
@@ -64,9 +66,13 @@ def _is_wsl() -> bool:
         return False
 
 
-def _wsl_has_linux_gui() -> bool:
-    """WSLg u otro X/Wayland dentro de WSL."""
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+def _prefer_wsl_embedded_window() -> bool:
+    """
+    Política por defecto: en WSL abrir navegador de Windows (más estable).
+    Permite forzar ventana embebida con VARMON_WSL_EMBEDDED=1.
+    """
+    v = os.environ.get("VARMON_WSL_EMBEDDED", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _wsl_primary_ipv4() -> str | None:
@@ -262,8 +268,38 @@ def _drain_stdout(proc: subprocess.Popen[str]) -> None:
         sys.stdout.flush()
 
 
+def _wsl_windows_chromium_exes() -> list[Path]:
+    """
+    Ejecutables de Chrome/Edge/Brave en Windows, accesibles desde WSL vía /mnt/c/.
+    Primero VARMON_WINDOWS_BROWSER si apunta a un .exe existente.
+    """
+    candidates = [
+        Path("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"),
+        Path("/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+        Path("/mnt/c/Program Files/Microsoft/Edge/Application/msedge.exe"),
+        Path("/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
+        Path("/mnt/c/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe"),
+    ]
+    custom = os.environ.get("VARMON_WINDOWS_BROWSER", "").strip()
+    if custom:
+        p = Path(custom).expanduser()
+        if p.is_file():
+            return [p]
+    return [p for p in candidates if p.is_file()]
+
+
 def _open_url_on_windows_host(url: str) -> bool:
-    """Abre http(s) en el Windows anfitrión desde WSL."""
+    """Abre http(s) en el Windows anfitrión desde WSL. Prioriza modo aplicación (--app=)."""
+    for exe in _wsl_windows_chromium_exes():
+        try:
+            subprocess.Popen(
+                [str(exe), f"--app={url}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            continue
     wslview = shutil.which("wslview")
     if wslview:
         try:
@@ -294,6 +330,49 @@ def _open_url_on_windows_host(url: str) -> bool:
     return False
 
 
+def _open_url_on_linux_host(url: str) -> bool:
+    """
+    Abre URL en Linux local. Intenta primero modo app (menos intrusivo) si hay
+    Chromium/Chrome/Edge; fallback a xdg-open.
+    """
+    app_mode_cmds: list[list[str]] = []
+    for bin_name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"):
+        exe = shutil.which(bin_name)
+        if exe:
+            app_mode_cmds.append([exe, f"--app={url}"])
+    for cmd in app_mode_cmds:
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except OSError:
+            continue
+    xdg = shutil.which("xdg-open")
+    if xdg:
+        try:
+            subprocess.Popen([xdg, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def _run_linux_browser_fallback(port: int, proc: subprocess.Popen[str]) -> None:
+    local_url = f"http://127.0.0.1:{port}/"
+    print("[run_desktop] Abriendo la interfaz en navegador local (modo app si está disponible).", flush=True)
+    print(f"  → {local_url}", flush=True)
+    if not _open_url_on_linux_host(local_url):
+        print(
+            f"No se pudo lanzar el navegador automáticamente. Abre: {local_url}",
+            file=sys.stderr,
+            flush=True,
+        )
+    print("Servidor en marcha. Pulsa Ctrl+C aquí para detenerlo.", flush=True)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        pass
+
+
 def _fail_import_help() -> None:
     print(
         "Faltan dependencias del escritorio. En web_monitor ejecuta:\n"
@@ -307,7 +386,10 @@ def _run_wsl_browser_fallback(port: int, proc: subprocess.Popen[str]) -> None:
     windows_url = _windows_browser_url(port)
     local_url = f"http://127.0.0.1:{port}/"
     wsl_ip = _wsl_primary_ipv4()
-    print("[run_desktop] WSL: abriendo la interfaz en el navegador de Windows.", flush=True)
+    print(
+        "[run_desktop] WSL: abriendo en el navegador de Windows (modo app --app= si hay Chrome/Edge).",
+        flush=True,
+    )
     print(f"  → {windows_url}", flush=True)
     if wsl_ip and windows_url.rstrip("/") != local_url.rstrip("/"):
         print(
@@ -367,7 +449,7 @@ def main() -> None:
 
     py = _python_exe()
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    if not wsl or _wsl_has_linux_gui():
+    if not wsl or _prefer_wsl_embedded_window():
         env.setdefault("QT_API", "pyside6")
         env.setdefault("PYWEBVIEW_GUI", "qt")
 
@@ -430,8 +512,10 @@ def main() -> None:
     # Misma máquina: siempre 127.0.0.1 (pywebview); `port` ya es el confirmado por la API.
     local_url = f"http://127.0.0.1:{port}/"
 
-    # WSL típico: sin WSLg → no intentar Qt (pesado y suele fallar).
-    if wsl and not _wsl_has_linux_gui():
+    # WSL: por defecto usar siempre navegador de Windows (más robusto y menos intrusivo).
+    # Solo intentar ventana embebida si se fuerza explícitamente:
+    #   VARMON_WSL_EMBEDDED=1
+    if wsl and not _prefer_wsl_embedded_window():
         try:
             _run_wsl_browser_fallback(port, proc)
         finally:
@@ -449,7 +533,7 @@ def main() -> None:
                     demo_proc.kill()
         return
 
-    # Entorno con GUI Linux (o WSL con WSLg): intentar pywebview + Qt.
+    # Linux nativo o WSL forzado a embebido: intentar pywebview + Qt.
     os.environ.setdefault("QT_API", "pyside6")
     os.environ.setdefault("PYWEBVIEW_GUI", "qt")
     try:
@@ -477,11 +561,26 @@ def main() -> None:
                     except subprocess.TimeoutExpired:
                         demo_proc.kill()
             return
-        _fail_import_help()
-        proc.terminate()
-        if demo_proc is not None and demo_proc.poll() is None:
-            demo_proc.terminate()
-        sys.exit(1)
+        print(
+            "[run_desktop] Sin backend de ventana embebida; usando navegador local.",
+            file=sys.stderr,
+        )
+        try:
+            _run_linux_browser_fallback(port, proc)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            if demo_proc is not None and demo_proc.poll() is None:
+                demo_proc.terminate()
+                try:
+                    demo_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    demo_proc.kill()
+        return
 
     webview.create_window("VarMonitor", local_url, width=1280, height=800)
     try:
@@ -495,12 +594,25 @@ def main() -> None:
             )
             _run_wsl_browser_fallback(port, proc)
         else:
-            print(f"pywebview (Qt) no pudo iniciarse: {e}", file=sys.stderr)
-            _fail_import_help()
-            proc.terminate()
-            if demo_proc is not None and demo_proc.poll() is None:
-                demo_proc.terminate()
-            sys.exit(1)
+            print(
+                f"[run_desktop] pywebview (Qt) no pudo iniciarse ({e}); usando navegador local.",
+                file=sys.stderr,
+            )
+            _run_linux_browser_fallback(port, proc)
+    except Exception as e:
+        # Cubre errores de backend GTK/gi u otros fallos en tiempo de arranque.
+        if wsl:
+            print(
+                f"[run_desktop] Fallo en ventana embebida ({e}); usando navegador de Windows.",
+                file=sys.stderr,
+            )
+            _run_wsl_browser_fallback(port, proc)
+        else:
+            print(
+                f"[run_desktop] Fallo en ventana embebida ({e}); usando navegador local.",
+                file=sys.stderr,
+            )
+            _run_linux_browser_fallback(port, proc)
     finally:
         if proc.poll() is None:
             proc.terminate()

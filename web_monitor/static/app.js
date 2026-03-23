@@ -89,9 +89,6 @@
     const localTsvInput = document.getElementById("localTsvInput");
     const recordingSelect = document.getElementById("recordingSelectA");
     const loadServerRecordingBtn = document.getElementById("loadServerRecordingBtn");
-    const setMarkerABtn = document.getElementById("setMarkerABtn");
-    const setMarkerBBtn = document.getElementById("setMarkerBBtn");
-    const clearMarkersBtn = document.getElementById("clearMarkersBtn");
     const markerInfoLabel = document.getElementById("markerInfoLabel");
     const anomalyPanel = document.getElementById("anomalyPanel");
     const toggleAdvancedPlotBtn = document.getElementById("toggleAdvancedPlotBtn");
@@ -110,6 +107,7 @@
     const segEndBtn = document.getElementById("segEndBtn");
     const segSaveBtn = document.getElementById("segSaveBtn");
     const segCutBtn = document.getElementById("segCutBtn");
+    const segCompareBtn = document.getElementById("segCompareBtn");
     const segmentSelectEl = document.getElementById("segmentSelect");
     const segmentGoBtn = document.getElementById("segmentGoBtn");
     const downsampleMaxPointsInput = document.getElementById("downsampleMaxPointsInput");
@@ -307,6 +305,7 @@
             if (!offlineRecordingName || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
             const ok = window.confirm("Salir de modo seguro y cargar el archivo completo (también se descargará localmente)?");
             if (!ok) return;
+            beginOfflineDatasetLoad();
             try {
                 const filename = offlineRecordingName;
                 const url = "/api/recordings/" + encodeURIComponent(filename);
@@ -336,6 +335,8 @@
             } catch (e) {
                 console.error("Error saliendo de modo seguro:", e);
                 alert("Error al salir de modo seguro y cargar el archivo completo.");
+            } finally {
+                endOfflineDatasetLoad();
             }
         });
     }
@@ -593,6 +594,8 @@
     let windowFetchInFlight = 0;
     let windowFetchLastStart = 0;
     let windowFetchSlow = false;
+    /** Carga inicial de TSV / grabación (parseo o fetch pesado); muestra indicador como en modo seguro. */
+    let offlineDatasetLoadInProgress = 0;
 
     const GEN_TYPES = {
         sine:     { label: "Seno",       fields: [{k:"amp",l:"A",d:1},{k:"freq",l:"Hz",d:1},{k:"offset",l:"Off",d:0},{k:"phase",l:"Fase\u00B0",d:0}] },
@@ -1191,6 +1194,8 @@
             offlineDatasetNone: "Sin archivo cargado",
             offlineDatasetLoaded: "Cargado:",
             offlineDatasetSafeMode: "Modo seguro",
+            offlineDatasetLoading: "Cargando datos…",
+            offlineDatasetLoadingFile: "Cargando archivo…",
             analyzePromptBtn: "Analizar este archivo",
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
@@ -1280,6 +1285,8 @@
             offlineDatasetNone: "No file loaded",
             offlineDatasetLoaded: "Loaded:",
             offlineDatasetSafeMode: "Safe mode",
+            offlineDatasetLoading: "Loading data…",
+            offlineDatasetLoadingFile: "Loading file…",
             analyzePromptBtn: "Analyze this file",
             offlinePlaybackPlay: "▶ Play",
             offlinePlaybackPause: "⏸ Pause",
@@ -2062,6 +2069,7 @@
         localTsvInput.addEventListener("change", async () => {
             const f = localTsvInput.files && localTsvInput.files[0];
             if (!f) return;
+            beginOfflineDatasetLoad();
             try {
                 let ds;
                 let safeInfo = null;
@@ -2084,10 +2092,11 @@
                     ds = parseTsvDataset(text, f.name);
                 }
                 if (!isPlaybackMode()) setAppMode("offline", { keepData: true });
-                loadOfflineDataset(ds, { target: "A", recordingName: "", safeInfo });
+                await loadOfflineDataset(ds, { target: "A", recordingName: "", safeInfo });
             } catch (e) {
                 alert("Error cargando TSV: " + (e && e.message ? e.message : String(e)));
             } finally {
+                endOfflineDatasetLoad();
                 localTsvInput.value = "";
             }
         });
@@ -2159,37 +2168,6 @@
             } else {
                 startOfflinePlayback();
             }
-        });
-    }
-    if (setMarkerABtn) {
-        setMarkerABtn.addEventListener("click", () => {
-            markerA = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
-            recomputeDeltaByName();
-            updateMarkerInfoLabel();
-            updateMonitorValues();
-            rebuildMonitorList();
-            schedulePlotRender();
-        });
-    }
-    if (setMarkerBBtn) {
-        setMarkerBBtn.addEventListener("click", () => {
-            markerB = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
-            recomputeDeltaByName();
-            updateMarkerInfoLabel();
-            updateMonitorValues();
-            rebuildMonitorList();
-            schedulePlotRender();
-        });
-    }
-    if (clearMarkersBtn) {
-        clearMarkersBtn.addEventListener("click", () => {
-            markerA = null;
-            markerB = null;
-            deltaByName = {};
-            updateMarkerInfoLabel();
-            updateMonitorValues();
-            rebuildMonitorList();
-            schedulePlotRender();
         });
     }
     if (toggleAdvancedPlotBtn) {
@@ -2626,6 +2604,35 @@
             } catch (e) {
                 alert("No se pudo cortar segmento: " + (e && e.message ? e.message : String(e)));
             }
+        });
+    }
+    if (segCompareBtn) {
+        segCompareBtn.addEventListener("click", () => {
+            if (!offlineDataset) return;
+            let start = Number.NaN;
+            let end = Number.NaN;
+            if (Number.isFinite(segmentDraft.start) && Number.isFinite(segmentDraft.end)) {
+                start = Math.min(segmentDraft.start, segmentDraft.end);
+                end = Math.max(segmentDraft.start, segmentDraft.end);
+            } else {
+                const idxSel = parseInt(segmentSelectEl?.value || "-1", 10);
+                if (Number.isFinite(idxSel) && idxSel >= 0 && idxSel < offlineSegments.length) {
+                    const seg = offlineSegments[idxSel];
+                    start = Math.min(Number(seg.start), Number(seg.end));
+                    end = Math.max(Number(seg.start), Number(seg.end));
+                }
+            }
+            if (!Number.isFinite(start) || !Number.isFinite(end)) {
+                alert("Marca Inicio y Fin o selecciona un segmento guardado.");
+                return;
+            }
+            markerA = start;
+            markerB = end;
+            recomputeDeltaByName();
+            updateMarkerInfoLabel();
+            updateMonitorValues();
+            rebuildMonitorList();
+            schedulePlotRender();
         });
     }
     if (segmentGoBtn) {
@@ -3886,6 +3893,7 @@
                 return;
             }
             if (remoteBrowserPickForAnalysis && name.toLowerCase().endsWith(".tsv")) {
+                beginOfflineDatasetLoad();
                 try {
                     const params = new URLSearchParams({ path });
                     const resp = await fetch("/api/browse/download?" + params.toString());
@@ -3899,6 +3907,8 @@
                     closeRemoteFileBrowser();
                 } catch (err) {
                     alert("No se pudo cargar el archivo: " + (err.message || String(err)));
+                } finally {
+                    endOfflineDatasetLoad();
                 }
                 return;
             }
@@ -4373,11 +4383,21 @@
     function updateOfflineDatasetStatus() {
         if (!offlineDatasetStatus) return;
         const tr = I18N[currentLang] || I18N.es;
+        if (offlineDatasetLoadInProgress > 0) {
+            offlineDatasetStatus.textContent = tr.offlineDatasetLoadingFile || "Cargando archivo…";
+            offlineDatasetStatus.classList.remove("offline-empty");
+            offlineDatasetStatus.classList.add("offline-loaded");
+            offlineDatasetStatus.classList.remove("offline-safe");
+            offlineDatasetStatus.classList.add("offline-loading");
+            if (offlineSafeModeBadge) offlineSafeModeBadge.style.display = "none";
+            return;
+        }
+        offlineDatasetStatus.classList.remove("offline-loading");
         if (offlineDataset && offlineDataset.sourceName) {
             const safeSuffix = (offlineSafetyInfo && offlineSafetyInfo.safeMode)
                 ? ` | ${tr.offlineDatasetSafeMode || "Modo seguro"}`
                 : "";
-            const loadingSuffix = windowFetchSlow ? ` | ${tr.offlineDatasetLoading || "Cargando datos..."}` : "";
+            const loadingSuffix = windowFetchSlow ? ` | ${tr.offlineDatasetLoading || "Cargando datos…"}` : "";
             offlineDatasetStatus.textContent = `${tr.offlineDatasetLoaded || "Cargado:"} A: ${offlineDataset.sourceName}${safeSuffix}${loadingSuffix}`;
             offlineDatasetStatus.classList.remove("offline-empty");
             offlineDatasetStatus.classList.add("offline-loaded");
@@ -4391,6 +4411,23 @@
         if (offlineSafeModeBadge) {
             offlineSafeModeBadge.style.display = (offlineSafetyInfo && offlineSafetyInfo.safeMode) ? "inline-flex" : "none";
         }
+    }
+
+    function refreshOfflineLoadingIndicator() {
+        const show = offlineDatasetLoadInProgress > 0 || windowFetchSlow;
+        if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = show ? "inline-flex" : "none";
+    }
+
+    function beginOfflineDatasetLoad() {
+        offlineDatasetLoadInProgress++;
+        refreshOfflineLoadingIndicator();
+        updateOfflineDatasetStatus();
+    }
+
+    function endOfflineDatasetLoad() {
+        offlineDatasetLoadInProgress = Math.max(0, offlineDatasetLoadInProgress - 1);
+        refreshOfflineLoadingIndicator();
+        updateOfflineDatasetStatus();
     }
 
     function updateMarkerInfoLabel() {
@@ -4491,21 +4528,6 @@
         document.body.classList.toggle("mode-replay", replay);
         if (offlineControls) offlineControls.style.display = playback ? "flex" : "none";
         if (offlinePlaybackControls) offlinePlaybackControls.style.display = playback ? "flex" : "none";
-        const setMarkerABtn = document.getElementById("setMarkerABtn");
-        const setMarkerBBtn = document.getElementById("setMarkerBBtn");
-        const clearMarkersBtn = document.getElementById("clearMarkersBtn");
-        const markerInfoLabel = document.getElementById("markerInfoLabel");
-        if (replay) {
-            if (setMarkerABtn) setMarkerABtn.style.display = "none";
-            if (setMarkerBBtn) setMarkerBBtn.style.display = "none";
-            if (clearMarkersBtn) clearMarkersBtn.style.display = "none";
-            if (markerInfoLabel) markerInfoLabel.style.display = "none";
-        } else {
-            if (setMarkerABtn) setMarkerABtn.style.display = "";
-            if (setMarkerBBtn) setMarkerBBtn.style.display = "";
-            if (clearMarkersBtn) clearMarkersBtn.style.display = "";
-            if (markerInfoLabel) markerInfoLabel.style.display = "";
-        }
         if (alarmPanel) alarmPanel.style.display = playback ? "none" : "";
         const spanLabel = document.getElementById("offlineWindowSpanLabel");
         if (spanLabel) spanLabel.style.display = playback ? "flex" : "none";
@@ -5167,6 +5189,21 @@
         const maxTs = Number.isFinite(offlineRecordingGlobalMaxTs) ? offlineRecordingGlobalMaxTs : offlineDataset.maxTs;
         if (!Number.isFinite(offlinePlayback.currentTs) ||
             offlinePlayback.currentTs >= (maxTs - 1e-9)) {
+            // Nuevo ciclo de play en replay: reiniciar todo el histórico runtime
+            // para evitar arrastre visual entre ciclos.
+            if (isReplayMode()) {
+                for (const name of Object.keys(historyCache)) {
+                    historyCache[name] = { timestamps: [], values: [] };
+                }
+                for (const key of Object.keys(arrayElemHistory)) {
+                    arrayElemHistory[key] = { timestamps: [], values: [] };
+                }
+                for (const cv of computedVars) {
+                    if (computedHistories[cv.name]) {
+                        computedHistories[cv.name] = { timestamps: [], values: [] };
+                    }
+                }
+            }
             applyOfflineTime(minTs);
             schedulePlotRender();
         }
@@ -5290,6 +5327,7 @@
         if (!filename || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
         const totalBytes = offlineSafetyInfo.totalBytes || 0;
         if (byteOffset < 0 || byteOffset >= totalBytes) return;
+        beginOfflineDatasetLoad();
         try {
             // Cargar el tramo tal cual viene en el TSV: la columna time_s ya es
             // tiempo absoluto desde 0, no hay que aplicar offsets adicionales.
@@ -5299,7 +5337,7 @@
                 : null;
 
             const safe = await loadLargeServerFileInSafeMode(filename, totalBytes, byteOffset);
-            loadOfflineDataset(safe.ds, { recordingName: filename, safeInfo: safe.safeInfo, preserveLayout: true });
+            await loadOfflineDataset(safe.ds, { recordingName: filename, safeInfo: safe.safeInfo, preserveLayout: true });
 
             // Mantener la referencia global del primer tramo (suele ser 0s).
             if (globalBaseTs !== null && Number.isFinite(globalBaseTs)) {
@@ -5315,6 +5353,8 @@
             updateOfflineChunkButtons();
         } catch (e) {
             alert("Error cargando tramo: " + (e && e.message ? e.message : String(e)));
+        } finally {
+            endOfflineDatasetLoad();
         }
     }
 
@@ -5466,45 +5506,50 @@
 
     async function loadRecordingFromServer(filename, opts = {}) {
         if (!filename) return;
-        const meta = recordingsMetaByName.get(filename) || null;
-        const sizeBytes = Number(meta && meta.size);
-        if (shouldUseSafeOfflineLoad(sizeBytes)) {
-            let forceFull = false;
-            try {
-                const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
-                const rMeta = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`);
-                if (rMeta.ok) {
-                    const p = await rMeta.json();
-                    const previewText = trimTextToFullLines(p && p.preview ? p.preview : "");
-                    const risk = estimateTsvLoadRisk(previewText, sizeBytes || Number(p && p.size) || 0);
-                    forceFull = shouldForceFullLoadWithConfirmation(filename, sizeBytes || Number(p && p.size) || 0, risk.estRamBytes);
+        beginOfflineDatasetLoad();
+        try {
+            const meta = recordingsMetaByName.get(filename) || null;
+            const sizeBytes = Number(meta && meta.size);
+            if (shouldUseSafeOfflineLoad(sizeBytes)) {
+                let forceFull = false;
+                try {
+                    const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+                    const rMeta = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`);
+                    if (rMeta.ok) {
+                        const p = await rMeta.json();
+                        const previewText = trimTextToFullLines(p && p.preview ? p.preview : "");
+                        const risk = estimateTsvLoadRisk(previewText, sizeBytes || Number(p && p.size) || 0);
+                        forceFull = shouldForceFullLoadWithConfirmation(filename, sizeBytes || Number(p && p.size) || 0, risk.estRamBytes);
+                    }
+                } catch (e) { /* si falla, seguimos en modo seguro */ }
+                if (forceFull) {
+                    const rFull = await fetch("/api/recordings/" + encodeURIComponent(filename));
+                    if (!rFull.ok) throw new Error("No se pudo descargar la grabación");
+                    const textFull = await rFull.text();
+                    const dsFull = parseTsvDataset(textFull, filename);
+                    await loadOfflineDataset(dsFull, { ...opts, recordingName: filename, safeInfo: null });
+                    return;
                 }
-            } catch (e) { /* si falla, seguimos en modo seguro */ }
-            if (forceFull) {
-                const rFull = await fetch("/api/recordings/" + encodeURIComponent(filename));
-                if (!rFull.ok) throw new Error("No se pudo descargar la grabación");
-                const textFull = await rFull.text();
-                const dsFull = parseTsvDataset(textFull, filename);
-                loadOfflineDataset(dsFull, { ...opts, recordingName: filename, safeInfo: null });
+                const safe = await loadLargeServerFileInSafeMode(filename, sizeBytes);
+                // Primer tramo en modo seguro: timestamps tal cual (offset 0). Después
+                // de cargarlo, guardamos cuánto dura para poder desplazar los tramos
+                // siguientes y que el tiempo sea continuo.
+                await loadOfflineDataset(safe.ds, { ...opts, recordingName: filename, safeInfo: safe.safeInfo });
+                if (safe.safeInfo && Number.isFinite(safe.safeInfo.segmentSpanSec)) {
+                    offlineSegmentOffsetSec = safe.safeInfo.segmentSpanSec;
+                    // La referencia global arranca en el primer timestamp real de la grabación.
+                    offlineRecordingGlobalMinTs = safe.ds.minTs;
+                }
                 return;
             }
-            const safe = await loadLargeServerFileInSafeMode(filename, sizeBytes);
-            // Primer tramo en modo seguro: timestamps tal cual (offset 0). Después
-            // de cargarlo, guardamos cuánto dura para poder desplazar los tramos
-            // siguientes y que el tiempo sea continuo.
-            loadOfflineDataset(safe.ds, { ...opts, recordingName: filename, safeInfo: safe.safeInfo });
-            if (safe.safeInfo && Number.isFinite(safe.safeInfo.segmentSpanSec)) {
-                offlineSegmentOffsetSec = safe.safeInfo.segmentSpanSec;
-                // La referencia global arranca en el primer timestamp real de la grabación.
-                offlineRecordingGlobalMinTs = safe.ds.minTs;
-            }
-            return;
+            const r = await fetch("/api/recordings/" + encodeURIComponent(filename));
+            if (!r.ok) throw new Error("No se pudo descargar la grabación");
+            const text = await r.text();
+            const ds = parseTsvDataset(text, filename);
+            await loadOfflineDataset(ds, { ...opts, recordingName: filename, safeInfo: null });
+        } finally {
+            endOfflineDatasetLoad();
         }
-        const r = await fetch("/api/recordings/" + encodeURIComponent(filename));
-        if (!r.ok) throw new Error("No se pudo descargar la grabación");
-        const text = await r.text();
-        const ds = parseTsvDataset(text, filename);
-        loadOfflineDataset(ds, { ...opts, recordingName: filename, safeInfo: null });
     }
 
     function discardLiveVarsCoalesce() {
@@ -8528,7 +8573,7 @@
         if (!isPlaybackMode() || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) {
             if (windowFetchSlow) {
                 windowFetchSlow = false;
-                if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "none";
+                refreshOfflineLoadingIndicator();
                 updateOfflineDatasetStatus();
             }
             return;
@@ -8543,13 +8588,13 @@
                 if (offlinePlayback.isPlaying) {
                     stopOfflinePlayback();
                 }
-                if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "inline-flex";
+                refreshOfflineLoadingIndicator();
                 updateOfflineDatasetStatus();
             }
         } else {
             if (windowFetchSlow && windowFetchInFlight === 0) {
                 windowFetchSlow = false;
-                if (monitorLoadingIndicator) monitorLoadingIndicator.style.display = "none";
+                refreshOfflineLoadingIndicator();
                 updateOfflineDatasetStatus();
             }
         }

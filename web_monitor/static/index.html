@@ -86,9 +86,8 @@
             <button id="settingsBtn" class="btn-settings" title="Ajustes">&#9881;</button>
             <div id="settingsPanel" class="settings-panel" style="display:none">
                 <div class="settings-group">
-                    <div class="settings-section-title">Persistencia servidor</div>
+                    <div class="settings-section-title">Plantillas de estado</div>
                     <div class="monitor-menu-row template-row">
-                        <span class="settings-inline-label">Plantillas (estado completo):</span>
                         <select id="dashboardTemplateSelect" title="Plantillas dashboard"></select>
                         <button id="templateSaveBtn" class="btn-small" title="Guardar layout actual como plantilla">💾 Guardar</button>
                         <button id="templateLoadBtn" class="btn-small" title="Cargar plantilla seleccionada">📂 Cargar</button>
@@ -441,11 +440,7 @@
                                 <option value="4">4x</option>
                             </select>
                         </label>
-                        <button id="setMarkerABtn" class="btn-small" title="Fijar marcador A en tiempo actual">A</button>
-                        <button id="setMarkerBBtn" class="btn-small" title="Fijar marcador B en tiempo actual">B</button>
-                        <button id="clearMarkersBtn" class="btn-small" title="Limpiar marcadores A/B">AB×</button>
                         <span id="offlineTimeLabel" class="offline-time-label">t=0.000s</span>
-                        <span id="markerInfoLabel" class="offline-marker-label">A: -- | B: --</span>
                     </div>
                     <label id="plotVsRefWrap" class="plot-vs-ref-wrap" style="display:none" title="Graficar variables frente a la referencia">
                         <input type="checkbox" id="plotVsRefCheckbox" class="plot-vs-ref-checkbox"> Frente a ref
@@ -490,6 +485,7 @@
                     <span id="segEndLabel" class="offline-time-label">E: --</span>
                     <button id="segSaveBtn" class="btn-small" title="Guardar solo la marca del segmento para reutilizarla">Guardar seg</button>
                     <button id="segCutBtn" class="btn-small" title="Generar TSV recortado entre Inicio/Fin y mostrar opción de analizar">Cortar + descargar</button>
+                    <button id="segCompareBtn" class="btn-small" title="Comparar extremos del segmento usando marcadores A/B">Comparar extremos</button>
                     <select id="segmentSelect"></select>
                     <button id="segmentGoBtn" class="btn-small" title="Ir al tiempo inicial del segmento seleccionado">Ir</button>
                 </div>

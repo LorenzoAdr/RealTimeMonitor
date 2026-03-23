@@ -475,6 +475,13 @@ body.theme-light.mode-replay {
     font-weight: 600;
 }
 
+.offline-dataset-status.offline-loading {
+    color: #93c5fd;
+    border-color: rgba(59, 130, 246, 0.55);
+    background: rgba(59, 130, 246, 0.14);
+    font-weight: 600;
+}
+
 .offline-safe-badge {
     font-size: 11px;
     font-weight: 600;
