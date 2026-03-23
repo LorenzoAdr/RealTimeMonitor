@@ -1502,6 +1502,8 @@ int main(int argc, char** argv) {
     std::vector<char> col_present;
     /** Origen de `time_s`: primer timestamp de muestra (cabecera +24 o ranura anillo), mismo reloj que el C++. */
     double t_epoch = std::numeric_limits<double>::quiet_NaN();
+    /** Evita saltos hacia atrás en time_s si el reloj del sistema retrocede (p. ej. NTP) o hay discontinuidad. */
+    double last_t_rel_written = -1.0;
     uint64_t rows = 0;
     uint64_t last_status_rows = 0;
     uint64_t last_seq = 0;
@@ -1617,10 +1619,15 @@ int main(int argc, char** argv) {
             if (!std::isfinite(ts_sample)) return 0.0;
             if (!std::isfinite(t_epoch)) {
                 t_epoch = ts_sample;
+                last_t_rel_written = 0.0;
                 return 0.0;
             }
             double x = ts_sample - t_epoch;
             if (!std::isfinite(x) || x < 0.0) x = 0.0;
+            if (last_t_rel_written >= 0.0 && x < last_t_rel_written) {
+                x = last_t_rel_written + 1e-6;
+            }
+            last_t_rel_written = x;
             return x;
         };
         const std::function<double(double)> row_time_fn = [&](double ts_sample) { return row_time_s(ts_sample); };

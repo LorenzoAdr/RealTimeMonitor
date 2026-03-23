@@ -17,6 +17,10 @@ Arranca web_monitor/app.py y muestra la interfaz:
   del log, se confirma con GET /api/uptime (actual_web_port) por si el backend
   elige otro puerto en el rango de autodescubrimiento.
 
+• Linux sin Qt/GTK usable: se abre el navegador del sistema (Firefox, Chromium,
+  `xdg-open`, `gio open`). Override: `VARMON_LINUX_BROWSER` (ej. `firefox` o
+  `/usr/bin/firefox`).
+
 • Linux: por defecto arranca `build/demo_app/demo_server` en segundo plano y usa
   `taskset` para separar núcleos C++ vs Python (p. ej. 0-1 vs 4-5 si hay ≥8 CPUs).
   `VARMON_SKIP_DEMO=1` no arranca el demo; `VARMON_TASKSET_CPP` / `VARMON_TASKSET_PY`
@@ -31,6 +35,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import webbrowser
 import signal
 import shutil
 import subprocess
@@ -332,27 +338,96 @@ def _open_url_on_windows_host(url: str) -> bool:
 
 def _open_url_on_linux_host(url: str) -> bool:
     """
-    Abre URL en Linux local. Intenta primero modo app (menos intrusivo) si hay
-    Chromium/Chrome/Edge; fallback a xdg-open.
+    Abre URL en Linux local: Chromium (--app), Firefox, xdg-open, gio, webbrowser.
+    Usa start_new_session para no arrastrar señales del proceso padre.
     """
-    app_mode_cmds: list[list[str]] = []
-    for bin_name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"):
-        exe = shutil.which(bin_name)
-        if exe:
-            app_mode_cmds.append([exe, f"--app={url}"])
-    for cmd in app_mode_cmds:
+    debug = os.environ.get("VARMON_DEBUG_BROWSER", "").strip().lower() in ("1", "true", "yes")
+
+    def _launch(cmd: list[str], label: str) -> bool:
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            if debug:
+                print(f"[run_desktop] lanzado ({label}): {' '.join(cmd)}", flush=True)
             return True
-        except OSError:
-            continue
-    xdg = shutil.which("xdg-open")
-    if xdg:
+        except OSError as e:
+            if debug:
+                print(f"[run_desktop] fallo ({label}): {e}", file=sys.stderr, flush=True)
+            return False
+
+    env_cmd = os.environ.get("VARMON_LINUX_BROWSER", "").strip()
+    if env_cmd:
         try:
-            subprocess.Popen([xdg, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except OSError:
+            parts = shlex.split(env_cmd)
+            if parts:
+                exe = parts[0]
+                if os.path.isfile(exe):
+                    pass
+                else:
+                    w = shutil.which(exe)
+                    exe = w if w else ""
+                if exe:
+                    cmd = [exe] + parts[1:] + [url]
+                    if _launch(cmd, "VARMON_LINUX_BROWSER"):
+                        return True
+        except ValueError:
             pass
+
+    for bin_name in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "microsoft-edge",
+        "brave-browser",
+        "brave",
+    ):
+        exe = shutil.which(bin_name)
+        if exe and _launch([exe, f"--app={url}"], bin_name):
+            return True
+
+    ff_tried: set[str] = set()
+    for ff in (
+        shutil.which("firefox"),
+        "/snap/bin/firefox",
+        "/usr/bin/firefox",
+    ):
+        if not ff or ff in ff_tried or not os.path.isfile(ff):
+            continue
+        ff_tried.add(ff)
+        if _launch([ff, "-new-window", url], "firefox"):
+            return True
+        if _launch([ff, url], "firefox"):
+            return True
+
+    if shutil.which("flatpak"):
+        if _launch(
+            ["flatpak", "run", "org.mozilla.firefox", url],
+            "flatpak firefox",
+        ):
+            return True
+
+    xdg = shutil.which("xdg-open")
+    if xdg and _launch([xdg, url], "xdg-open"):
+        return True
+
+    gio = shutil.which("gio")
+    if gio and _launch([gio, "open", url], "gio open"):
+        return True
+
+    try:
+        if webbrowser.open(url):
+            if debug:
+                print("[run_desktop] webbrowser.open OK", flush=True)
+            return True
+    except Exception as e:
+        if debug:
+            print(f"[run_desktop] webbrowser.open: {e}", file=sys.stderr, flush=True)
+
     return False
 
 
@@ -360,9 +435,24 @@ def _run_linux_browser_fallback(port: int, proc: subprocess.Popen[str]) -> None:
     local_url = f"http://127.0.0.1:{port}/"
     print("[run_desktop] Abriendo la interfaz en navegador local (modo app si está disponible).", flush=True)
     print(f"  → {local_url}", flush=True)
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        print(
+            "[run_desktop] Aviso: no hay DISPLAY ni WAYLAND_DISPLAY; en una VM/sesión sin "
+            "entorno gráfico el navegador no puede mostrarse. Prueba: export DISPLAY=:0 "
+            "(o el valor de `echo $DISPLAY` en un terminal dentro del escritorio).",
+            file=sys.stderr,
+            flush=True,
+        )
     if not _open_url_on_linux_host(local_url):
         print(
             f"No se pudo lanzar el navegador automáticamente. Abre: {local_url}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            "  Sugerencias: instala xdg-utils (`sudo apt install xdg-utils`), o define "
+            "VARMON_LINUX_BROWSER=firefox (o la ruta al ejecutable). "
+            "Depuración: VARMON_DEBUG_BROWSER=1 ./scripts/run_desktop.sh",
             file=sys.stderr,
             flush=True,
         )
