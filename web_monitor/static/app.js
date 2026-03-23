@@ -127,6 +127,8 @@
     const MONITOR_VM_THRESHOLD = 150;
     /** Filas extra arriba/abajo del viewport; más buffer = scroll rápido sin “huecos” (todo pre-renderizado en ~1 frame). */
     const MONITOR_VM_BUFFER = 12;
+    /** Separación vertical entre filas virtuales (debe coincidir con la lógica de altura en measure + CSS). */
+    const MONITOR_VM_ROW_GAP = 2;
     /**
      * Al arrastrar al gráfico, si la variable está en la preselección del monitor se asignan todas
      * las preseleccionadas. Con "Seleccionar todas" + miles de variables eso activa needsScalarPlotHistory
@@ -137,7 +139,8 @@
     let monitorVmRows = null;
     let monitorVmBottomSpacer = null;
     let monitorVmRowPx = 36;
-    let monitorVmScrollPending = false;
+    /** Un solo layout sync por frame en scroll: muchos eventos/frame + replaceChildren bloqueaban el hilo (rueda “a velocidad fija”). */
+    let monitorVmScrollRaf = 0;
     const monitorFilterInput = document.getElementById("monitorFilterInput");
     const monitorSelectAllBtn = document.getElementById("monitorSelectAllBtn");
     const monitorDeselectAllBtn = document.getElementById("monitorDeselectAllBtn");
@@ -6395,8 +6398,13 @@
 
     function destroyMonitorVirtualShell() {
         if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+        if (monitorVmScrollRaf) {
+            cancelAnimationFrame(monitorVmScrollRaf);
+            monitorVmScrollRaf = 0;
+        }
         monitorListEl.innerHTML = "";
         monitorListEl.classList.remove("monitor-list--virtual");
+        monitorListEl.style.removeProperty("--monitor-vm-row-h");
         delete monitorListEl._vmRowFrozen;
         monitorVmTopSpacer = null;
         monitorVmRows = null;
@@ -6438,8 +6446,10 @@
             if (h > maxH) maxH = h;
         });
         if (maxH > 0) {
-            monitorVmRowPx = Math.max(28, Math.min(72, Math.ceil(maxH)));
+            /* stride = contenido + hueco fijo; scrollTop/spacers usan el mismo valor que height de fila. */
+            monitorVmRowPx = Math.max(28, Math.min(80, Math.ceil(maxH) + MONITOR_VM_ROW_GAP));
             monitorListEl._vmRowFrozen = true;
+            monitorListEl.style.setProperty("--monitor-vm-row-h", monitorVmRowPx + "px");
         }
     }
 
@@ -6743,7 +6753,6 @@
             monitorVmTopSpacer.style.height = "0px";
             monitorVmBottomSpacer.style.height = "0px";
             monitorVmRows.innerHTML = "";
-            monitorListEl.classList.toggle("monitor-virtualized", false);
             hideMonitorDetailDock();
             updateMonitorItemStyles();
             return;
@@ -6760,7 +6769,6 @@
         }
         const visibleRows = [];
         for (let r = startRow; r < endRow; r++) visibleRows.push(r);
-        const visibleRowsSet = new Set(visibleRows.map((r) => String(r)));
         const sliceByRow = new Map();
         visibleRows.forEach((r) => {
             const rowNames = [];
@@ -6774,23 +6782,19 @@
         const sliceSet = new Set();
         sliceByRow.forEach((rowNames) => rowNames.forEach((n) => sliceSet.add(n)));
 
-        monitorVmRows.querySelectorAll(".monitor-vm-row").forEach((rowEl) => {
-            if (!visibleRowsSet.has(rowEl.dataset.row)) rowEl.remove();
-        });
-
         monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach((el) => {
             if (!sliceSet.has(el.dataset.name)) el.remove();
         });
 
         monitorVmRows.querySelectorAll(".stats-panel").forEach((p) => p.remove());
 
+        const rowElsOrdered = [];
         visibleRows.forEach((rowIdx) => {
             let rowEl = monitorVmRows.querySelector(`.monitor-vm-row[data-row="${rowIdx}"]`);
             if (!rowEl) {
                 rowEl = document.createElement("div");
                 rowEl.className = "monitor-vm-row";
                 rowEl.dataset.row = String(rowIdx);
-                monitorVmRows.appendChild(rowEl);
             }
             const rowNames = sliceByRow.get(rowIdx) || [];
             const rowSet = new Set(rowNames);
@@ -6811,14 +6815,25 @@
                 const w = rowEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
                 if (w) rowEl.appendChild(w);
             });
-            monitorVmRows.appendChild(rowEl);
+            rowElsOrdered.push(rowEl);
         });
+        const curKids = monitorVmRows.children;
+        const nOrd = rowElsOrdered.length;
+        let needReplace = nOrd !== curKids.length;
+        if (!needReplace) {
+            for (let i = 0; i < nOrd; i++) {
+                if (curKids[i] !== rowElsOrdered[i]) {
+                    needReplace = true;
+                    break;
+                }
+            }
+        }
+        if (needReplace) monitorVmRows.replaceChildren(...rowElsOrdered);
 
         monitorVmRows.style.setProperty("--monitor-vm-columns", String(cols));
         monitorVmTopSpacer.style.height = (startRow * rowH) + "px";
         monitorVmBottomSpacer.style.height = ((totalRows - endRow) * rowH) + "px";
 
-        monitorListEl.classList.toggle("monitor-virtualized", false);
         updateMonitorItemStyles();
     }
 
@@ -6928,17 +6943,15 @@
 
     if (monitorListEl && monitorListScrollPort && !monitorListScrollPort._vmScrollBound) {
         monitorListScrollPort._vmScrollBound = true;
+        /* Un sync por frame (rAF deduplicado): muchos scroll/evento bloqueaban el hilo y la rueda parecía ir a pasos fijos. */
         monitorListScrollPort.addEventListener("scroll", () => {
             if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
-            if (!monitorVmScrollPending) {
-                monitorVmScrollPending = true;
-                requestAnimationFrame(() => {
-                    monitorVmScrollPending = false;
-                    if (monitorListEl.classList.contains("monitor-list--virtual")) {
-                        syncMonitorVirtualWindow();
-                    }
-                });
-            }
+            if (monitorVmScrollRaf) return;
+            monitorVmScrollRaf = requestAnimationFrame(() => {
+                monitorVmScrollRaf = 0;
+                if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+                syncMonitorVirtualWindow();
+            });
         }, { passive: true });
         let monitorVmResizeDebounce = null;
         if (typeof ResizeObserver !== "undefined") {

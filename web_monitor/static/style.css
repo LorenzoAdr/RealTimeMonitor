@@ -1529,6 +1529,8 @@ main {
     min-width: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Evita que el anclaje de scroll del motor compense cambios de spacers en la lista virtual. */
+    overflow-anchor: none;
     scrollbar-gutter: stable;
     /* Firefox ignora ::-webkit-scrollbar; auto suele mostrar barra clásica más visible que thin. */
     scrollbar-width: auto;
@@ -1554,14 +1556,22 @@ body.theme-light .monitor-list-scroll {
     display: block;
 }
 .monitor-list.monitor-list--virtual .monitor-vm-rows {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
     width: 100%;
 }
 .monitor-list.monitor-list--virtual .monitor-vm-row {
     display: grid;
     grid-template-columns: repeat(var(--monitor-vm-columns, 1), minmax(0, 1fr));
     column-gap: 8px;
-    margin-bottom: 2px;
+    margin-bottom: 0;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    min-height: 0;
+    height: var(--monitor-vm-row-h, 38px);
+    overflow: hidden;
+    align-items: stretch;
 }
 .monitor-list.monitor-list--virtual .monitor-vm-spacer {
     display: block;
@@ -1570,8 +1580,7 @@ body.theme-light .monitor-list-scroll {
 }
 .monitor-list.monitor-list--virtual .monitor-item-wrap {
     margin-bottom: 0;
-    content-visibility: visible;
-    contain-intrinsic-size: auto;
+    min-width: 0;
 }
 
 .monitor-list.mon-drop-over {
