@@ -10,23 +10,23 @@
 
 ```bash
 # 1. Instalar dependencias
-chmod +x scripts/setup.sh
-./scripts/setup.sh
+chmod +x scripts/varmon/setup.sh
+./scripts/varmon/setup.sh
 
 # 2. Compilar
 mkdir -p build && cd build
 cmake .. && make -j$(nproc)
 
-# 3. Lanzar el servidor demo (C++)
-./demo_app/demo_server
-
-# 4. En otra terminal, lanzar el monitor web (Python)
-cd web_monitor
-source .venv/bin/activate
-python app.py
-
-# 5. Abrir http://localhost:8080
+# 3–5. Tres terminales (ver scripts/LAUNCH.md)
+cd ..
+./scripts/launch_demo.sh
+./scripts/launch_web.sh
+./scripts/launch_ui.sh
 ```
+
+**Parar** procesos VarMonitor del usuario actual: `./scripts/stop_varmonitor.sh` (opcional `VARMON_STOP_DRY_RUN=1`).
+
+**PDF** de la documentación Markdown (nav MkDocs): `./scripts/build_docs_pdf.sh` → `dist-docs/pdf/` (necesitas `pandoc` y LaTeX o `wkhtmltopdf`; ver `scripts/varmon/build_docs_pdf.py`).
 
 ## Configuración: varmon.conf
 
@@ -51,7 +51,9 @@ Opcional: `cycle_interval_ms`, `update_ratio_max`, `lan_ip`, `bind_host`, `auth_
 
 **Sidecar (entorno, no `varmon.conf`)**: `VARMON_SIDECAR_BIN`, **`VARMON_SIDECAR_PERF_FLUSH_EVERY`** (1–512): frecuencia de escritura del JSON de `--perf-file` (panel Perf, capa sidecar).
 
-Ruta del archivo: variable de entorno `VARMON_CONFIG` o en C++ `varmon::set_config_path(...)`.
+Ruta del archivo: variable de entorno `VARMON_CONFIG`; si no, `./varmon.conf` en el cwd, luego `data/varmon.conf` en la raíz del repo, luego `varmon.conf` en la raíz (legado). En C++: `varmon::set_config_path(...)`.
+
+**Datos en disco (grabaciones, plantillas, sesiones):** por defecto, en desarrollo bajo `web_monitor/recordings/`, `web_monitor/server_state/`. Con el ejecutable PyInstaller, por defecto `INSTALL_DIR/data/recordings/` y `INSTALL_DIR/data/server_state/` (junto al binario). Override: `VARMON_DATA_DIR`, o claves `data_root`, `recordings_dir`, `server_state_dir` en `varmon.conf`.
 
 ## Visor de log integrado
 
@@ -68,7 +70,8 @@ La API `GET /api/log?tail=2000&source=python|cpp|all` devuelve JSON con `{ "line
 
 ```
 monitor/
-├── varmon.conf
+├── data/
+│   └── varmon.conf      # Configuración recomendada en el repo
 ├── libvarmonitor/       # C++: VarMonitor, shm_publisher, uds_server
 ├── demo_app/
 ├── web_monitor/         # Python FastAPI, UdsBridge, ShmReader

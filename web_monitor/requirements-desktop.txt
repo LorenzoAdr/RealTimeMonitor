@@ -1,7 +1,7 @@
-# Ventana embebida para ./scripts/run_desktop.sh (Qt WebEngine vía pip; sin Chromium del sistema).
+# Ventana embebida para ./scripts/launch_ui.sh (Qt WebEngine vía pip; sin Chromium del sistema).
 # Tamaño aproximado: PySide6 ~150–250 MB en disco según plataforma.
 #
-# WSL: ./scripts/run_desktop.sh abre el navegador de Windows si no hay DISPLAY/Wayland (típico).
+# WSL: sin DISPLAY/Wayland suele abrirse el navegador de Windows desde launch_ui.
 #      PySide6 solo hace falta si quieres ventana embebida con WSLg (Windows 11).
 pywebview>=5.0
 qtpy>=2.4.0

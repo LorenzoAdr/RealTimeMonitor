@@ -32,6 +32,9 @@ nav:
   - Home: index.md
   - Architecture: architecture.md
   - Installation and configuration: setup.md
+  - Launch scripts: launch.md
+  - Docker: docker.md
+  - Packaged binary (PyInstaller): build-binary.md
   - Backend (Python): backend.md
   - Frontend: frontend.md
   - Protocols: protocols.md

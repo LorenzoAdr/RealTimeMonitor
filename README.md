@@ -27,6 +27,9 @@ Outputs: `site/` → **`/docs/es/`**, `site_en/` → **`/docs/en/`**. The monito
 
 - [Architecture](docs_en/architecture.md) — Components, data flow, instance discovery, visual vs internal rates.
 - [Installation and configuration](docs_en/setup.md) — Requirements, quick install, `varmon.conf`.
+- [Docker](docs_en/docker.md) — Container image, bridge vs host mode.
+- [Packaged binary (PyInstaller)](docs_en/build-binary.md) — Single executable without pip on the target.
+- [Launch scripts](scripts/LAUNCH.md) — `launch_demo` / `launch_web` / `launch_ui`; `stop_varmonitor`; `build_docs_pdf`.
 - [Backend (Python)](docs_en/backend.md) — Routes, WebSocket, UdsBridge, ShmReader, alarms and recording.
 - [Frontend](docs_en/frontend.md) — `app.js` structure, columns, Plotly charts, state and persistence.
 - [Protocols](docs_en/protocols.md) — UDS format, commands, SHM layout, alarms and recording.
@@ -39,23 +42,50 @@ Outputs: `site/` → **`/docs/es/`**, `site_en/` → **`/docs/en/`**. The monito
 
 ```bash
 # 1. Install dependencies
-chmod +x scripts/setup.sh
-./scripts/setup.sh
+chmod +x scripts/varmon/setup.sh
+./scripts/varmon/setup.sh
 
 # 2. Build
 mkdir -p build && cd build
 cmake .. && make -j$(nproc)
 
-# 3. Run the demo server (C++)
-./demo_app/demo_server
-
-# 4. In another terminal, run the web monitor (Python)
-cd web_monitor
-source .venv/bin/activate
-python app.py
-
-# 5. Open http://localhost:8080
+# 3–5. Three terminals (or run in background): demo C++, web backend, UI
+cd ..   # back to repo root
+./scripts/launch_demo.sh
+./scripts/launch_web.sh
+./scripts/launch_ui.sh   # picks highest responding port in varmon.conf range
 ```
+
+See **[scripts/LAUNCH.md](scripts/LAUNCH.md)**.
+
+## Docker
+
+Run only the web backend in a container (browser on the host):
+
+```bash
+docker compose up --build
+# or: ./scripts/varmon/docker-run.sh
+```
+
+For **live** monitoring against the **host C++ process** on **Linux** (shared `/tmp` UDS + SHM), use the host-network compose file:
+
+```bash
+docker compose -f docker-compose.host.yml up --build
+# or: ./scripts/varmon/docker-run.sh host
+```
+
+See **[docs/docker.md](docs/docker.md)** (Spanish) or **[docs_en/docker.md](docs_en/docker.md)** (English). To embed the monitor in another image without depending on submodule paths, install the three runtime packages listed in **`web_monitor/requirements-docker.txt`** via `RUN pip install ...` in your Dockerfile (see docs); that file is the version reference.
+
+## Standalone binary (no Python on target)
+
+Build a single executable with PyInstaller (details: **[docs_en/build-binary.md](docs_en/build-binary.md)**):
+
+```bash
+./scripts/varmon/build_varmonitor_web.sh
+# → web_monitor/dist/varmonitor-web
+```
+
+To run the PyInstaller build: **`export VARMON_PACKAGED_WEB_BIN=.../varmonitor-web`** then **`./scripts/launch_web.sh`**; open the UI with **`./scripts/launch_ui.sh`** (needs `python3` for these launcher scripts only; see [docs_en/build-binary.md](docs_en/build-binary.md)).
 
 ## Configuration: varmon.conf
 
@@ -102,7 +132,8 @@ With macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
 
 ```
 monitor/
-├── varmon.conf
+├── data/
+│   └── varmon.conf      # Config (también: VARMON_CONFIG o ./varmon.conf en cwd)
 ├── libvarmonitor/       # C++: VarMonitor, shm_publisher, uds_server
 ├── demo_app/
 ├── web_monitor/         # Python FastAPI, UdsBridge, ShmReader

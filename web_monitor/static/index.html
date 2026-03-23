@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarMonitor</title>
-    <link rel="stylesheet" href="/static/style.css?v=7">
+    <link rel="stylesheet" href="/static/style.css?v=8">
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
-<body>
+<body class="theme-light">
     <div id="authOverlay" class="auth-overlay" style="display:none">
         <div class="auth-modal">
             <h2 id="authTitle">Contraseña</h2>
@@ -36,7 +36,7 @@
             <div class="adv-block" title="RAM: Py/C++ son procesos aparte. «HTML» aquí es solo el heap JS (V8), no la RAM total del proceso del navegador que ves en el monitor del portátil (GPU, WebGL/Plotly, cachés nativas, fragmentación; Chromium a menudo no devuelve páginas al SO).">
                 <span class="adv-label">RAM</span>
                 <span id="advRamHtml" class="adv-val" title="Solo heap JavaScript (V8) de esta pestaña. El monitor del sistema muestra todo el proceso del navegador, suele ser mucho mayor.">HTML: —</span>
-                <span id="advRamPython" class="adv-val" title="RSS del proceso Python (FastAPI/uvicorn). Independiente del navegador de run_desktop.">Py: —</span>
+                <span id="advRamPython" class="adv-val" title="RSS del proceso Python (FastAPI/uvicorn). Independiente del navegador (launch_ui).">Py: —</span>
                 <span id="advRamCpp" class="adv-val" title="RAM del proceso C++ (vía UDS), si está disponible">C++: —</span>
             </div>
             <div class="adv-block">
@@ -111,8 +111,8 @@
                     </label>
                     <label><span id="themeLabel">Tema:</span>
                         <select id="themeSelect">
+                            <option value="light" selected>Claro</option>
                             <option value="dark">Oscuro</option>
-                            <option value="light">Claro</option>
                         </select>
                     </label>
                     <label id="visualBufferLabel">Buffer visual:

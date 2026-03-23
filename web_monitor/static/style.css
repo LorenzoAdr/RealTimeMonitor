@@ -1547,7 +1547,7 @@ body.theme-light .monitor-list-scroll {
     column-gap: 8px;
 }
 
-/* Lista virtual: una sola columna y altura total simulada con spacers (miles de variables). */
+/* Lista virtual: altura total simulada con spacers + filas virtuales (1..N columnas). */
 .monitor-list.monitor-list--virtual {
     column-count: 1 !important;
     column-gap: 0;
@@ -1557,12 +1557,19 @@ body.theme-light .monitor-list-scroll {
     display: block;
     width: 100%;
 }
+.monitor-list.monitor-list--virtual .monitor-vm-row {
+    display: grid;
+    grid-template-columns: repeat(var(--monitor-vm-columns, 1), minmax(0, 1fr));
+    column-gap: 8px;
+    margin-bottom: 2px;
+}
 .monitor-list.monitor-list--virtual .monitor-vm-spacer {
     display: block;
     width: 100%;
     flex-shrink: 0;
 }
 .monitor-list.monitor-list--virtual .monitor-item-wrap {
+    margin-bottom: 0;
     content-visibility: visible;
     contain-intrinsic-size: auto;
 }

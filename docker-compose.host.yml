@@ -1,0 +1,22 @@
+# VarMonitor web: mismo espacio de red y memoria compartida que el host (Linux).
+# Sirve para conectar el backend Python al proceso C++ del host (UDS en /tmp, SHM).
+#
+# Uso:
+#   docker compose -f docker-compose.host.yml up --build
+#
+# Luego abre http://127.0.0.1:<web_port> (por defecto 8080, ver varmon.conf).
+# No uses el compose puente (docker-compose.yml) a la vez: elige uno u otro.
+
+services:
+  varmonitor-web:
+    build: ./web_monitor
+    container_name: varmonitor-web-host
+    network_mode: host
+    ipc: host
+    volumes:
+      - ./data/varmon.conf:/app/varmon.conf:ro
+      - ./web_monitor/recordings:/app/recordings
+      - /tmp:/tmp
+    environment:
+      - VARMON_CONFIG=/app/varmon.conf
+    restart: unless-stopped

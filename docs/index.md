@@ -8,6 +8,8 @@ Sistema de monitorización de variables en tiempo real para aplicaciones C++20. 
 
 - **[Arquitectura](architecture.md)**: Componentes (C++, Python, frontend), flujo de datos, tasas visual e interna.
 - **[Instalación y configuración](setup.md)**: Requisitos, instalación rápida, `varmon.conf`.
+- **[Lanzadores](launch.md)**: `launch_demo`, `launch_web`, `launch_ui`; respaldo local en `scripts/_legacy_launch/`.
+- **[Docker](docker.md)**: Contenedor del monitor web (modo puente o host para C++ en el mismo Linux).
 - **[Backend (Python)](backend.md)**: `app.py`, descubrimiento de instancias, WebSocket, UdsBridge, ShmReader, alarmas y grabación.
 - **[Frontend](frontend.md)**: Estructura de `app.js`, columnas, gráficos Plotly, estado y persistencia.
 - **[Protocolos](protocols.md)**: Formato UDS (longitud + JSON), comandos, layout SHM, mensajes WebSocket.

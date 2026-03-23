@@ -361,7 +361,7 @@
     let computedHistories = {};
     let varFormat = {};  // { name: { ori: "dec", sal: "dec" } }
     let currentLang = "es";
-    let currentTheme = "dark";
+    let currentTheme = "light";
     let monitorColumnsCount = 1;
     let monitorPaneWidthPx = null;
     let sharedZoomXRange = null; // [min, max] en tiempo relativo para todos los gráficos
@@ -6361,12 +6361,10 @@
     }
 
     function shouldUseMonitorVirtualList() {
-        /* column-count + spacers de la VM no son compatibles: con 2–3 columnas se usa lista completa. */
-        if (monitorColumnsCount > 1) return false;
         return getVisibleMonitorNames().length >= MONITOR_VM_THRESHOLD;
     }
 
-    /** Panel de detalle (stats/ARINC) en zona de gráficos: misma UX que lista virtual si hay una sola columna. */
+    /** Panel de detalle (stats/ARINC) en zona de gráficos: se mantiene en 1 columna para no romper densidad visual. */
     function monitorDetailPanelUsesDock() {
         return monitorColumnsCount <= 1;
     }
@@ -6431,6 +6429,10 @@
         if (!monitorVmRows || !monitorListEl) return;
         if (!force && monitorListEl._vmRowFrozen) return;
         let maxH = 0;
+        monitorVmRows.querySelectorAll(".monitor-vm-row").forEach((row) => {
+            const h = row.offsetHeight;
+            if (h > maxH) maxH = h;
+        });
         monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach((w) => {
             const h = w.offsetHeight;
             if (h > maxH) maxH = h;
@@ -6720,6 +6722,9 @@
         if (!monitorVmRows || !monitorVmTopSpacer || !monitorVmBottomSpacer) return;
         const renderOrder = getVisibleMonitorRenderOrder();
         const N = renderOrder.length;
+        const cols = Math.max(1, monitorColumnsCount | 0);
+        const rowsPerCol = Math.max(1, Math.ceil(N / cols));
+        const totalRows = rowsPerCol;
         const rowH = monitorVmRowPx;
 
         const statusEl = document.getElementById("monitorFilterStatus");
@@ -6746,41 +6751,72 @@
 
         const viewportH = monitorListScrollPort.clientHeight || 400;
         const scrollTop = monitorListScrollPort.scrollTop;
-        let start = Math.floor(scrollTop / rowH) - MONITOR_VM_BUFFER;
-        let end = Math.ceil((scrollTop + viewportH) / rowH) + MONITOR_VM_BUFFER;
-        if (start < 0) start = 0;
-        if (end > N) end = N;
-        if (end <= start) {
-            end = Math.min(N, start + 1);
+        let startRow = Math.floor(scrollTop / rowH) - MONITOR_VM_BUFFER;
+        let endRow = Math.ceil((scrollTop + viewportH) / rowH) + MONITOR_VM_BUFFER;
+        if (startRow < 0) startRow = 0;
+        if (endRow > totalRows) endRow = totalRows;
+        if (endRow <= startRow) {
+            endRow = Math.min(totalRows, startRow + 1);
         }
-        const slice = renderOrder.slice(start, end);
-        const sliceSet = new Set(slice);
+        const visibleRows = [];
+        for (let r = startRow; r < endRow; r++) visibleRows.push(r);
+        const visibleRowsSet = new Set(visibleRows.map((r) => String(r)));
+        const sliceByRow = new Map();
+        visibleRows.forEach((r) => {
+            const rowNames = [];
+            for (let c = 0; c < cols; c++) {
+                const idx = c * rowsPerCol + r;
+                if (idx >= N) continue;
+                rowNames.push(renderOrder[idx]);
+            }
+            sliceByRow.set(r, rowNames);
+        });
+        const sliceSet = new Set();
+        sliceByRow.forEach((rowNames) => rowNames.forEach((n) => sliceSet.add(n)));
 
-        monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach(el => {
+        monitorVmRows.querySelectorAll(".monitor-vm-row").forEach((rowEl) => {
+            if (!visibleRowsSet.has(rowEl.dataset.row)) rowEl.remove();
+        });
+
+        monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach((el) => {
             if (!sliceSet.has(el.dataset.name)) el.remove();
         });
 
-        monitorVmRows.querySelectorAll(".stats-panel").forEach(p => p.remove());
+        monitorVmRows.querySelectorAll(".stats-panel").forEach((p) => p.remove());
 
-        for (let i = 0; i < slice.length; i++) {
-            const name = slice[i];
-            let wrap = monitorVmRows.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
-            if (wrap) {
-                updateMonitorRowWrap(wrap, name);
-            } else {
-                wrap = createMonitorRowWrap(name);
-                monitorVmRows.appendChild(wrap);
+        visibleRows.forEach((rowIdx) => {
+            let rowEl = monitorVmRows.querySelector(`.monitor-vm-row[data-row="${rowIdx}"]`);
+            if (!rowEl) {
+                rowEl = document.createElement("div");
+                rowEl.className = "monitor-vm-row";
+                rowEl.dataset.row = String(rowIdx);
+                monitorVmRows.appendChild(rowEl);
             }
-            syncMonitorImpositionVisual(wrap, name);
-        }
-
-        slice.forEach(name => {
-            const w = monitorVmRows.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
-            if (w) monitorVmRows.appendChild(w);
+            const rowNames = sliceByRow.get(rowIdx) || [];
+            const rowSet = new Set(rowNames);
+            rowEl.querySelectorAll(".monitor-item-wrap").forEach((el) => {
+                if (!rowSet.has(el.dataset.name)) el.remove();
+            });
+            rowNames.forEach((name) => {
+                let wrap = rowEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
+                if (wrap) {
+                    updateMonitorRowWrap(wrap, name);
+                } else {
+                    wrap = createMonitorRowWrap(name);
+                    rowEl.appendChild(wrap);
+                }
+                syncMonitorImpositionVisual(wrap, name);
+            });
+            rowNames.forEach((name) => {
+                const w = rowEl.querySelector(`.monitor-item-wrap[data-name="${CSS.escape(name)}"]`);
+                if (w) rowEl.appendChild(w);
+            });
+            monitorVmRows.appendChild(rowEl);
         });
 
-        monitorVmTopSpacer.style.height = (start * rowH) + "px";
-        monitorVmBottomSpacer.style.height = ((N - end) * rowH) + "px";
+        monitorVmRows.style.setProperty("--monitor-vm-columns", String(cols));
+        monitorVmTopSpacer.style.height = (startRow * rowH) + "px";
+        monitorVmBottomSpacer.style.height = ((totalRows - endRow) * rowH) + "px";
 
         monitorListEl.classList.toggle("monitor-virtualized", false);
         updateMonitorItemStyles();

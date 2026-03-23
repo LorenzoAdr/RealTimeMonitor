@@ -32,7 +32,26 @@ from uds_client import UdsBridge
 from shm_reader import ShmReader, open_shm_rw, write_shm_import_row
 import perf_agg
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+# PyInstaller onefile: estáticos en sys._MEIPASS; sin esto STATIC_DIR puede quedar mal resuelto.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _app_base = sys._MEIPASS
+else:
+    _app_base = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(_app_base, "static")
+
+
+def _web_app_js_script_src() -> str:
+    """URL del script principal del cliente: por defecto /static/app.js; override con VARMON_WEB_APP_JS."""
+    raw = (os.environ.get("VARMON_WEB_APP_JS") or "").strip()
+    if not raw:
+        return "/static/app.js"
+    if any(c in raw for c in '"<>') or ".." in raw or raw.startswith(("javascript:", "data:")):
+        print("[VarMonitor Web] VARMON_WEB_APP_JS inválida; usando /static/app.js")
+        return "/static/app.js"
+    if raw.startswith("/"):
+        return raw
+    return "/static/" + raw.lstrip("/")
+
 
 # Lease de medición de rendimiento: se renueva al abrir el panel Perf o la tira de estadísticas avanzadas.
 PERF_LEASE_SEC = 2.5
@@ -69,6 +88,9 @@ DEFAULTS = {
     "alarms_backend": "sidecar_cpp",
     # Linux: CPUs para varmon_sidecar (grabación + alarmas), p. ej. "3" o "2,5" o "4-7". Vacío = sin afinidad.
     "sidecar_cpu_affinity": "",
+    # Rutas de datos (vacío = defaults: desarrollo bajo web_monitor/; PyInstaller: INSTALL_DIR/data/…)
+    "data_root": "",
+    "recordings_dir": "",
 }
 
 CONFIG_ABS_PATH = ""
@@ -78,10 +100,15 @@ def load_config() -> dict:
     """Read varmon.conf (key = value). No external dependencies."""
     global CONFIG_ABS_PATH
     cfg = dict(DEFAULTS)
-    path = os.environ.get("VARMON_CONFIG")
+    path = (os.environ.get("VARMON_CONFIG") or "").strip()
     if not path:
-        # Probar cwd y luego directorio del proyecto (parent del script)
-        for candidate in ("varmon.conf", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "varmon.conf")):
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _repo = os.path.abspath(os.path.join(_here, ".."))
+        for candidate in (
+            "varmon.conf",
+            os.path.join(_repo, "data", "varmon.conf"),
+            os.path.join(_repo, "varmon.conf"),
+        ):
             abs_candidate = os.path.abspath(candidate)
             if os.path.isfile(abs_candidate):
                 path = abs_candidate
@@ -119,6 +146,8 @@ def load_config() -> dict:
                     "bind_host",
                     "auth_password",
                     "server_state_dir",
+                    "data_root",
+                    "recordings_dir",
                     "log_file_cpp",
                     "recording_backend",
                     "recording_sidecar_bin",
@@ -140,10 +169,92 @@ def load_config() -> dict:
         print(f"  Para cambiar la ruta:")
         print(f"    - Variable de entorno: VARMON_CONFIG=/ruta/a/varmon.conf")
         print(f"    - Colocar varmon.conf en el directorio de trabajo actual")
+        print(f"    - O en <repo>/data/varmon.conf (desarrollo)")
+        if getattr(sys, "frozen", False):
+            print(
+                "  Ejecutable empaquetado: coloca varmon.conf junto al ejecutable o "
+                "export VARMON_CONFIG=/ruta/absoluta/varmon.conf"
+            )
     return cfg
 
 
+def _repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+def _install_dir() -> str | None:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return None
+
+
+def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
+    """Grabaciones y server_state: desarrollo → web_monitor/…; frozen → INSTALL_DIR/data/… salvo override."""
+    cfg_dir = os.path.dirname(os.path.abspath(CONFIG_ABS_PATH)) if CONFIG_ABS_PATH else _repo_root()
+    inst = _install_dir()
+    env_data = (os.environ.get("VARMON_DATA_DIR") or "").strip()
+    rec_key = (cfg.get("recordings_dir") or "").strip()
+    st_key = (cfg.get("server_state_dir") or "").strip()
+    data_root_key = (cfg.get("data_root") or "").strip()
+
+    def norm(p: str, base: str) -> str:
+        p = os.path.expanduser(p)
+        if not p:
+            return ""
+        if os.path.isabs(p):
+            return os.path.abspath(p)
+        return os.path.abspath(os.path.join(base, p))
+
+    rec = norm(rec_key, cfg_dir) if rec_key else ""
+    st = norm(st_key, cfg_dir) if st_key else ""
+
+    if rec and st:
+        return rec, st
+
+    if env_data:
+        root = os.path.abspath(os.path.expanduser(env_data))
+        if not rec:
+            rec = os.path.join(root, "recordings")
+        if not st:
+            st = os.path.join(root, "server_state")
+        return rec, st
+
+    if data_root_key:
+        root = norm(data_root_key, cfg_dir)
+        if not rec:
+            rec = os.path.join(root, "recordings")
+        if not st:
+            st = os.path.join(root, "server_state")
+        return rec, st
+
+    if inst:
+        root = os.path.join(inst, "data")
+        if not rec:
+            rec = os.path.join(root, "recordings")
+        if not st:
+            st = os.path.join(root, "server_state")
+        return rec, st
+
+    wm = os.path.dirname(os.path.abspath(__file__))
+    if not rec:
+        rec = os.path.join(wm, "recordings")
+    if not st:
+        st = os.path.join(wm, "server_state")
+    return rec, st
+
+
 _config = load_config()
+
+RECORDINGS_DIR, STATE_ROOT_DIR = _resolve_data_layout(_config)
+_inst = _install_dir()
+BROWSER_ROOT = Path(_inst) if _inst else Path(__file__).resolve().parent.parent
+TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
+SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
+
+print(
+    f"[VarMonitor Web] Rutas datos: recordings={os.path.abspath(RECORDINGS_DIR)} | state={os.path.abspath(STATE_ROOT_DIR)}",
+    flush=True,
+)
 
 # --- Buffer de log para visor integrado ---
 _LOG_BUFFER_LOCK = threading.Lock()
@@ -214,7 +325,7 @@ FAILED_AUTH_ATTEMPTS = 0
 WATCHDOG_IDLE_SEC = 300  # 5 minutos
 
 async def _startup_uds_hint():
-    """Tras arrancar: si no hay ningún VarMonitor C++ en /tmp, avisar en consola (run_desktop solo levanta Python)."""
+    """Tras arrancar: si no hay ningún VarMonitor C++ en /tmp, avisar en consola (launch_web solo levanta Python)."""
     await asyncio.sleep(0.4)
     try:
         inst = await asyncio.to_thread(_list_uds_instances, None)
@@ -421,7 +532,20 @@ async def log_requests_middleware(request: Request, call_next):
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    js_src = _web_app_js_script_src()
+    if js_src == "/static/app.js":
+        return FileResponse(index_path)
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            html = f.read()
+    except OSError:
+        return FileResponse(index_path)
+    marker = '<script src="/static/app.js"></script>'
+    if marker not in html:
+        return FileResponse(index_path)
+    html = html.replace(marker, f'<script src="{js_src}"></script>', 1)
+    return HTMLResponse(content=html, media_type="text/html")
 
 
 @app.get("/api/vars")
@@ -532,13 +656,6 @@ def _first_uds_bridge():
         return None
 
 
-# Directorio para grabaciones (backend)
-RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
-STATE_ROOT_DIR = (_config.get("server_state_dir") or "").strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_state")
-# Raíz del navegador de archivos remoto = directorio principal del proyecto (contiene web_monitor/)
-BROWSER_ROOT = Path(__file__).resolve().parent.parent
-TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
-SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
 ALARM_BUFFER_SEC = 2.2  # ~1 s previos + ~1 s posteriores al contexto de disparo (TSV con snapshot completo)
 ALARM_UDS_POLL_SEC = 0.2  # Sin monitor pero con alarmas: get_var solo sobre nombres en alarma (evita snapshots SHM masivos)
 # SHM muy rápido puede acumular decenas de miles de filas en la ventana; el TSV síncrono bloquearía el bucle asyncio minutos.
