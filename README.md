@@ -2,6 +2,8 @@
 
 **VarMonitor** links a **C++20** process to a **browser-based** control room: live values, time-series plots, alarms, and disk recording—without TCP on the data path. Your app embeds **libvarmonitor**; the stack talks over **Unix domain sockets (UDS)** for RPC and **POSIX shared memory (SHM)** for high-rate snapshots. The web backend (FastAPI) maps the same SHM segment and pushes filtered updates to clients over **WebSockets**.
 
+![VarMonitor web UI — light theme (live mode: browser, monitor, plots)](docs/images/general_claro.png)
+
 > **Spanish:** detailed docs in Spanish live under [`docs/`](docs/); this README is in English for the default GitHub landing page.
 
 ### How data moves (short)
@@ -39,7 +41,7 @@ Outputs: `site/` → **`/docs/es/`**, `site_en/` → **`/docs/en/`**. The monito
 - [Packaged binary (PyInstaller)](docs_en/build-binary.md) — Single executable without pip on the target.
 - [Launch scripts](scripts/LAUNCH.md) — `launch_demo` / `launch_web` / `launch_ui`; `stop_varmonitor`; `build_docs_pdf`.
 - [Backend (Python)](docs_en/backend.md) — Routes, WebSocket, UdsBridge, ShmReader, alarms and recording.
-- [Frontend](docs_en/frontend.md) — `app.js` structure, columns, Plotly charts, state and persistence.
+- [Frontend](docs_en/frontend.md) — modular client (`static/js/entry.mjs`, ES modules, optional bundle), columns, Plotly charts, state and persistence.
 - [Protocols](docs_en/protocols.md) — UDS format, commands, SHM layout, alarms and recording.
 - [C++ integration](docs_en/cpp-integration.md) — Linking libvarmonitor, basic usage, macros.
 - [Troubleshooting](docs_en/troubleshooting.md) — WSL/semaphores, connection issues, empty charts.
@@ -142,6 +144,26 @@ With macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
 - **Performance UX**: **Rel act** (WebSocket cadence), linked **SHM publish slice**, adaptive tab throttling, chart downsampling, **Perf** tri-layer panel.
 - **Ops**: optional auth password, multi-instance port scan, built-in log viewer, MkDocs help (`/docs/en/`), settings persistence, keyboard shortcuts (e.g. record, screenshot).
 
+## Screenshots
+
+The same assets live under [`docs/images/`](docs/images/) (MkDocs) and [`pictures/`](pictures/) in the repo root.
+
+| Live — dark theme |
+|-------------------|
+| ![VarMonitor UI, dark theme](docs/images/general_oscuro2.png) |
+
+| Analysis mode (offline TSV) | Replay mode (TSV + live SHM) |
+|-----------------------------|------------------------------|
+| ![Analysis mode](docs/images/analisis.png) | ![Replay mode](docs/images/replay.png) |
+
+| Advanced plot tools | Perf panel (`/api/perf`) |
+|---------------------|-------------------------|
+| ![Advanced options](docs/images/avanzado.png) | ![Performance overlay](docs/images/perf.png) |
+
+| Help (in-app guide) | Built-in log viewer |
+|---------------------|---------------------|
+| ![Help modal](docs/images/manual.png) | ![Log panel](docs/images/log.png) |
+
 ## Project layout
 
 ```
@@ -153,7 +175,8 @@ monitor/
 ├── web_monitor/         # Python FastAPI, UdsBridge, ShmReader
 │   ├── recordings/      # TSV recordings and alarms (generated)
 │   └── static/
-├── docs/                # MkDocs documentation (Spanish)
-├── docs_en/             # MkDocs documentation (English)
+├── docs/                # MkDocs documentation (Spanish); images in docs/images/
+├── docs_en/             # MkDocs documentation (English); images in docs_en/images/
+├── pictures/            # Screenshot sources (mirrored under docs/*/images/ for MkDocs)
 └── scripts/
 ```

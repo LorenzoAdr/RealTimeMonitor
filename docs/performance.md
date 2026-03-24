@@ -94,6 +94,8 @@ En conjunto, estas medidas permiten usar VarMonitor con muchas variables y alta 
 
 ## Panel «Perf» y API `/api/perf`
 
+![Panel Perf en la interfaz](images/perf.png){ width="100%" }
+
 - **UI**: En la cabecera, el botón **Perf** abre un panel que hace *polling* de `GET /api/perf` mientras está visible. Muestra tres capas en tablas y barras apiladas:
   - **Python** (`perf_agg`): fases del backend (p. ej. manejo de snapshots SHM, empaquetado/envío de `vars_update`).
   - **C++** (`server_info.shm_perf_us`): tiempos de CPU dentro de `write_shm_snapshot` cuando la medición está activa en el publicador.

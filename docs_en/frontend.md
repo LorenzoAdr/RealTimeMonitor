@@ -1,12 +1,20 @@
 # Frontend
 
-The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `index.html`, `app.js` (main logic) and `style.css`. It uses **Plotly.js** for charts.
+The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `index.html`, stylesheets, and a **modular ES client** (`js/entry.mjs` → `app-legacy.mjs`, `constants` / `i18n` modules; optional IIFE bundle via esbuild). It uses **Plotly.js** for charts.
 
-## General structure of app.js
+## UI overview
 
-- **IIFE**: All code runs inside an anonymous function on load to avoid polluting the global scope.
-- **Global state** (variables in the IIFE scope): `monitoredNames`, `monitoredOrder`, `varGraphAssignment`, `arrayElemAssignment`, `graphList`, `historyCache`, `arrayElemHistory`, `plotInstances`, `alarms`, `computedVars`, `appMode`, `offlineDataset`, etc.
-- **Initialization**: At the end of the script, `loadConfig()`, `pruneArincDerivedFromMonitored()`, `applyTheme()`, `applyLanguage()`, then event listeners, plot area `ResizeObserver`, and `rebuildPlotArea()`. No React/Vue; plain DOM and callbacks.
+Header with connection state, **mode** selector (Live / Analysis / Replay), **Rel act**, theme and language; three columns (browser, monitor, plots).
+
+![UI — light theme](images/general_claro.png){ width="100%" }
+
+![UI — dark theme](images/general_oscuro2.png){ width="100%" }
+
+## Client code structure
+
+- **ES modules**: [`entry.mjs`](../web_monitor/static/js/entry.mjs) loads the main logic; constants and i18n live under [`js/modules/`](../web_monitor/static/js/modules/). Without a bundler, the browser loads `.mjs` files with `type="module"`.
+- **Global state** (main module scope): `monitoredNames`, `monitoredOrder`, `varGraphAssignment`, `arrayElemAssignment`, `graphList`, `historyCache`, `arrayElemHistory`, `plotInstances`, `alarms`, `computedVars`, `appMode`, `offlineDataset`, etc.
+- **Initialization**: After load, `loadConfig()`, `pruneArincDerivedFromMonitored()`, `applyTheme()`, `applyLanguage()`, listeners, plot area `ResizeObserver`, and `rebuildPlotArea()`.
 
 ## Three columns
 
@@ -36,6 +44,26 @@ The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `inde
 - **Offline (analysis)**: Load TSV recordings (server or local file). Frontend requests time windows via API (`/api/recordings/{filename}/window` or `window_batch`) and fills `historyCache` / `arrayElemHistory`. `offlineDataset`, `offlineRecordingName`, segments, scrubber and playback controls are specific to this mode.
 - **Replay (hybrid)**: WebSocket stays on for `vars_names`/`vars_update` from SHM while using a TSV as a time reference. Variable list is the union of backend + TSV. Only TSV variables marked **impose** continuously write to SHM from TSV values (with `Δt`/`Δv` offsets); non-imposed TSV variables behave like normal SHM variables.
 
+![Analysis mode — TSV and offline controls](images/analisis.png){ width="100%" }
+
+![Replay mode — TSV reference + live data](images/replay.png){ width="100%" }
+
+## Advanced options (plot area)
+
+Collapsible panel (bottom-right) for anomalies, segments, notes, PDF report, etc.
+
+![Advanced options near the plots](images/avanzado.png){ width="100%" }
+
+## In-app help and log viewer
+
+- **Help** (`H` / `?`): modal with per-mode guidance and links to MkDocs when built.
+
+![In-app help window](images/manual.png){ width="100%" }
+
+- **Log**: panel with Python backend log (and optional C++ tail via `log_file_cpp`); see [Installation — Log viewer](setup.md#built-in-log-viewer).
+
+![Log button in the header](images/log.png){ width="100%" }
+
 ## Chart resize
 
 - A **ResizeObserver** watches `#plotArea`. On size change, **Plotly.relayout** each chart container to current `getBoundingClientRect()`.
@@ -44,6 +72,8 @@ The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `inde
 
 - Header **Perf** button: full-screen overlay that polls **`GET /api/perf`** while open.
 - Three sections: **Python**, **C++** (`write_shm_snapshot`), and **sidecar** (only when `sidecar_cpp` recording is active and the binary writes the `--perf-file` JSON). Tables show last time, EMA, and sample count; stacked bar charts per layer.
+
+![Perf panel — Python, C++ and sidecar layers](images/perf.png){ width="100%" }
 - The first request **renews the measurement lease** on the server (same as `GET /api/advanced_stats?perf=1` from the advanced stats strip). If the lease expires, the panel shows a hint until it is opened again or advanced stats refreshes the lease.
 - Sidecar phase details and optimizations: [Performance](performance.md).
 

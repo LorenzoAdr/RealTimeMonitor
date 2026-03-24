@@ -9,6 +9,11 @@ block_cipher = None
 datas = [("static", "static")]
 binaries = []
 hiddenimports = [
+    "varmon_web",
+    "varmon_web.settings",
+    "varmon_web.paths",
+    "varmon_web.log_buffer",
+    "varmon_web.uds_discovery",
     "uds_client",
     "shm_reader",
     "perf_agg",

@@ -1,12 +1,21 @@
 # Frontend
 
-El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.html`, `app.js` (lógica principal) y `style.css`. Usa **Plotly.js** para los gráficos.
+El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.html`, hoja de estilos y cliente **modular ES** (`js/entry.mjs` → `app-legacy.mjs`, módulos `constants` / `i18n`; opcionalmente bundle IIFE vía esbuild). Usa **Plotly.js** para los gráficos.
 
-## Estructura general de app.js
+## Vista general de la interfaz
 
-- **IIFE**: Todo el código está dentro de una función anónima que se ejecuta al cargar el script, para no contaminar el ámbito global.
-- **Estado global** (variables en el ámbito de la IIFE): `monitoredNames`, `monitoredOrder`, `varGraphAssignment`, `arrayElemAssignment`, `graphList`, `historyCache`, `arrayElemHistory`, `plotInstances`, `alarms`, `computedVars`, `appMode`, `offlineDataset`, etc.
-- **Inicialización**: Al final del script se llama a `loadConfig()`, `pruneArincDerivedFromMonitored()`, `applyTheme()`, `applyLanguage()`, y más abajo se registran event listeners, se configura el ResizeObserver del área de gráficos y se llama a `rebuildPlotArea()`. No hay framework (React/Vue); todo es DOM y callbacks.
+Cabecera con estado de conexión, selector de **modo** (Live / Análisis / Replay), **Rel act**, tema e idioma; tres columnas (variables, monitor, gráficos).
+
+![Interfaz en tema claro](images/general_claro.png){ width="100%" }
+
+![Interfaz en tema oscuro](images/general_oscuro2.png){ width="100%" }
+
+## Estructura del código cliente
+
+- **Módulos ES**: el punto de entrada [`entry.mjs`](../web_monitor/static/js/entry.mjs) importa la lógica principal; las constantes y traducciones viven en [`js/modules/`](../web_monitor/static/js/modules/). Sin bundler, el navegador carga los `.mjs` con `type="module"`.
+- **Estado y DOM**: la lógica principal mantiene el estado en el ámbito del módulo (equivalente al antiguo IIFE de un único `app.js`) y manipula el DOM con callbacks; no hay framework (React/Vue).
+- **Estado global** (ámbito del módulo principal): `monitoredNames`, `monitoredOrder`, `varGraphAssignment`, `arrayElemAssignment`, `graphList`, `historyCache`, `arrayElemHistory`, `plotInstances`, `alarms`, `computedVars`, `appMode`, `offlineDataset`, etc.
+- **Inicialización**: Tras cargar el módulo se ejecutan `loadConfig()`, `pruneArincDerivedFromMonitored()`, `applyTheme()`, `applyLanguage()`, listeners, `ResizeObserver` del área de gráficos y `rebuildPlotArea()`.
 
 ## Tres columnas
 
@@ -36,6 +45,26 @@ El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.
 - **Offline (análisis)**: Se cargan grabaciones TSV (desde servidor o fichero local). El frontend pide ventanas de tiempo por API (`/api/recordings/{filename}/window` o `window_batch`) y rellena `historyCache` / `arrayElemHistory` para pintar los mismos gráficos. `offlineDataset`, `offlineRecordingName`, segmentos, scrubber y controles de reproducción son específicos de este modo.
 - **Replay (híbrido)**: Mantiene WebSocket activo para recibir `vars_names`/`vars_update` de SHM y, a la vez, usa una grabación TSV como referencia temporal. La lista de variables es la unión de backend + TSV. Solo las variables TSV marcadas como **imponer** escriben continuamente a SHM siguiendo el valor del TSV (con offsets `Δt`/`Δv`); las TSV no impuestas se comportan como variables normales de SHM.
 
+![Modo análisis — TSV y controles offline](images/analisis.png){ width="100%" }
+
+![Modo replay — referencia TSV + datos en vivo](images/replay.png){ width="100%" }
+
+## Opciones avanzadas en la zona de gráficos
+
+Panel colapsable (esquina inferior derecha) con anomalías, segmentos, notas, informe PDF, etc.
+
+![Opciones avanzadas junto a los gráficos](images/avanzado.png){ width="100%" }
+
+## Ayuda integrada y visor de log
+
+- **Ayuda** (`H` / `?`): modal con guía por modos (Live, análisis, replay) y enlaces a documentación MkDocs si está generada.
+
+![Ventana de ayuda integrada](images/manual.png){ width="100%" }
+
+- **Log**: panel con el registro del backend (y opcionalmente C++ vía `log_file_cpp`); véase [Instalación — Visor de log](setup.md#visor-de-log-integrado).
+
+![Visor de log en la cabecera](images/log.png){ width="100%" }
+
 ## Resize de gráficos
 
 - Un **ResizeObserver** observa el nodo `#plotArea`. Cuando cambia el tamaño del área (p. ej. redimensionar ventana), se hace **Plotly.relayout** de cada contenedor de gráfico con el tamaño actual (`getBoundingClientRect()`), para que los gráficos se adapten al espacio disponible.
@@ -44,6 +73,8 @@ El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.
 
 - Botón **Perf** en la cabecera: overlay a pantalla completa que consulta periódicamente **`GET /api/perf`** mientras está abierto.
 - Tres bloques: fases **Python**, **C++** (`write_shm_snapshot`) y **sidecar** (solo si hay grabación `sidecar_cpp` activa y el binario escribe el JSON de `--perf-file`). Tablas con último tiempo, EMA y número de muestras; barras apiladas por capa.
+
+![Panel Perf — capas Python, C++ y sidecar](images/perf.png){ width="100%" }
 - La primera petición **renueva el lease** de medición en el servidor (igual que `GET /api/advanced_stats?perf=1` desde la tira de estadísticas). Si el lease expira, el panel muestra un aviso hasta que se vuelva a abrir o se use estadísticas avanzadas.
 - Detalle de fases y optimizaciones del sidecar: [Rendimiento](performance.md).
 

@@ -25,293 +25,36 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 
-import threading
 from queue import Empty, Queue
 
 from uds_client import UdsBridge
 from shm_reader import ShmReader, open_shm_rw, write_shm_import_row
 import perf_agg
 
-# PyInstaller onefile: estáticos en sys._MEIPASS; sin esto STATIC_DIR puede quedar mal resuelto.
-if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    _app_base = sys._MEIPASS
-else:
-    _app_base = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(_app_base, "static")
-
-
-def _web_app_js_script_src() -> str:
-    """URL del script principal del cliente: por defecto /static/app.js; override con VARMON_WEB_APP_JS."""
-    raw = (os.environ.get("VARMON_WEB_APP_JS") or "").strip()
-    if not raw:
-        return "/static/app.js"
-    if any(c in raw for c in '"<>') or ".." in raw or raw.startswith(("javascript:", "data:")):
-        print("[VarMonitor Web] VARMON_WEB_APP_JS inválida; usando /static/app.js")
-        return "/static/app.js"
-    if raw.startswith("/"):
-        return raw
-    return "/static/" + raw.lstrip("/")
-
-
-# Lease de medición de rendimiento: se renueva al abrir el panel Perf o la tira de estadísticas avanzadas.
-PERF_LEASE_SEC = 2.5
-
-DEFAULTS = {
-    "web_port": 8080,
-    "web_port_scan_max": 10,
-    "lan_ip": "",
-    "bind_host": "",
-    "auth_password": "",
-    "cycle_interval_ms": 100,
-    "update_ratio_max": 512,
-    "server_state_dir": "",
-    "log_buffer_size": 5000,
-    "log_file_cpp": "",
-    "shm_max_vars": 2048,
-    # Opcional: tope de parseos SHM/s solo monitorizando (>0). 0 = sin tope (un snapshot por despertar del sem,
-    # ritmo del proceso C++). Solo usar >0 para limitar CPU en casos raros. REC Python y alarmas ignoran este tope.
-    "shm_parse_max_hz": 0,
-    # Con grabación sidecar_cpp: Hz máx. de parseo SHM en Python para vars_update al navegador (el TSV lo escribe el
-    # sidecar). 0 = solo vaciar sem principal a intervalos (UI SHM congelada). >0 = UI viva; p. ej. 30 sin cargar mucho.
-    "shm_parse_hz_sidecar_recording": 30,
-    # Solo si shm_parse_hz_sidecar_recording == 0: cada cuántos s dormir entre ráfagas de sem_trywait (drenar posts C++).
-    "shm_sidecar_sem_drain_interval_sec": 0.2,
-    # Snapshots en cola reader→drain (0 = ilimitada; >0 = FIFO acotada, put bloquea si llena = backpressure).
-    "shm_queue_max_size": 512,
-    # Ventana por defecto del buffer visual (s); el frontend la aplica si no hay preferencia guardada.
-    "visual_buffer_sec": 10,
-    # Grabación: python (hilo escritor) | sidecar_cpp (binario nativo leyendo el mismo SHM; requiere SHM activo).
-    "recording_backend": "python",
-    # Ruta al ejecutable varmon_sidecar (vacío = VARMON_SIDECAR_BIN, PATH, o build típico).
-    "recording_sidecar_bin": "",
-    # Alarmas con variables SHM: sidecar_cpp (semáforo SHM + mmap, autónomo del ritmo Python) | python (legado).
-    "alarms_backend": "sidecar_cpp",
-    # Linux: CPUs para varmon_sidecar (grabación + alarmas), p. ej. "3" o "2,5" o "4-7". Vacío = sin afinidad.
-    "sidecar_cpu_affinity": "",
-    # Rutas de datos (vacío = defaults: desarrollo bajo web_monitor/; PyInstaller: INSTALL_DIR/data/…)
-    "data_root": "",
-    "recordings_dir": "",
-}
-
-CONFIG_ABS_PATH = ""
-
-
-def load_config() -> dict:
-    """Read varmon.conf (key = value). No external dependencies."""
-    global CONFIG_ABS_PATH
-    cfg = dict(DEFAULTS)
-    path = (os.environ.get("VARMON_CONFIG") or "").strip()
-    if not path:
-        _here = os.path.dirname(os.path.abspath(__file__))
-        _repo = os.path.abspath(os.path.join(_here, ".."))
-        for candidate in (
-            "varmon.conf",
-            os.path.join(_repo, "data", "varmon.conf"),
-            os.path.join(_repo, "varmon.conf"),
-        ):
-            abs_candidate = os.path.abspath(candidate)
-            if os.path.isfile(abs_candidate):
-                path = abs_candidate
-                break
-        else:
-            path = "varmon.conf"
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                key, val = key.strip(), val.strip()
-                if key in ("web_port", "web_port_scan_max", "cycle_interval_ms", "update_ratio_max"):
-                    cfg[key] = int(val)
-                elif key == "log_buffer_size":
-                    cfg[key] = max(100, min(50000, int(val)))
-                elif key == "shm_max_vars":
-                    cfg[key] = max(64, min(100000, int(val)))
-                elif key == "shm_parse_max_hz":
-                    cfg[key] = max(0.0, min(5000.0, float(val)))
-                elif key == "shm_parse_hz_sidecar_recording":
-                    cfg[key] = max(0.0, min(500.0, float(val)))
-                elif key == "shm_sidecar_sem_drain_interval_sec":
-                    cfg[key] = max(0.05, min(5.0, float(val)))
-                elif key == "shm_queue_max_size":
-                    cfg[key] = max(0, min(100000, int(val)))
-                elif key == "visual_buffer_sec":
-                    cfg[key] = max(1, min(7200, int(val)))
-                elif key in (
-                    "lan_ip",
-                    "bind_host",
-                    "auth_password",
-                    "server_state_dir",
-                    "data_root",
-                    "recordings_dir",
-                    "log_file_cpp",
-                    "recording_backend",
-                    "recording_sidecar_bin",
-                    "alarms_backend",
-                    "sidecar_cpu_affinity",
-                ):
-                    cfg[key] = val
-        CONFIG_ABS_PATH = os.path.abspath(path)
-        print(f"[VarMonitor Web] Config cargada desde {CONFIG_ABS_PATH}")
-        if (cfg.get("auth_password") or "").strip():
-            print(f"[VarMonitor Web] Auth: activada (se requiere contraseña en el WebSocket)")
-        else:
-            print(f"[VarMonitor Web] Auth: desactivada")
-    except FileNotFoundError:
-        CONFIG_ABS_PATH = os.path.abspath(path)
-        print(f"[VarMonitor Web] AVISO: No se encontro el archivo de configuracion.")
-        print(f"  Buscado en: {os.path.abspath(path)}")
-        print(f"  Usando valores por defecto (web_port={cfg['web_port']})")
-        print(f"  Para cambiar la ruta:")
-        print(f"    - Variable de entorno: VARMON_CONFIG=/ruta/a/varmon.conf")
-        print(f"    - Colocar varmon.conf en el directorio de trabajo actual")
-        print(f"    - O en <repo>/data/varmon.conf (desarrollo)")
-        if getattr(sys, "frozen", False):
-            print(
-                "  Ejecutable empaquetado: coloca varmon.conf junto al ejecutable o "
-                "export VARMON_CONFIG=/ruta/absoluta/varmon.conf"
-            )
-    return cfg
-
-
-def _repo_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-
-
-def _install_dir() -> str | None:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return None
-
-
-def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
-    """Grabaciones y server_state: desarrollo → web_monitor/…; frozen → INSTALL_DIR/data/… salvo override."""
-    cfg_dir = os.path.dirname(os.path.abspath(CONFIG_ABS_PATH)) if CONFIG_ABS_PATH else _repo_root()
-    inst = _install_dir()
-    env_data = (os.environ.get("VARMON_DATA_DIR") or "").strip()
-    rec_key = (cfg.get("recordings_dir") or "").strip()
-    st_key = (cfg.get("server_state_dir") or "").strip()
-    data_root_key = (cfg.get("data_root") or "").strip()
-
-    def norm(p: str, base: str) -> str:
-        p = os.path.expanduser(p)
-        if not p:
-            return ""
-        if os.path.isabs(p):
-            return os.path.abspath(p)
-        return os.path.abspath(os.path.join(base, p))
-
-    rec = norm(rec_key, cfg_dir) if rec_key else ""
-    st = norm(st_key, cfg_dir) if st_key else ""
-
-    if rec and st:
-        return rec, st
-
-    if env_data:
-        root = os.path.abspath(os.path.expanduser(env_data))
-        if not rec:
-            rec = os.path.join(root, "recordings")
-        if not st:
-            st = os.path.join(root, "server_state")
-        return rec, st
-
-    if data_root_key:
-        root = norm(data_root_key, cfg_dir)
-        if not rec:
-            rec = os.path.join(root, "recordings")
-        if not st:
-            st = os.path.join(root, "server_state")
-        return rec, st
-
-    if inst:
-        root = os.path.join(inst, "data")
-        if not rec:
-            rec = os.path.join(root, "recordings")
-        if not st:
-            st = os.path.join(root, "server_state")
-        return rec, st
-
-    wm = os.path.dirname(os.path.abspath(__file__))
-    if not rec:
-        rec = os.path.join(wm, "recordings")
-    if not st:
-        st = os.path.join(wm, "server_state")
-    return rec, st
-
-
-_config = load_config()
-
-RECORDINGS_DIR, STATE_ROOT_DIR = _resolve_data_layout(_config)
-_inst = _install_dir()
-BROWSER_ROOT = Path(_inst) if _inst else Path(__file__).resolve().parent.parent
-TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
-SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
-
-print(
-    f"[VarMonitor Web] Rutas datos: recordings={os.path.abspath(RECORDINGS_DIR)} | state={os.path.abspath(STATE_ROOT_DIR)}",
-    flush=True,
+from varmon_web.settings import (
+    CONFIG as _config,
+    CONFIG_ABS_PATH,
+    PERF_LEASE_SEC,
+    STATIC_DIR,
+    html_main_script_tag,
 )
-
-# --- Buffer de log para visor integrado ---
-_LOG_BUFFER_LOCK = threading.Lock()
-_LOG_SEQ = 0  # contador monotónico por línea (para GET /api/log?since_seq=…)
-_LOG_BUFFER: collections.deque = collections.deque(
-    maxlen=max(100, min(50000, int(_config.get("log_buffer_size", 5000)))),
+from varmon_web.paths import (
+    BROWSER_ROOT,
+    RECORDINGS_DIR,
+    SESSIONS_DIR,
+    STATE_ROOT_DIR,
+    TEMPLATES_DIR,
 )
+from varmon_web.log_buffer import (
+    _LOG_BUFFER,
+    _LOG_BUFFER_LOCK,
+    _LOG_SEQ,
+    install_stdio_tee,
+)
+from varmon_web.uds_discovery import _first_uds_bridge, _list_uds_instances
 
+install_stdio_tee()
 
-class _LogTee:
-    """Escribe en el stream original y duplica cada línea (con timestamp) al buffer de log."""
-
-    def __init__(self, stream):
-        self._stream = stream
-        self._linebuf: list[str] = []
-
-    @staticmethod
-    def _level_for_line(line: str) -> str:
-        u = line.upper()
-        if "PÉRDIDA DE DATOS" in u or "PERDIDA DE DATOS" in u:
-            return "error"
-        if "WARNING:" in u or " WARNING " in u or u.startswith("WARNING"):
-            return "warning"
-        return "info"
-
-    def write(self, data: str):
-        self._stream.write(data)
-        with _LOG_BUFFER_LOCK:
-            for ch in data:
-                if ch == "\n" or ch == "\r":
-                    if self._linebuf:
-                        line = "".join(self._linebuf).strip()
-                        if line:
-                            global _LOG_SEQ
-                            _LOG_SEQ += 1
-                            _LOG_BUFFER.append({
-                                "seq": _LOG_SEQ,
-                                "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                                "level": _LogTee._level_for_line(line),
-                                "msg": line,
-                            })
-                        self._linebuf.clear()
-                else:
-                    self._linebuf.append(ch)
-        return len(data)
-
-    def flush(self):
-        self._stream.flush()
-
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
-
-
-_ORIGINAL_STDOUT = sys.stdout
-_ORIGINAL_STDERR = sys.stderr
-sys.stdout = _LogTee(_ORIGINAL_STDOUT)
-sys.stderr = _LogTee(_ORIGINAL_STDERR)
 
 # Numero de conexiones WebSocket activas
 ACTIVE_WS = 0
@@ -530,22 +273,34 @@ async def log_requests_middleware(request: Request, call_next):
     return response
 
 
+# Marcador en index.html para inyectar la etiqueta del cliente (módulo ES o bundle IIFE vía VARMON_WEB_APP_JS).
+_VARMON_APP_SCRIPT_PLACEHOLDER = "<!--VARMON_APP_SCRIPT-->"
+
+
 @app.get("/")
 async def index():
     index_path = os.path.join(STATIC_DIR, "index.html")
-    js_src = _web_app_js_script_src()
-    if js_src == "/static/app.js":
-        return FileResponse(index_path)
     try:
         with open(index_path, encoding="utf-8") as f:
             html = f.read()
     except OSError:
         return FileResponse(index_path)
-    marker = '<script src="/static/app.js"></script>'
-    if marker not in html:
-        return FileResponse(index_path)
-    html = html.replace(marker, f'<script src="{js_src}"></script>', 1)
-    return HTMLResponse(content=html, media_type="text/html")
+    if _VARMON_APP_SCRIPT_PLACEHOLDER in html:
+        tag = html_main_script_tag()
+        html = html.replace(_VARMON_APP_SCRIPT_PLACEHOLDER, tag, 1)
+        return HTMLResponse(content=html, media_type="text/html")
+    # Compatibilidad: HTML antiguo sin marcador
+    import re
+
+    m = re.search(
+        r'<script\s+[^>]*src="/static/(?:app\.js|js/entry\.mjs)(?:\?[^"]*)?"[^>]*>\s*</script>',
+        html,
+    )
+    if m:
+        tag = html_main_script_tag()
+        html = html[: m.start()] + tag + html[m.end() :]
+        return HTMLResponse(content=html, media_type="text/html")
+    return FileResponse(index_path)
 
 
 @app.get("/api/vars")
@@ -606,54 +361,6 @@ async def api_get_history(name: str):
         {"error": "Historial en vivo no disponible; use grabaciones TSV."},
         status_code=410,
     )
-
-
-def _list_uds_instances(user_filter: str | None) -> list[dict]:
-    """Lista instancias VarMonitor por UDS en /tmp (varmon-*.sock). Orden: más reciente primero (por mtime del socket)."""
-    import glob
-    candidates: list[tuple[float, dict]] = []
-    try:
-        pattern = f"/tmp/varmon-{user_filter}-*.sock" if user_filter else "/tmp/varmon-*.sock"
-        paths = glob.glob(pattern)
-        for path in paths:
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                mtime = 0.0
-            try:
-                b = UdsBridge(path, timeout=0.6)
-                info = b.get_server_info()
-                b.disconnect()
-            except Exception:
-                continue
-            if not info:
-                continue
-            name = path.rsplit("/", 1)[-1].replace(".sock", "")
-            parts = name.split("-", 2)  # varmon, user, pid
-            pid = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else None
-            candidates.append((mtime, {
-                "uds_path": path,
-                "pid": pid,
-                "uptime_seconds": info.get("uptime_seconds"),
-                "user": parts[1] if len(parts) >= 2 else None,
-            }))
-        # Más reciente primero (mtime descendente)
-        candidates.sort(key=lambda x: -x[0])
-        return [d for _, d in candidates]
-    except Exception:
-        pass
-    return []
-
-
-def _first_uds_bridge():
-    """Primera instancia UDS disponible. None si no hay ninguna."""
-    inst = _list_uds_instances(None)
-    if not inst:
-        return None
-    try:
-        return UdsBridge(inst[0]["uds_path"], timeout=3.0)
-    except Exception:
-        return None
 
 
 ALARM_BUFFER_SEC = 2.2  # ~1 s previos + ~1 s posteriores al contexto de disparo (TSV con snapshot completo)

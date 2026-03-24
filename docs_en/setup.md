@@ -58,6 +58,8 @@ Config file path: environment variable `VARMON_CONFIG`; otherwise `./varmon.conf
 
 ## Built-in log viewer
 
+![Built-in log viewer in the header](images/log.png){ width="100%" }
+
 From the monitor UI you can read server logs without the terminal:
 
 - **Log** button (header): panel with recent lines from the Python backend (and, if `log_file_cpp` is set, from the C++ process).

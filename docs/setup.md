@@ -58,6 +58,8 @@ Ruta del archivo: variable de entorno `VARMON_CONFIG`; si no, `./varmon.conf` en
 
 ## Visor de log integrado
 
+![Visor de log integrado en la cabecera](images/log.png){ width="100%" }
+
 Desde la interfaz del monitor puede consultar el registro del servidor sin acceder al terminal:
 
 - **Botón Log** (cabecera): abre un panel con las últimas líneas del log del backend Python (y, si está configurado `log_file_cpp`, del proceso C++).

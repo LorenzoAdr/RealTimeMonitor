@@ -4,6 +4,21 @@ Sistema de monitorización de variables en tiempo real para aplicaciones C++20. 
 
 **Código fuente**: [VarMonitor en GitHub](https://github.com/LorenzoAdr/RealTimeMonitor).
 
+## Capturas de la interfaz
+
+Vista general en **tema claro** y **tema oscuro** (cabecera con modo Live/Análisis/Replay, monitor, gráficos y controles).
+
+![Interfaz VarMonitor — tema claro](images/general_claro.png){ width="100%" }
+
+![Interfaz VarMonitor — tema oscuro](images/general_oscuro2.png){ width="100%" }
+
+- **Modo análisis** (TSV offline): ![Modo análisis](images/analisis.png){ width="100%" }
+- **Modo replay** (referencia TSV + WebSocket): ![Modo replay](images/replay.png){ width="100%" }
+- **Opciones avanzadas** (anomalías, segmentos, notas, PDF…): ![Opciones avanzadas junto a los gráficos](images/avanzado.png){ width="100%" }
+- **Panel Perf** (fases Python / C++ / sidecar): ![Panel Perf](images/perf.png){ width="100%" }
+- **Ayuda** (guía integrada): ![Ventana de ayuda](images/manual.png){ width="100%" }
+- **Visor de log** (backend y opcionalmente C++): ![Visor de log](images/log.png){ width="100%" }
+
 ## Qué encontrar en esta documentación
 
 - **[Arquitectura](architecture.md)**: Componentes (C++, Python, frontend), flujo de datos, tasas visual e interna.

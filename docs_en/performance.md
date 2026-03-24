@@ -89,6 +89,8 @@ Together, these allow many variables and high update rates without saturating th
 
 ## Perf panel and `/api/perf`
 
+![Perf panel in the UI](images/perf.png){ width="100%" }
+
 - **UI**: The header **Perf** button opens a panel that polls `GET /api/perf` while visible. It shows three layers in tables and stacked bars:
   - **Python** (`perf_agg`): backend phases (e.g. SHM snapshot handling, `vars_update` pack/send).
   - **C++** (`server_info.shm_perf_us`): CPU time inside `write_shm_snapshot` when the publisher has measurement enabled.
