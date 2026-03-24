@@ -1410,7 +1410,7 @@ main {
     top: 8px;
     left: 8px;
     z-index: 26;
-    max-width: min(440px, calc(100% - 16px));
+    max-width: min(300px, calc(100% - 16px));
     max-height: min(52vh, calc(100% - 48px));
 }
 .monitor-detail-dock-header {
@@ -1473,6 +1473,11 @@ main {
     color: #93c5fd;
     border-color: #2563eb;
     background: rgba(37, 99, 235, 0.2);
+}
+.mon-tag--phys {
+    color: #7dd3fc;
+    border-color: #0ea5e9;
+    background: rgba(14, 165, 233, 0.18);
 }
 .mon-tag--gen {
     color: #86efac;
@@ -1842,6 +1847,21 @@ body.monitor-compact .stats-panel {
     outline: none;
 }
 .fmt-select:focus { border-color: var(--accent); }
+
+.fmt-physical-block,
+.fmt-conversion-block {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+}
+.fmt-physical-title {
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 2px;
+}
 
 .arinc-row {
     display: flex;

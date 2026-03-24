@@ -250,8 +250,6 @@
     const adminDeleteAllTemplatesBtn = document.getElementById("adminDeleteAllTemplatesBtn");
     const adminRecordingsList = document.getElementById("adminRecordingsList");
     const adminTemplatesList = document.getElementById("adminTemplatesList");
-    const expandAllMonBtn = document.getElementById("expandAllMonBtn");
-    const collapseAllMonBtn = document.getElementById("collapseAllMonBtn");
     const monitorLoadingIndicator = document.getElementById("monitorLoadingIndicator");
     const offlineWindowSpanInput = document.getElementById("offlineWindowSpanInput");
     const offlineSafeModeBadge = document.getElementById("offlineSafeModeBadge");
@@ -847,7 +845,11 @@
             if (!varFormat[name].ori) varFormat[name].ori = "dec";
             if (!varFormat[name].sal) varFormat[name].sal = "dec";
         }
-        return varFormat[name];
+        const vf = varFormat[name];
+        if (!vf.physical || typeof vf.physical !== "object") {
+            vf.physical = { category: "numeric" };
+        }
+        return vf;
     }
 
     function getArincConfig(name) {
@@ -865,6 +867,57 @@
         if (!name || isArincDerivedName(name)) return false;
         const f = varFormat[name];
         return !!(f && f.sal === "arinc429");
+    }
+
+    /** off | units | arinc — coherente con ori/sal y cfg antigua sin fmtMode */
+    function inferVarFormatMode(vf) {
+        if (!vf || typeof vf !== "object") return "off";
+        if (vf.sal === "arinc429") return "arinc";
+        if (vf.fmtMode === "off" || vf.fmtMode === "units" || vf.fmtMode === "arinc") {
+            if (vf.fmtMode === "arinc" && vf.sal !== "arinc429") return "units";
+            return vf.fmtMode;
+        }
+        if (vf.ori !== "dec" || vf.sal !== "dec") return "units";
+        return "off";
+    }
+
+    function applyVarFormatMode(name, mode, wrap) {
+        const vf = ensureVarFormatEntry(name);
+        const canUseArinc = !isArincDerivedName(name) && !isComputed(name);
+        if (!canUseArinc && mode === "arinc") mode = "units";
+        const prevSal = vf.sal;
+        vf.fmtMode = mode;
+        if (mode === "off") {
+            vf.ori = "dec";
+            vf.sal = "dec";
+            if (prevSal === "arinc429") {
+                removeArincDerivedForBase(name);
+            }
+        } else if (mode === "units") {
+            if (vf.sal === "arinc429") {
+                removeArincDerivedForBase(name);
+            }
+            vf.ori = vf.ori || "dec";
+            vf.sal = vf.sal || "dec";
+            if (vf.ori === "arinc429") vf.ori = "dec";
+            if (vf.sal === "arinc429") vf.sal = "dec";
+        } else if (mode === "arinc") {
+            vf.sal = "arinc429";
+            getArincConfig(name);
+            rebuildArincDerivedHistoryForBase(name);
+            const cur = varsByName[name];
+            const num = cur && typeof cur.value === "number" ? cur.value : Number(cur?.value);
+            if (cur && Number.isFinite(num)) {
+                const ts = cur.timestamp || (Date.now() / 1000);
+                pushArincDerivedSample(name, ts, num, false);
+            }
+        }
+        rebuildKnownVarNamesWithDerived();
+        saveConfig();
+        rebuildMonitorList();
+        renderBrowserList();
+        schedulePlotRender();
+        updateStatsPanel(wrap, name);
     }
 
     function getArincDerivedNames(baseName) {
@@ -1108,6 +1161,229 @@
         return parseFloat(t);
     }
 
+    const PHYS_NONE = "none";
+    /** Solo ori/sal (dec, sci, hex, bin); sin unidades físicas */
+    const PHYS_NUMERIC = "numeric";
+    const PHYS_LENGTH = "length";
+    const PHYS_MASS = "mass";
+    const PHYS_SPEED = "speed";
+    const PHYS_DMS = "dms";
+    const PHYS_ANGLE = "angle";
+
+    function ensurePhysicalDefaults(phys) {
+        if (!phys || typeof phys !== "object") return { category: PHYS_NUMERIC };
+        let c = phys.category || PHYS_NONE;
+        if (c === PHYS_NONE) c = PHYS_NUMERIC;
+        if (c === PHYS_NUMERIC) return { category: PHYS_NUMERIC };
+        const o = { category: c, from: phys.from, to: phys.to };
+        if (c === PHYS_LENGTH) {
+            o.from = phys.from === "ft" || phys.from === "nmi" ? phys.from : "m";
+            o.to = phys.to === "ft" || phys.to === "nmi" ? phys.to : "m";
+        } else if (c === PHYS_MASS) {
+            o.from = phys.from === "lb" ? "lb" : "kg";
+            o.to = phys.to === "lb" ? "lb" : "kg";
+        } else if (c === PHYS_SPEED) {
+            o.from = ["ms", "kmh", "knot"].includes(phys.from) ? phys.from : "ms";
+            o.to = ["ms", "kmh", "knot"].includes(phys.to) ? phys.to : "ms";
+        } else if (c === PHYS_ANGLE) {
+            o.from = phys.from === "deg" ? "deg" : "rad";
+            o.to = phys.to === "deg" ? "deg" : "rad";
+        } else if (c === PHYS_DMS) {
+            o.from = ["deg", "min", "sec"].includes(phys.from) ? phys.from : "deg";
+            o.to = ["deg", "min", "sec", "dms"].includes(phys.to) ? phys.to : "deg";
+        } else {
+            return { category: PHYS_NUMERIC };
+        }
+        return o;
+    }
+
+    function defaultPhysicalForCategory(cat) {
+        if (cat === PHYS_NUMERIC || cat === PHYS_NONE) return { category: PHYS_NUMERIC };
+        if (cat === PHYS_LENGTH) return { category: PHYS_LENGTH, from: "m", to: "m" };
+        if (cat === PHYS_MASS) return { category: PHYS_MASS, from: "kg", to: "kg" };
+        if (cat === PHYS_SPEED) return { category: PHYS_SPEED, from: "ms", to: "ms" };
+        if (cat === PHYS_ANGLE) return { category: PHYS_ANGLE, from: "rad", to: "rad" };
+        if (cat === PHYS_DMS) return { category: PHYS_DMS, from: "deg", to: "deg" };
+        return { category: PHYS_NUMERIC };
+    }
+
+    function lengthToMeters(v, unit) {
+        if (unit === "ft") return v * 0.3048;
+        if (unit === "nmi") return v * 1852;
+        return v;
+    }
+    function metersToLength(m, unit) {
+        if (unit === "ft") return m / 0.3048;
+        if (unit === "nmi") return m / 1852;
+        return m;
+    }
+    function massToKg(v, unit) {
+        return unit === "lb" ? v * 0.45359237 : v;
+    }
+    function kgToMass(kg, unit) {
+        return unit === "lb" ? kg / 0.45359237 : kg;
+    }
+    const KNOT_TO_MS = 1852 / 3600;
+    function speedToMs(v, unit) {
+        if (unit === "kmh") return v / 3.6;
+        if (unit === "knot") return v * KNOT_TO_MS;
+        return v;
+    }
+    function msToSpeed(ms, unit) {
+        if (unit === "kmh") return ms * 3.6;
+        if (unit === "knot") return ms / KNOT_TO_MS;
+        return ms;
+    }
+    function angleToRad(v, unit) {
+        return unit === "deg" ? v * (Math.PI / 180) : v;
+    }
+    function radToAngle(rad, unit) {
+        return unit === "deg" ? rad * (180 / Math.PI) : rad;
+    }
+    /** Valor crudo (origen) → grados decimales totales */
+    function dmsRawToDecimalDegrees(raw, from) {
+        if (from === "min") return raw / 60;
+        if (from === "sec") return raw / 3600;
+        return raw;
+    }
+    /** Grados decimales totales → valor en unidad de destino (no conjunto) */
+    function decimalDegreesToDmsDisplay(totalDeg, to) {
+        if (to === "min") return totalDeg * 60;
+        if (to === "sec") return totalDeg * 3600;
+        return totalDeg;
+    }
+    /** Entrada de edición (unidad de destino) → grados decimales */
+    function dmsDisplayToDecimalDegrees(display, to) {
+        if (to === "min") return display / 60;
+        if (to === "sec") return display / 3600;
+        return display;
+    }
+    /** Grados decimales → crudo en unidad origen */
+    function decimalDegreesToDmsRaw(totalDeg, from) {
+        if (from === "min") return totalDeg * 60;
+        if (from === "sec") return totalDeg * 3600;
+        return totalDeg;
+    }
+
+    function formatDmsCombined(totalDeg) {
+        const sign = totalDeg < 0 ? -1 : 1;
+        const absT = Math.abs(totalDeg);
+        const d = Math.floor(absT);
+        const mf = (absT - d) * 60;
+        const m = Math.floor(mf);
+        const s = (mf - m) * 60;
+        const signStr = sign < 0 ? "-" : "";
+        return `${signStr}${d}\u00B0 ${m}\u2032 ${s.toFixed(2)}\u2033`;
+    }
+
+    function physicalRawToDisplay(raw, phys) {
+        const p = phys;
+        if (!p || p.category === PHYS_NONE || p.category === PHYS_NUMERIC) return raw;
+        if (p.category === PHYS_LENGTH) {
+            const m = lengthToMeters(raw, p.from);
+            return metersToLength(m, p.to);
+        }
+        if (p.category === PHYS_MASS) {
+            const kg = massToKg(raw, p.from);
+            return kgToMass(kg, p.to);
+        }
+        if (p.category === PHYS_SPEED) {
+            const ms = speedToMs(raw, p.from);
+            return msToSpeed(ms, p.to);
+        }
+        if (p.category === PHYS_ANGLE) {
+            const rad = angleToRad(raw, p.from);
+            return radToAngle(rad, p.to);
+        }
+        if (p.category === PHYS_DMS) {
+            const totalDeg = dmsRawToDecimalDegrees(raw, p.from);
+            if (p.to === "dms") return totalDeg;
+            return decimalDegreesToDmsDisplay(totalDeg, p.to);
+        }
+        return raw;
+    }
+
+    function physicalDisplayToRaw(display, phys) {
+        const p = phys;
+        if (!p || p.category === PHYS_NONE || p.category === PHYS_NUMERIC) return display;
+        if (p.category === PHYS_LENGTH) {
+            const m = lengthToMeters(display, p.to);
+            return metersToLength(m, p.from);
+        }
+        if (p.category === PHYS_MASS) {
+            const kg = massToKg(display, p.to);
+            return kgToMass(kg, p.from);
+        }
+        if (p.category === PHYS_SPEED) {
+            const ms = speedToMs(display, p.to);
+            return msToSpeed(ms, p.from);
+        }
+        if (p.category === PHYS_ANGLE) {
+            const rad = angleToRad(display, p.to);
+            return radToAngle(rad, p.from);
+        }
+        if (p.category === PHYS_DMS) {
+            let totalDeg;
+            if (p.to === "dms") totalDeg = display;
+            else totalDeg = dmsDisplayToDecimalDegrees(display, p.to);
+            return decimalDegreesToDmsRaw(totalDeg, p.from);
+        }
+        return display;
+    }
+
+    function physicalSuffixFor(phys) {
+        if (!phys || phys.category === PHYS_NONE || phys.category === PHYS_NUMERIC) return "";
+        const to = phys.to;
+        if (phys.category === PHYS_LENGTH) {
+            if (to === "m") return " m";
+            if (to === "ft") return " ft";
+            if (to === "nmi") return " nm";
+        }
+        if (phys.category === PHYS_MASS) {
+            return to === "lb" ? " lb" : " kg";
+        }
+        if (phys.category === PHYS_SPEED) {
+            if (to === "ms") return " m/s";
+            if (to === "kmh") return " km/h";
+            if (to === "knot") return " kn";
+        }
+        if (phys.category === PHYS_ANGLE) {
+            return to === "deg" ? " \u00B0" : " rad";
+        }
+        if (phys.category === PHYS_DMS) {
+            if (to === "deg") return " \u00B0";
+            if (to === "min") return " \u2032";
+            if (to === "sec") return " \u2033";
+            return "";
+        }
+        return "";
+    }
+
+    function formatSalNumberOnly(num, sal) {
+        if (sal === "sci") return num.toExponential(4);
+        if (sal === "hex") return "0x" + (Math.round(num) >>> 0).toString(16).toUpperCase();
+        if (sal === "bin") return "0b" + (Math.round(num) >>> 0).toString(2);
+        return num.toFixed(4);
+    }
+
+    function formatValueWithPhysical(v, phys, sal) {
+        if (phys.category === PHYS_DMS && phys.to === "dms") {
+            const totalDeg = dmsRawToDecimalDegrees(v, phys.from);
+            return formatDmsCombined(totalDeg);
+        }
+        const x = physicalRawToDisplay(v, phys);
+        if (!Number.isFinite(x)) return "NaN";
+        return formatSalNumberOnly(x, sal) + physicalSuffixFor(phys);
+    }
+
+    function physicalConversionActiveForDisplay(name) {
+        const f = varFormat[name];
+        if (!f || !f.physical) return false;
+        const cat = f.physical.category || "none";
+        if (cat === "none" || cat === PHYS_NUMERIC) return false;
+        return inferVarFormatMode(f) === "units";
+    }
+
     function normalizeVarFormatConfig(input) {
         const out = {};
         if (!input || typeof input !== "object") return out;
@@ -1116,9 +1392,18 @@
             const ori = cfg.ori || "dec";
             const sal = cfg.sal || "dec";
             out[name] = { ori, sal };
+            if (cfg.fmtMode === "off" || cfg.fmtMode === "units" || cfg.fmtMode === "arinc") {
+                out[name].fmtMode = cfg.fmtMode;
+            }
             if (cfg.arinc && typeof cfg.arinc === "object") {
                 const lsbNum = Number(cfg.arinc.lsb);
                 out[name].arinc = { lsb: Number.isFinite(lsbNum) && lsbNum !== 0 ? lsbNum : 1 };
+                if (typeof cfg.arinc.encodingOverride === "string") {
+                    out[name].arinc.encodingOverride = cfg.arinc.encodingOverride;
+                }
+            }
+            if (cfg.physical && typeof cfg.physical === "object") {
+                out[name].physical = ensurePhysicalDefaults(cfg.physical);
             }
         }
         return out;
@@ -1219,6 +1504,26 @@
             docsLangEs: "Español",
             docsLangEn: "English",
             docsNotBuiltMsg: "No hay documentación generada. En la raíz del proyecto ejecute: mkdocs build  y  mkdocs build -f mkdocs.en.yml  luego reinicie el servidor.",
+            fmtModeLabel: "Formato:",
+            fmtModeOff: "Apagado",
+            fmtModeUnits: "Unidades",
+            fmtModeArinc: "ARINC",
+            fmtOriShort: "Ori:",
+            fmtSalShort: "Sal:",
+            physBlockTitle: "Unidades físicas",
+            convBlockTitle: "Conversión en monitor",
+            convTypeLabel: "Tipo:",
+            convTypeNumeric: "Base",
+            physCatLabel: "Magnitud:",
+            physCatNone: "— ninguna —",
+            physCatLength: "Longitud",
+            physCatMass: "Masa",
+            physCatSpeed: "Velocidad",
+            physCatDms: "Base hexa",
+            physCatAngle: "Ángulo",
+            physFromLabel: "Origen (valor SHM):",
+            physToLabel: "Destino (monitor):",
+            physHintNm: "Milla náutica (nm)",
         },
         en: {
             colBrowserTitle: "Available variables",
@@ -1312,6 +1617,26 @@
             docsLangEs: "Spanish",
             docsLangEn: "English",
             docsNotBuiltMsg: "Documentation is not built. From the project root run: mkdocs build  and  mkdocs build -f mkdocs.en.yml  then restart the server.",
+            fmtModeLabel: "Format:",
+            fmtModeOff: "Off",
+            fmtModeUnits: "Units",
+            fmtModeArinc: "ARINC",
+            fmtOriShort: "In:",
+            fmtSalShort: "Out:",
+            physBlockTitle: "Physical units",
+            convBlockTitle: "Monitor conversion",
+            convTypeLabel: "Type:",
+            convTypeNumeric: "Base",
+            physCatLabel: "Quantity:",
+            physCatNone: "— none —",
+            physCatLength: "Length",
+            physCatMass: "Mass",
+            physCatSpeed: "Speed",
+            physCatDms: "Hex base",
+            physCatAngle: "Angle",
+            physFromLabel: "Source (SHM value):",
+            physToLabel: "Display:",
+            physHintNm: "Nautical mile (nm)",
         }
     };
 
@@ -3420,27 +3745,6 @@
             monitorGridLines = !!monitorGridLinesCheck.checked;
             applyMonitorGridLines();
             saveConfig();
-        });
-    }
-    if (expandAllMonBtn) {
-        expandAllMonBtn.addEventListener("click", () => {
-            if (shouldUseMonitorVirtualList() || monitorDetailPanelUsesDock()) {
-                alert("Con muchas variables el detalle se abre arriba a la izquierda del panel de gráficos (una a la vez; clic en el nombre). \"Desplegar todo\" no está disponible.");
-                return;
-            }
-            for (const n of monitoredOrder) expandedStats.add(n);
-            rebuildMonitorList();
-            updateMonitorValues();
-        });
-    }
-    if (collapseAllMonBtn) {
-        collapseAllMonBtn.addEventListener("click", () => {
-            expandedStats.clear();
-            hideMonitorDetailDock();
-            rebuildMonitorList();
-            updateMonitorValues();
-            monitorListEl.querySelectorAll(".stats-panel").forEach((p) => p.remove());
-            monitorListEl.querySelectorAll(".monitor-item.expanded").forEach((el) => el.classList.remove("expanded"));
         });
     }
     if (adaptiveLoadCheckbox) {
@@ -5835,7 +6139,7 @@
         }
         if (type === "bool") return v ? "true" : "false";
         if (typeof v !== "number") return String(v);
-        const f = name ? varFormat[name] : undefined;
+        const f = name ? ensureVarFormatEntry(name) : undefined;
         const sal = f ? f.sal || "dec" : "dec";
         if (sal === "arinc429") {
             const cfg = name ? getArincConfig(name) : { lsb: 1 };
@@ -5843,6 +6147,12 @@
             const valueTxt = Number.isFinite(d.value) ? d.value.toFixed(3) : "NaN";
             const unitsTxt = d.units ? ` ${d.units}` : "";
             return `${valueTxt}${unitsTxt}`;
+        }
+        if (f && inferVarFormatMode(f) === "units") {
+            const phys = ensurePhysicalDefaults(f.physical);
+            if (phys.category !== "none" && phys.category !== "numeric") {
+                return formatValueWithPhysical(v, phys, sal);
+            }
         }
         if (sal === "sci") return v.toExponential(4);
         if (sal === "hex") return "0x" + (Math.round(v) >>> 0).toString(16).toUpperCase();
@@ -6548,14 +6858,50 @@
         }
         const rowForTags = wrap.querySelector(".monitor-item");
         if (rowForTags) syncMonitorRowStatusTags(rowForTags, name);
+        if (rowForTags) refreshMonitorItemDisplayedValue(rowForTags, name);
+    }
+
+    /** Refresca .mon-value (y badge de array) según cfg actual; necesario al reutilizar filas DOM sin nuevo dato SHM. */
+    function refreshMonitorItemDisplayedValue(monitorItemEl, name) {
+        if (!monitorItemEl || name === editingName) return;
+        const monVal = monitorItemEl.querySelector(".mon-value");
+        if (!monVal) return;
+        const vd = varsByName[name];
+        let usedHistory = false;
+        if (isPlaybackMode() && offlineRecordingName && isVarInTsv(name) && impositionNames.has(name)) {
+            const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
+            if (tNow != null) {
+                const vHist = getReplayImposedValueAtTs(name, tNow);
+                if (vHist != null) {
+                    monVal.textContent = formatValue(vHist, "double", name);
+                    usedHistory = true;
+                }
+            }
+        }
+        if (vd && !usedHistory) {
+            monVal.textContent = formatValue(vd.value, vd.type, name);
+            const arrBadge = monitorItemEl.querySelector(".array-badge");
+            if (arrBadge && Array.isArray(vd.value)) {
+                arrBadge.textContent = "[" + vd.value.length + "]";
+            }
+        }
     }
 
     function hasScalarFormatConversion(name) {
         const vf = varFormat[name];
         if (!vf || typeof vf !== "object") return false;
+        if (inferVarFormatMode(vf) !== "units") return false;
         const o = vf.ori || "dec";
         const s = vf.sal || "dec";
         return o !== s;
+    }
+
+    function hasPhysicalUnitConversion(name) {
+        const vf = varFormat[name];
+        if (!vf || typeof vf !== "object") return false;
+        if (inferVarFormatMode(vf) !== "units") return false;
+        const p = ensurePhysicalDefaults(vf.physical);
+        return p.category !== "none" && p.category !== "numeric";
     }
 
     function syncMonitorRowStatusTags(rowEl, name) {
@@ -6578,6 +6924,9 @@
         }
         if (hasScalarFormatConversion(name) && !isArincEnabled(name) && !isArincDerivedName(name)) {
             addTag("units", "units", currentLang === "en" ? "Ori/sal display conversion" : "Conversión de formato ori→sal");
+        }
+        if (hasPhysicalUnitConversion(name) && !isArincDerivedName(name)) {
+            addTag("phys", "u", currentLang === "en" ? "Physical unit conversion on display" : "Conversión de unidades físicas (monitor)");
         }
         if (activeGenerators[name]) {
             addTag("gen", "gen", currentLang === "en" ? "Signal generator active" : "Generador activo");
@@ -7380,6 +7729,313 @@
         return tracked;
     }
 
+    function syncConversionDetailPanel(panel, name, wrap, tr) {
+        const fmtOptsUnits = '<option value="dec">Dec</option><option value="sci">Sci</option><option value="hex">Hex</option><option value="bin">Bin</option>';
+        let block = panel.querySelector(".fmt-conversion-block");
+        const mode = inferVarFormatMode(ensureVarFormatEntry(name));
+        const show = mode === "units";
+        if (!block) {
+            block = document.createElement("div");
+            block.className = "fmt-conversion-block";
+            const title = document.createElement("div");
+            title.className = "fmt-physical-title";
+            title.textContent = tr.convBlockTitle || tr.physBlockTitle || "Conversión";
+            const row1 = document.createElement("div");
+            row1.className = "fmt-row fmt-conv-type-row";
+            const catLbl = document.createElement("span");
+            catLbl.className = "fmt-label";
+            catLbl.textContent = tr.convTypeLabel || "Tipo:";
+            const catSel = document.createElement("select");
+            catSel.className = "fmt-select fmt-conv-type";
+            const cats = [
+                [PHYS_NUMERIC, tr.convTypeNumeric || "Base"],
+                [PHYS_LENGTH, tr.physCatLength],
+                [PHYS_MASS, tr.physCatMass],
+                [PHYS_SPEED, tr.physCatSpeed],
+                [PHYS_DMS, tr.physCatDms],
+                [PHYS_ANGLE, tr.physCatAngle],
+            ];
+            for (let i = 0; i < cats.length; i++) {
+                const o = document.createElement("option");
+                o.value = cats[i][0];
+                o.textContent = cats[i][1];
+                catSel.appendChild(o);
+            }
+            catSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                const v = ensureVarFormatEntry(name);
+                v.physical = defaultPhysicalForCategory(catSel.value);
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+                syncConversionDetailPanel(panel, name, wrap, tr);
+            });
+            catSel.addEventListener("click", (e) => e.stopPropagation());
+            row1.appendChild(catLbl);
+            row1.appendChild(catSel);
+            const dyn = document.createElement("div");
+            dyn.className = "fmt-conv-dynamic";
+            block.appendChild(title);
+            block.appendChild(row1);
+            block.appendChild(dyn);
+            panel.appendChild(block);
+        }
+        block.style.display = show ? "" : "none";
+        if (!show) return;
+        const v = ensureVarFormatEntry(name);
+        const phys = ensurePhysicalDefaults(v.physical);
+        v.physical = phys;
+        const catSel = block.querySelector(".fmt-conv-type");
+        if (catSel) catSel.value = phys.category;
+        const dyn = block.querySelector(".fmt-conv-dynamic");
+        if (!dyn) return;
+        dyn.innerHTML = "";
+
+        function rowFromTo(fromSel, toSel) {
+            const r1 = document.createElement("div");
+            r1.className = "fmt-row";
+            const l1 = document.createElement("span");
+            l1.className = "fmt-label";
+            l1.textContent = tr.physFromLabel || "Origen:";
+            r1.appendChild(l1);
+            r1.appendChild(fromSel);
+            const r2 = document.createElement("div");
+            r2.className = "fmt-row";
+            const l2 = document.createElement("span");
+            l2.className = "fmt-label";
+            l2.textContent = tr.physToLabel || "Destino:";
+            r2.appendChild(l2);
+            r2.appendChild(toSel);
+            dyn.appendChild(r1);
+            dyn.appendChild(r2);
+        }
+
+        if (phys.category === PHYS_NUMERIC) {
+            const rowN = document.createElement("div");
+            rowN.className = "fmt-row";
+            const oriLbl = document.createElement("span");
+            oriLbl.className = "fmt-label";
+            oriLbl.textContent = tr.fmtOriShort || "Ori:";
+            const oriSel = document.createElement("select");
+            oriSel.className = "fmt-select fmt-select-ori";
+            oriSel.innerHTML = fmtOptsUnits;
+            oriSel.value = v.ori || "dec";
+            oriSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).ori = oriSel.value;
+                ensureVarFormatEntry(name).fmtMode = "units";
+                saveConfig();
+                updateMonitorItemStyles();
+            });
+            oriSel.addEventListener("click", (e) => e.stopPropagation());
+            const salLbl = document.createElement("span");
+            salLbl.className = "fmt-label";
+            salLbl.textContent = tr.fmtSalShort || "Sal:";
+            const salSel = document.createElement("select");
+            salSel.className = "fmt-select fmt-select-sal";
+            salSel.innerHTML = fmtOptsUnits;
+            salSel.value = v.sal === "arinc429" ? "dec" : (v.sal || "dec");
+            salSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).sal = salSel.value;
+                ensureVarFormatEntry(name).fmtMode = "units";
+                saveConfig();
+                updateMonitorItemStyles();
+            });
+            salSel.addEventListener("click", (e) => e.stopPropagation());
+            rowN.appendChild(oriLbl);
+            rowN.appendChild(oriSel);
+            rowN.appendChild(salLbl);
+            rowN.appendChild(salSel);
+            dyn.appendChild(rowN);
+            return;
+        }
+
+        if (phys.category === PHYS_LENGTH) {
+            const fromSel = document.createElement("select");
+            fromSel.className = "fmt-select";
+            [["m", "m"], ["ft", "ft"], ["nmi", "nm"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                if (val === "nmi") o.title = tr.physHintNm || "";
+                fromSel.appendChild(o);
+            });
+            fromSel.value = phys.from;
+            const toSel = document.createElement("select");
+            toSel.className = "fmt-select";
+            [["m", "m"], ["ft", "ft"], ["nmi", "nm"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                if (val === "nmi") o.title = tr.physHintNm || "";
+                toSel.appendChild(o);
+            });
+            toSel.value = phys.to;
+            fromSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.from = fromSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            toSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.to = toSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            fromSel.addEventListener("click", (e) => e.stopPropagation());
+            toSel.addEventListener("click", (e) => e.stopPropagation());
+            rowFromTo(fromSel, toSel);
+        } else if (phys.category === PHYS_MASS) {
+            const fromSel = document.createElement("select");
+            fromSel.className = "fmt-select";
+            [["kg", "kg"], ["lb", "lb"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                fromSel.appendChild(o);
+            });
+            fromSel.value = phys.from;
+            const toSel = document.createElement("select");
+            toSel.className = "fmt-select";
+            [["kg", "kg"], ["lb", "lb"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                toSel.appendChild(o);
+            });
+            toSel.value = phys.to;
+            fromSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.from = fromSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            toSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.to = toSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            fromSel.addEventListener("click", (e) => e.stopPropagation());
+            toSel.addEventListener("click", (e) => e.stopPropagation());
+            rowFromTo(fromSel, toSel);
+        } else if (phys.category === PHYS_SPEED) {
+            const fromSel = document.createElement("select");
+            fromSel.className = "fmt-select";
+            [["ms", "m/s"], ["kmh", "km/h"], ["knot", "kn"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                fromSel.appendChild(o);
+            });
+            fromSel.value = phys.from;
+            const toSel = document.createElement("select");
+            toSel.className = "fmt-select";
+            [["ms", "m/s"], ["kmh", "km/h"], ["knot", "kn"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                toSel.appendChild(o);
+            });
+            toSel.value = phys.to;
+            fromSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.from = fromSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            toSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.to = toSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            fromSel.addEventListener("click", (e) => e.stopPropagation());
+            toSel.addEventListener("click", (e) => e.stopPropagation());
+            rowFromTo(fromSel, toSel);
+        } else if (phys.category === PHYS_ANGLE) {
+            const fromSel = document.createElement("select");
+            fromSel.className = "fmt-select";
+            [["rad", "rad"], ["deg", "\u00B0"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                fromSel.appendChild(o);
+            });
+            fromSel.value = phys.from;
+            const toSel = document.createElement("select");
+            toSel.className = "fmt-select";
+            [["rad", "rad"], ["deg", "\u00B0"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                toSel.appendChild(o);
+            });
+            toSel.value = phys.to;
+            fromSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.from = fromSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            toSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.to = toSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            fromSel.addEventListener("click", (e) => e.stopPropagation());
+            toSel.addEventListener("click", (e) => e.stopPropagation());
+            rowFromTo(fromSel, toSel);
+        } else if (phys.category === PHYS_DMS) {
+            const fromSel = document.createElement("select");
+            fromSel.className = "fmt-select";
+            [["deg", "\u00B0 (decimal)"], ["min", "\u2032 (min)"], ["sec", "\u2033 (seg)"]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                fromSel.appendChild(o);
+            });
+            fromSel.value = phys.from;
+            const toSel = document.createElement("select");
+            toSel.className = "fmt-select";
+            [["deg", "\u00B0"], ["min", "\u2032"], ["sec", "\u2033"], ["dms", "\u00B0\u2032\u2033 conj."]].forEach(([val, lab]) => {
+                const o = document.createElement("option");
+                o.value = val;
+                o.textContent = lab;
+                toSel.appendChild(o);
+            });
+            toSel.value = phys.to;
+            fromSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.from = fromSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            toSel.addEventListener("change", (e) => {
+                e.stopPropagation();
+                ensureVarFormatEntry(name).physical.to = toSel.value;
+                saveConfig();
+                updateMonitorItemStyles();
+                updateMonitorValues();
+            });
+            fromSel.addEventListener("click", (e) => e.stopPropagation());
+            toSel.addEventListener("click", (e) => e.stopPropagation());
+            rowFromTo(fromSel, toSel);
+        }
+    }
+
     function updateStatsPanel(wrap, name) {
         const useDock = monitorListEl && monitorDetailPanelUsesDock();
 
@@ -7554,8 +8210,8 @@
                 panel.appendChild(hint);
             }
             hint.textContent = "Subcanal ARINC derivado: no requiere reinterpretación ARINC.";
-            const fmtOld = panel.querySelector(".fmt-row");
-            if (fmtOld) fmtOld.remove();
+            panel.querySelectorAll(".fmt-mode-row, .fmt-units-row, .fmt-conversion-block, .fmt-physical-block").forEach((el) => el.remove());
+            panel.querySelectorAll(":scope > .fmt-row:not(.fmt-units-row):not(.fmt-mode-row)").forEach((el) => el.remove());
             const alarmOld = panel.querySelector(".alarm-row");
             if (alarmOld) alarmOld.remove();
             const genOld = panel.querySelector(".gen-row");
@@ -7569,8 +8225,8 @@
 
         const replayImposed = isReplayMode() && impositionNames.has(name) && isVarInTsv(name);
         if (replayImposed) {
-            const fmtOld = panel.querySelector(".fmt-row");
-            if (fmtOld) fmtOld.remove();
+            panel.querySelectorAll(".fmt-mode-row, .fmt-units-row, .fmt-conversion-block, .fmt-physical-block").forEach((el) => el.remove());
+            panel.querySelectorAll(":scope > .fmt-row:not(.fmt-units-row):not(.fmt-mode-row)").forEach((el) => el.remove());
             const genOld = panel.querySelector(".gen-row");
             if (genOld) genOld.remove();
         }
@@ -7578,71 +8234,49 @@
         const vf = ensureVarFormatEntry(name);
         const canUseArincMode = !isArincDerivedName(name) && !isComputed(name);
         if (!canUseArincMode && vf.sal === "arinc429") vf.sal = "dec";
-        let fmtRow = panel.querySelector(".fmt-row");
-        if (!replayImposed && !fmtRow) {
-            fmtRow = document.createElement("div");
-            fmtRow.className = "fmt-row";
-            const fmtOpts = canUseArincMode
-                ? '<option value="dec">Dec</option><option value="sci">Sci</option><option value="hex">Hex</option><option value="bin">Bin</option><option value="arinc429">ARINC 429</option>'
-                : '<option value="dec">Dec</option><option value="sci">Sci</option><option value="hex">Hex</option><option value="bin">Bin</option>';
+        if (!canUseArincMode && vf.fmtMode === "arinc") vf.fmtMode = "units";
+        const tr = I18N[currentLang] || I18N.es;
 
-            const oriLbl = document.createElement("span");
-            oriLbl.className = "fmt-label";
-            oriLbl.textContent = "Ori:";
-            const oriSel = document.createElement("select");
-            oriSel.className = "fmt-select";
-            oriSel.innerHTML = fmtOpts;
-            oriSel.value = vf.ori || "dec";
-            oriSel.addEventListener("change", (e) => {
+        let fmtModeRow = panel.querySelector(".fmt-mode-row");
+        if (!replayImposed) {
+            panel.querySelectorAll(":scope > .fmt-row:not(.fmt-units-row):not(.fmt-mode-row)").forEach((el) => el.remove());
+        }
+
+        function syncFmtModeUi() {
+            const v = ensureVarFormatEntry(name);
+            let mode = inferVarFormatMode(v);
+            if (!canUseArincMode && mode === "arinc") mode = "units";
+            const modeSel = panel.querySelector(".fmt-mode-select");
+            if (modeSel) modeSel.value = mode;
+            const convBlock = panel.querySelector(".fmt-conversion-block");
+            if (convBlock) convBlock.style.display = mode === "units" ? "" : "none";
+        }
+
+        if (!replayImposed && !fmtModeRow) {
+            fmtModeRow = document.createElement("div");
+            fmtModeRow.className = "fmt-mode-row fmt-row";
+            const modeLbl = document.createElement("span");
+            modeLbl.className = "fmt-label";
+            modeLbl.textContent = tr.fmtModeLabel || "Formato:";
+            const modeSel = document.createElement("select");
+            modeSel.className = "fmt-select fmt-mode-select";
+            modeSel.innerHTML = canUseArincMode
+                ? `<option value="off">${tr.fmtModeOff}</option><option value="units">${tr.fmtModeUnits}</option><option value="arinc">${tr.fmtModeArinc}</option>`
+                : `<option value="off">${tr.fmtModeOff}</option><option value="units">${tr.fmtModeUnits}</option>`;
+            modeSel.addEventListener("change", (e) => {
                 e.stopPropagation();
-                ensureVarFormatEntry(name).ori = oriSel.value;
-                saveConfig();
+                applyVarFormatMode(name, modeSel.value, wrap);
             });
-
-            const salLbl = document.createElement("span");
-            salLbl.className = "fmt-label";
-            salLbl.textContent = "Sal:";
-            const salSel = document.createElement("select");
-            salSel.className = "fmt-select";
-            salSel.innerHTML = fmtOpts;
-            salSel.value = vf.sal || "dec";
-            salSel.addEventListener("change", (e) => {
-                e.stopPropagation();
-                const prevSal = ensureVarFormatEntry(name).sal || "dec";
-                ensureVarFormatEntry(name).sal = salSel.value;
-                if (!canUseArincMode && salSel.value === "arinc429") {
-                    ensureVarFormatEntry(name).sal = "dec";
-                    salSel.value = "dec";
-                }
-                if (prevSal === "arinc429" && salSel.value !== "arinc429") {
-                    removeArincDerivedForBase(name);
-                }
-                if (salSel.value === "arinc429") {
-                    rebuildArincDerivedHistoryForBase(name);
-                    const cur = varsByName[name];
-                    const num = cur && typeof cur.value === "number" ? cur.value : Number(cur?.value);
-                    if (cur && Number.isFinite(num)) {
-                        const ts = cur.timestamp || (Date.now() / 1000);
-                        pushArincDerivedSample(name, ts, num, false);
-                    }
-                }
-                rebuildKnownVarNamesWithDerived();
-                saveConfig();
-                rebuildMonitorList();
-                renderBrowserList();
-                schedulePlotRender();
-                updateStatsPanel(wrap, name);
-            });
-
-            fmtRow.appendChild(oriLbl);
-            fmtRow.appendChild(oriSel);
-            fmtRow.appendChild(salLbl);
-            fmtRow.appendChild(salSel);
-            panel.appendChild(fmtRow);
-        } else if (fmtRow && !replayImposed) {
-            const sels = fmtRow.querySelectorAll(".fmt-select");
-            if (sels[0]) sels[0].value = vf.ori || "dec";
-            if (sels[1]) sels[1].value = vf.sal || "dec";
+            modeSel.addEventListener("click", (e) => e.stopPropagation());
+            fmtModeRow.appendChild(modeLbl);
+            fmtModeRow.appendChild(modeSel);
+            panel.appendChild(fmtModeRow);
+            syncFmtModeUi();
+        } else if (!replayImposed && fmtModeRow) {
+            syncFmtModeUi();
+        }
+        if (!replayImposed) {
+            syncConversionDetailPanel(panel, name, wrap, tr);
         }
         let imposeOffsetsRow = panel.querySelector(".impose-offsets-row");
         if (isReplayMode() && !isArrayVar(name) && isVarInTsv(name)) {
@@ -8545,15 +9179,20 @@
 
         const input = document.createElement("input");
         const ori = (varFormat[name] && varFormat[name].ori) ? varFormat[name].ori : "dec";
-        const needsTextInput = vd.type === "bool" || ori === "hex" || ori === "bin" || ori === "arinc429";
+        const physOn = vd.type === "double" && physicalConversionActiveForDisplay(name)
+            && ensurePhysicalDefaults(ensureVarFormatEntry(name).physical).category !== "none";
+        const needsTextInput = vd.type === "bool" || (!physOn && (ori === "hex" || ori === "bin" || ori === "arinc429"));
         input.type = needsTextInput ? "text" : "number";
         input.className = "mon-edit-input";
         if (vd.type === "bool") {
             input.value = vd.value ? "true" : "false";
-        } else if (ori === "hex") {
+        } else if (!physOn && ori === "hex") {
             input.value = "0x" + ((Math.round(Number(vd.value)) >>> 0).toString(16).toUpperCase());
-        } else if (ori === "bin" || ori === "arinc429") {
+        } else if (!physOn && (ori === "bin" || ori === "arinc429")) {
             input.value = "0b" + ((Math.round(Number(vd.value)) >>> 0).toString(2));
+        } else if (physOn) {
+            const p = ensurePhysicalDefaults(ensureVarFormatEntry(name).physical);
+            input.value = String(physicalRawToDisplay(Number(vd.value), p));
         } else {
             input.value = vd.value;
         }
@@ -8582,8 +9221,16 @@
                 sendVal = Number.isFinite(parsed) ? (Math.trunc(parsed) | 0) : 0;
                 varType = "int32";
             } else {
-                const parsed = parseNumericWithFormat(raw, ori);
-                sendVal = Number.isFinite(parsed) ? parsed : 0;
+                const pPhys = ensurePhysicalDefaults(ensureVarFormatEntry(name).physical);
+                const usePhys = physicalConversionActiveForDisplay(name) && pPhys.category !== "none";
+                let parsed;
+                if (usePhys) {
+                    parsed = parseFloat(raw);
+                    sendVal = Number.isFinite(parsed) ? physicalDisplayToRaw(parsed, pPhys) : 0;
+                } else {
+                    parsed = parseNumericWithFormat(raw, ori);
+                    sendVal = Number.isFinite(parsed) ? parsed : 0;
+                }
                 varType = "double";
             }
 
@@ -8623,30 +9270,8 @@
         recomputeDeltaByName();
         for (let i = 0; i < items.length; i++) {
             const el = items[i];
-            if (el.dataset.name === editingName) continue;
             const name = el.dataset.name;
-            const monVal = el.querySelector(".mon-value");
-            const vd = varsByName[name];
-            let usedHistory = false;
-            // En replay: SOLO las variables TSV impuestas usan valor del TSV;
-            // las no impuestas se comportan como variables normales (SHM/C++).
-            if (isPlaybackMode() && offlineRecordingName && isVarInTsv(name) && impositionNames.has(name) && monVal) {
-                const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
-                if (tNow != null) {
-                    const vHist = getReplayImposedValueAtTs(name, tNow);
-                    if (vHist != null) {
-                        monVal.textContent = formatValue(vHist, "double", name);
-                        usedHistory = true;
-                    }
-                }
-            }
-            if (vd && monVal && !usedHistory) {
-                monVal.textContent = formatValue(vd.value, vd.type, name);
-                const arrBadge = el.querySelector(".array-badge");
-                if (arrBadge && Array.isArray(vd.value)) {
-                    arrBadge.textContent = "[" + vd.value.length + "]";
-                }
-            }
+            refreshMonitorItemDisplayedValue(el, name);
             const wrap = el.closest(".monitor-item-wrap");
             if (wrap && expandedStats.has(name) && !monitorDetailPanelUsesDock()) {
                 updateStatsPanel(wrap, name);
