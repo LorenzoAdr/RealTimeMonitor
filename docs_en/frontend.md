@@ -41,7 +41,7 @@ Header with connection state, **mode** selector (Live / Analysis / Replay), **Re
 ## Modes: live, analysis and hybrid replay
 
 - **Live**: Data via WebSocket from the backend (SHM/UDS). UDS instance selector, Rel act (`update_ratio`), recording, alarms.
-- **Offline (analysis)**: Load TSV recordings (server or local file). Frontend requests time windows via API (`/api/recordings/{filename}/window` or `window_batch`) and fills `historyCache` / `arrayElemHistory`. `offlineDataset`, `offlineRecordingName`, segments, scrubber and playback controls are specific to this mode.
+- **Offline (analysis)**: Load recordings as **Parquet** (canonical) or legacy **TSV** (server, local file, or remote file browser). Large Parquet: **row-based safe mode** (`row_start` / `row_count` via API); a local `.parquet` is uploaded to `POST /api/recordings/parquet_preview_upload` for JSON in the same shape as TSV parsing. Time windows still use `/api/recordings/{filename}/window` or `window_batch` (backend reads Parquet or TSV by extension). `offlineDataset`, `offlineRecordingName`, segments, scrubber and playback controls are specific to this mode.
 - **Replay (hybrid)**: WebSocket stays on for `vars_names`/`vars_update` from SHM while using a TSV as a time reference. Variable list is the union of backend + TSV. Only TSV variables marked **impose** continuously write to SHM from TSV values (with `Δt`/`Δv` offsets); non-imposed TSV variables behave like normal SHM variables.
 
 ![Analysis mode — TSV and offline controls](images/analisis.png){ width="100%" }
@@ -80,4 +80,4 @@ Collapsible panel (bottom-right) for anomalies, segments, notes, PDF report, etc
 ## Shortcuts and more
 
 - Keyboard: Escape (close overlays), Space (pause/resume charts), Ctrl+Z / Ctrl+Y (undo/redo layout), R (record), S (screenshot), etc.
-- Advanced admin: overlay with config paths, recordings, server state; "Save changes" applies `web_port` and `web_port_scan_max` (`/api/admin/runtime_config`). Port fields highlight green until saved.
+- Advanced admin: overlay with config paths, recordings, server state; "Save changes" applies `web_port`, `web_port_scan_max`, and **`recordings_write_tsv`** (`/api/admin/runtime_config`). The "Also write TSV" checkbox controls whether a legacy `.tsv` is written in addition to canonical Parquet. Port fields, range, or that checkbox highlight green until saved.

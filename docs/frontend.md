@@ -42,7 +42,7 @@ Cabecera con estado de conexión, selector de **modo** (Live / Análisis / Repla
 ## Modos: live, análisis y replay híbrido
 
 - **Live**: Datos por WebSocket desde el backend (SHM/UDS). Selector de instancia UDS, Rel act (update_ratio), grabación, alarmas.
-- **Offline (análisis)**: Se cargan grabaciones TSV (desde servidor o fichero local). El frontend pide ventanas de tiempo por API (`/api/recordings/{filename}/window` o `window_batch`) y rellena `historyCache` / `arrayElemHistory` para pintar los mismos gráficos. `offlineDataset`, `offlineRecordingName`, segmentos, scrubber y controles de reproducción son específicos de este modo.
+- **Offline (análisis)**: Se cargan grabaciones en **Parquet** (formato canónico) o **TSV** legado (servidor, fichero local o explorador remoto). Parquet grande: **modo seguro por filas** (`row_start` / `row_count` vía API); el fichero local `.parquet` se envía a `POST /api/recordings/parquet_preview_upload` para obtener JSON compatible con el mismo flujo que el TSV. Las ventanas de tiempo siguen yendo a `/api/recordings/{filename}/window` o `window_batch` (el backend lee Parquet o TSV según extensión). `offlineDataset`, `offlineRecordingName`, segmentos, scrubber y controles de reproducción son específicos de este modo.
 - **Replay (híbrido)**: Mantiene WebSocket activo para recibir `vars_names`/`vars_update` de SHM y, a la vez, usa una grabación TSV como referencia temporal. La lista de variables es la unión de backend + TSV. Solo las variables TSV marcadas como **imponer** escriben continuamente a SHM siguiendo el valor del TSV (con offsets `Δt`/`Δv`); las TSV no impuestas se comportan como variables normales de SHM.
 
 ![Modo análisis — TSV y controles offline](images/analisis.png){ width="100%" }
@@ -81,4 +81,4 @@ Panel colapsable (esquina inferior derecha) con anomalías, segmentos, notas, in
 ## Atajos y otros
 
 - Teclado: Escape (cerrar overlays), Espacio (pausar/reanudar gráficos), Ctrl+Z / Ctrl+Y (deshacer/rehacer layout), R (grabación), S (screenshot), etc.
-- Administración avanzada: overlay con rutas de config, grabaciones, estado del servidor; botón “Guardar cambios” aplica `web_port` y `web_port_scan_max` al backend (`/api/admin/runtime_config`). Si se cambian los campos de puerto base o incremento, el botón se resalta en verde hasta guardar.
+- Administración avanzada: overlay con rutas de config, grabaciones, estado del servidor; botón “Guardar cambios” aplica `web_port`, `web_port_scan_max` y **`recordings_write_tsv`** al backend (`/api/admin/runtime_config`). La casilla “Generar también TSV” controla si, además del Parquet canónico, se escribe un `.tsv` para interoperabilidad. Si se cambian puertos, incremento o esa casilla, el botón se resalta en verde hasta guardar.

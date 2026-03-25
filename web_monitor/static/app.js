@@ -76,6 +76,8 @@
     let recordSizeBytes = 0;
     let isRecordingStopping = false;
     let pendingRecordingRestart = false;
+    /** Variable cuyo valor se edita inline en el monitor; debe existir antes de setModeUi() al arrancar (evita TDZ). */
+    let editingName = null;
 
     let savedInstance = ""; // instancia UDS preferida (guardada/cargada en config)
     const statusEl = document.getElementById("connectionStatus");
@@ -246,6 +248,7 @@
     const adminBasePortInput = document.getElementById("adminBasePortInput");
     const adminPortRangeInput = document.getElementById("adminPortRangeInput");
     const adminApplyRuntimeBtn = document.getElementById("adminApplyRuntimeBtn");
+    const adminRecordingsWriteTsvCheckbox = document.getElementById("adminRecordingsWriteTsvCheckbox");
     const adminDeleteAllRecordingsBtn = document.getElementById("adminDeleteAllRecordingsBtn");
     const adminDeleteAllTemplatesBtn = document.getElementById("adminDeleteAllTemplatesBtn");
     const adminRecordingsList = document.getElementById("adminRecordingsList");
@@ -310,30 +313,65 @@
             beginOfflineDatasetLoad();
             try {
                 const filename = offlineRecordingName;
+                const isPq = (filename || "").toLowerCase().endsWith(".parquet");
                 const url = "/api/recordings/" + encodeURIComponent(filename);
-                const resp = await fetch(url);
-                if (!resp.ok) {
-                    alert("No se pudo descargar la grabación completa.");
-                    return;
+                // 1) Descargar localmente el artefacto completo (sin corromper binario).
+                // 2) Cargar el dataset en navegador (Parquet => payload JSON offline; TSV => parse de texto).
+                if (isPq) {
+                    // Descarga binaria local del .parquet canónico.
+                    try {
+                        const respBin = await fetch(url);
+                        if (respBin.ok) {
+                            const blob = await respBin.blob();
+                            const dlUrl = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = dlUrl;
+                            a.download = filename;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(dlUrl);
+                        }
+                    } catch (e) {
+                        console.warn("No se pudo descargar Parquet completo localmente:", e);
+                    }
+                    // Cargar dataset offline completo: por filas vía parquet_preview.
+                    const totalRows = Number(offlineSafetyInfo.parquetTotalRows) || 0;
+                    const rc = totalRows > 0 ? totalRows : 100_000;
+                    const resp = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=1&row_start=0&row_count=${Math.max(100, rc)}`);
+                    if (!resp.ok) {
+                        alert("No se pudo cargar el Parquet completo en modo análisis.");
+                        return;
+                    }
+                    const payload = await resp.json();
+                    if (!payload || !payload.offline) throw new Error("Respuesta Parquet inválida (sin offline)");
+                    const dsFull = offlineDatasetFromParquetPayload(payload.offline, filename);
+                    await loadOfflineDataset(dsFull, { recordingName: filename, safeInfo: null, preserveLayout: true });
+                } else {
+                    const resp = await fetch(url);
+                    if (!resp.ok) {
+                        alert("No se pudo descargar la grabación completa.");
+                        return;
+                    }
+                    const text = await resp.text();
+                    // Disparar descarga local del TSV completo.
+                    try {
+                        const blob = new Blob([text], { type: "text/tab-separated-values" });
+                        const dlUrl = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = dlUrl;
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(dlUrl);
+                    } catch (e) {
+                        console.warn("No se pudo iniciar descarga automática del TSV:", e);
+                    }
+                    // Entrar en análisis normal con el archivo completo (sin modo seguro).
+                    const dsFull = parseTsvDataset(text, filename);
+                    await loadOfflineDataset(dsFull, { recordingName: filename, safeInfo: null, preserveLayout: true });
                 }
-                const text = await resp.text();
-                // Disparar descarga local del TSV completo.
-                try {
-                    const blob = new Blob([text], { type: "text/tab-separated-values" });
-                    const dlUrl = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = dlUrl;
-                    a.download = filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(dlUrl);
-                } catch (e) {
-                    console.warn("No se pudo iniciar descarga automática del TSV:", e);
-                }
-                // Entrar en análisis normal con el archivo completo (sin modo seguro).
-                const dsFull = parseTsvDataset(text, filename);
-                await loadOfflineDataset(dsFull, { recordingName: filename, safeInfo: null, preserveLayout: true });
             } catch (e) {
                 console.error("Error saliendo de modo seguro:", e);
                 alert("Error al salir de modo seguro y cargar el archivo completo.");
@@ -483,52 +521,82 @@
             const meta = windowMetaByName[key] || {};
             windowMetaByName[key] = { center: centerTs, span: meta.span || span };
         });
-        try {
-            windowFetchInFlight++;
-            windowFetchLastStart = performance.now();
-            const params = new URLSearchParams({
-                vars: cleanNames.join(","),
-                t_center: String(centerTs),
-                t_span: String(span),
-            });
-            const resp = await fetch(
-                `/api/recordings/${encodeURIComponent(offlineRecordingName)}/window_batch?` + params.toString()
-            );
-            if (!resp.ok) return;
-            const data = await resp.json();
-            const series = Array.isArray(data.series) ? data.series : [];
-            for (let i = 0; i < series.length; i++) {
-                const s = series[i];
-                const name = String(s.name || "");
-                if (!name) continue;
-                if (isReplayMode() && isVarInTsv(name) && !impositionNames.has(name)) {
-                    delete historyCache[name];
-                    continue;
-                }
-                const ts = Array.isArray(s.timestamps) ? s.timestamps : [];
-                const vals = Array.isArray(s.values) ? s.values : [];
-                if (ts.length === 0 || vals.length === 0 || ts.length !== vals.length) continue;
-                historyCache[name] = { timestamps: ts, values: vals };
-            }
-            if (series.length > 0) {
-                schedulePlotRender();
-            }
-        } catch (e) {
-            // Silencioso
-        } finally {
-            windowFetchInFlight = Math.max(0, windowFetchInFlight - 1);
+        // Evita fallos por query demasiado grande / timeout / errores puntuales.
+        const MAX_VARS_PER_BATCH = 80;
+        const chunks = [];
+        for (let i = 0; i < cleanNames.length; i += MAX_VARS_PER_BATCH) {
+            chunks.push(cleanNames.slice(i, i + MAX_VARS_PER_BATCH));
         }
+        let anyUpdated = false;
+        for (const chunk of chunks) {
+            try {
+                windowFetchInFlight++;
+                windowFetchLastStart = performance.now();
+                const params = new URLSearchParams({
+                    vars: chunk.join(","),
+                    t_center: String(centerTs),
+                    t_span: String(span),
+                });
+                const resp = await fetch(
+                    `/api/recordings/${encodeURIComponent(offlineRecordingName)}/window_batch?` + params.toString()
+                );
+                if (!resp.ok) continue;
+                const data = await resp.json();
+                const series = Array.isArray(data.series) ? data.series : [];
+                for (let i = 0; i < series.length; i++) {
+                    const s = series[i];
+                    const name = String(s.name || "");
+                    if (!name) continue;
+                    if (isReplayMode() && isVarInTsv(name) && !impositionNames.has(name)) {
+                        delete historyCache[name];
+                        continue;
+                    }
+                    const ts = Array.isArray(s.timestamps) ? s.timestamps : [];
+                    const vals = Array.isArray(s.values) ? s.values : [];
+                    if (ts.length === 0 || vals.length === 0 || ts.length !== vals.length) continue;
+                    historyCache[name] = { timestamps: ts, values: vals };
+                    anyUpdated = true;
+                }
+            } catch (e) {
+                // Silencioso
+            } finally {
+                windowFetchInFlight = Math.max(0, windowFetchInFlight - 1);
+            }
+        }
+        if (anyUpdated) schedulePlotRender();
+    }
+
+    /** Parquet truncado (p. ej. tras salir de modo seguro con cap del servidor) o modo seguro: hace falta window_batch al mover t. */
+    function offlineNeedsServerWindowFetch() {
+        if (!isPlaybackMode() || !offlineDataset || !offlineRecordingName) return false;
+        if (offlineSafetyInfo && offlineSafetyInfo.safeMode) return true;
+        const fn = (offlineRecordingName || "").toLowerCase();
+        return fn.endsWith(".parquet") && !!offlineDataset.truncated;
     }
 
     function scheduleWindowFetchAroundTime(centerTs) {
-        // Ventanas cortas solo tienen sentido en modo seguro (grabaciones grandes).
-        if (!isPlaybackMode() || !offlineDataset || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+        // Modo seguro o Parquet no cargado entero: ventanas cortas alrededor de currentTs.
+        if (!isPlaybackMode() || !offlineDataset || !offlineNeedsServerWindowFetch()) return;
         if (!Number.isFinite(centerTs)) return;
 
         const runFetch = () => {
             const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : centerTs;
-            const batchNames = [];
-            for (const name of monitoredNames) {
+        const batchNames = [];
+        const candidateNames = new Set();
+        for (const n of monitoredNames) candidateNames.add(n);
+        if (Array.isArray(graphList) && graphList.length > 0) {
+            for (const gid of graphList) {
+                try {
+                    const vars = getVarsForGraph(gid);
+                    if (Array.isArray(vars)) {
+                        for (const v of vars) candidateNames.add(v);
+                    }
+                } catch (e) {
+                    /* ignore */
+                }
+            }
+        }
+        for (const name of candidateNames) {
                 if (isArrayElem(name)) continue;
                 if (isReplayMode() && isVarInTsv(name) && !impositionNames.has(name)) continue;
                 // Si la variable está ploteada y ya tiene histórico completo, no pedimos ventana corta.
@@ -1436,6 +1504,8 @@
             bufferLabel: "Buffer:",
             bufferVisualLabel: "Buffer visual:",
             filterPlaceholder: "Filtrar variables...",
+            inlineEditConfirm: "Confirmar valor",
+            inlineEditCancel: "Cancelar edición",
             selectAll: "Sel. todo",
             selectNone: "Ninguno",
             addToMonitor: "+ Monitorizar",
@@ -1480,7 +1550,8 @@
             modeLabel: "Modo:",
             modeLive: "Live",
             modeOffline: "Análisis",
-            offlineLoadLocal: "Cargar TSV local",
+            offlineLoadLocal: "Cargar archivo local",
+            offlineLoadLocalTitle: "Cargar archivo TSV o Parquet local en Run A",
             offlineLoadServer: "Cargar",
             offlineRecordingLabel: "Grabación:",
             offlineNoRecordings: "(sin grabaciones)",
@@ -1496,6 +1567,13 @@
             statusReplay: "Modo replay",
             modeReplay: "Replay",
             sendFileOnFinishLabel: "Enviar fichero al terminar",
+            recordingsWriteTsvLabel: "Generar también TSV (legado, además de Parquet)",
+            notifyPermissionBtn: "Notificaciones…",
+            notifyPermissionTitle: "El navegador solo permite pedir permiso tras un clic (avisos al disparar alarmas con la pestaña en segundo plano).",
+            notifyStatusGranted: "Permiso concedido.",
+            notifyStatusDenied: "Denegado. Actívalo en el icono del candado o en Ajustes del sitio del navegador.",
+            notifyStatusDefault: "Pendiente: haz clic en el botón para permitir.",
+            notifyStatusUnsupported: "Notificaciones no disponibles en este navegador.",
             recordPathLabel: "Guardado en:",
             advInfoLabel: "Adv info",
             docsTitle: "Abrir documentación completa (MkDocs)",
@@ -1549,6 +1627,8 @@
             bufferLabel: "Buffer:",
             bufferVisualLabel: "Visual buffer:",
             filterPlaceholder: "Filter variables...",
+            inlineEditConfirm: "Confirm value",
+            inlineEditCancel: "Cancel edit",
             selectAll: "Select all",
             selectNone: "None",
             addToMonitor: "+ Monitor",
@@ -1593,7 +1673,8 @@
             modeLabel: "Mode:",
             modeLive: "Live",
             modeOffline: "Analysis",
-            offlineLoadLocal: "Load local TSV",
+            offlineLoadLocal: "Load local file",
+            offlineLoadLocalTitle: "Load local TSV or Parquet file for Run A",
             offlineLoadServer: "Load",
             offlineRecordingLabel: "Recording:",
             offlineNoRecordings: "(no recordings)",
@@ -1609,6 +1690,13 @@
             statusReplay: "Replay mode",
             modeReplay: "Replay",
             sendFileOnFinishLabel: "Send file when finished",
+            recordingsWriteTsvLabel: "Also write TSV (legacy, in addition to Parquet)",
+            notifyPermissionBtn: "Notifications…",
+            notifyPermissionTitle: "Browsers only allow the permission prompt after a click (alarms when the tab is in the background).",
+            notifyStatusGranted: "Permission granted.",
+            notifyStatusDenied: "Denied. Enable it via the lock icon or the site settings in the browser.",
+            notifyStatusDefault: "Pending: click the button to allow.",
+            notifyStatusUnsupported: "Notifications are not available in this browser.",
             recordPathLabel: "Saved at:",
             advInfoLabel: "Adv info",
             docsTitle: "Open full documentation (MkDocs)",
@@ -1749,6 +1837,25 @@
         schedulePlotRender();
     }
 
+    function refreshNotificationPermissionUi() {
+        const btn = document.getElementById("notificationPermissionBtn");
+        const st = document.getElementById("notificationPermissionStatus");
+        if (!btn || !st) return;
+        const tr = I18N[currentLang] || I18N.es;
+        if (!("Notification" in window)) {
+            st.textContent = tr.notifyStatusUnsupported || "";
+            btn.style.display = "none";
+            return;
+        }
+        btn.style.display = "";
+        btn.textContent = tr.notifyPermissionBtn || "…";
+        btn.title = tr.notifyPermissionTitle || "";
+        const p = Notification.permission;
+        if (p === "granted") st.textContent = tr.notifyStatusGranted || "";
+        else if (p === "denied") st.textContent = tr.notifyStatusDenied || "";
+        else st.textContent = tr.notifyStatusDefault || "";
+    }
+
     function applyLanguage(lang) {
         currentLang = I18N[lang] ? lang : "es";
         const tr = I18N[currentLang];
@@ -1784,7 +1891,10 @@
             modeSelect.options[1].textContent = tr.modeOffline || "Análisis";
             modeSelect.options[2].textContent = tr.modeReplay || "Replay";
         }
-        if (loadLocalTsvBtn) loadLocalTsvBtn.textContent = tr.offlineLoadLocal || "Cargar TSV local";
+        if (loadLocalTsvBtn) {
+            loadLocalTsvBtn.textContent = tr.offlineLoadLocal || "Cargar archivo local";
+            loadLocalTsvBtn.title = tr.offlineLoadLocalTitle || loadLocalTsvBtn.title;
+        }
         if (loadServerRecordingBtn) loadServerRecordingBtn.textContent = tr.offlineLoadServer || "Cargar";
         const recordingSelectLabelEl = document.getElementById("recordingSelectLabel");
         if (recordingSelectLabelEl && recordingSelectLabelEl.firstChild && recordingSelectLabelEl.firstChild.nodeType === Node.TEXT_NODE) {
@@ -1847,6 +1957,8 @@
         if (settingsBtn) settingsBtn.title = tr.settingsTitle;
         const sendFileOnFinishLabelEl = document.getElementById("sendFileOnFinishLabel");
         if (sendFileOnFinishLabelEl) sendFileOnFinishLabelEl.textContent = tr.sendFileOnFinishLabel || "Enviar fichero al terminar";
+        const recordingsWriteTsvLabelEl = document.getElementById("recordingsWriteTsvLabel");
+        if (recordingsWriteTsvLabelEl) recordingsWriteTsvLabelEl.textContent = tr.recordingsWriteTsvLabel || "Generar también TSV";
         const recordPathLabelEl = document.getElementById("recordPathLabel");
         if (recordPathLabelEl) recordPathLabelEl.textContent = tr.recordPathLabel || "Guardado en:";
         if (recordPathAnalyzeBtn) {
@@ -1917,6 +2029,7 @@
         if (docsOpenEsBtn && tr.docsLangEs) docsOpenEsBtn.textContent = tr.docsLangEs;
         if (docsOpenEnBtn && tr.docsLangEn) docsOpenEnBtn.textContent = tr.docsLangEn;
         if (docsLangNotBuilt && tr.docsNotBuiltMsg) docsLangNotBuilt.textContent = tr.docsNotBuiltMsg;
+        refreshNotificationPermissionUi();
     }
 
     function applyMonitorColumns() {
@@ -2423,6 +2536,12 @@
             if (!f) return;
             beginOfflineDatasetLoad();
             try {
+                if (f.name.toLowerCase().endsWith(".parquet")) {
+                    if (!isPlaybackMode()) setAppMode("offline", { keepData: true });
+                    const ds = await loadLocalParquetViaUpload(f);
+                    await loadOfflineDataset(ds, { target: "A", recordingName: f.name, safeInfo: null });
+                    return;
+                }
                 let ds;
                 let safeInfo = null;
                 if (shouldUseSafeOfflineLoad(f.size)) {
@@ -2446,7 +2565,7 @@
                 if (!isPlaybackMode()) setAppMode("offline", { keepData: true });
                 await loadOfflineDataset(ds, { target: "A", recordingName: "", safeInfo });
             } catch (e) {
-                alert("Error cargando TSV: " + (e && e.message ? e.message : String(e)));
+                alert("Error cargando archivo: " + (e && e.message ? e.message : String(e)));
             } finally {
                 endOfflineDatasetLoad();
                 localTsvInput.value = "";
@@ -2470,6 +2589,7 @@
     if (offlineChunkPrevBtn) {
         offlineChunkPrevBtn.addEventListener("click", () => {
             if (!offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+            if (offlineSafetyInfo.parquetMode) return;
             const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
             const nextOffset = Math.max(0, (offlineSafetyInfo.segmentStartByte || 0) - previewBytes);
             loadRecordingChunkAtOffset(nextOffset);
@@ -2478,6 +2598,13 @@
     if (offlineChunkNextBtn) {
         offlineChunkNextBtn.addEventListener("click", () => {
             if (!offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
+            if (offlineSafetyInfo.parquetMode) {
+                const nr = Number(offlineSafetyInfo.parquetNextRow) || 0;
+                const tr = Number(offlineSafetyInfo.parquetTotalRows) || 0;
+                if (nr >= tr) return;
+                loadRecordingChunkAtOffset(nr);
+                return;
+            }
             const nextOffset = offlineSafetyInfo.segmentEndByte || 0;
             if (nextOffset >= (offlineSafetyInfo.totalBytes || 0)) return;
             loadRecordingChunkAtOffset(nextOffset);
@@ -3651,6 +3778,21 @@
         });
     }
 
+    const notificationPermissionBtn = document.getElementById("notificationPermissionBtn");
+    if (notificationPermissionBtn) {
+        notificationPermissionBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (!("Notification" in window)) return;
+            if (Notification.permission === "granted") {
+                refreshNotificationPermissionUi();
+                return;
+            }
+            Notification.requestPermission()
+                .then(() => refreshNotificationPermissionUi())
+                .catch(() => refreshNotificationPermissionUi());
+        });
+    }
+
     const monitorMenuBtn = document.getElementById("monitorMenuBtn");
     const monitorMenuPanel = document.getElementById("monitorMenuPanel");
     const monitorFilterMenuBtn = document.getElementById("monitorFilterMenuBtn");
@@ -3951,6 +4093,7 @@
         if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
         if (offlinePreviewSpanSecInput) offlinePreviewSpanSecInput.value = String(offlineSafePreviewMaxSpanSec);
         if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
+        if (typeof cfg.offlineRecordingName === "string") offlineRecordingName = cfg.offlineRecordingName;
         if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay") setAppMode(cfg.appMode, { keepData: true });
         const rec = (cfg.offlineRecordingName || "").trim();
         if (opts.autoLoadOffline && cfg.appMode === "offline" && rec) {
@@ -4032,9 +4175,11 @@
         if (adminStatePath) adminStatePath.value = d?.paths?.server_state_dir || "";
         if (adminBasePortInput) adminBasePortInput.value = String(d?.runtime?.web_port ?? 8080);
         if (adminPortRangeInput) adminPortRangeInput.value = String(d?.runtime?.web_port_scan_max ?? 10);
+        if (adminRecordingsWriteTsvCheckbox) adminRecordingsWriteTsvCheckbox.checked = !!d?.runtime?.recordings_write_tsv;
         adminRuntimeBaseline = {
             web_port: Number(adminBasePortInput?.value || 8080),
             web_port_scan_max: Number(adminPortRangeInput?.value || 10),
+            recordings_write_tsv: !!(adminRecordingsWriteTsvCheckbox && adminRecordingsWriteTsvCheckbox.checked),
         };
         updateAdminApplyButtonState();
         const fillList = (el, rows, kind) => {
@@ -4082,13 +4227,16 @@
         fillList(adminTemplatesList, d.templates || [], "template");
     }
 
-    let adminRuntimeBaseline = { web_port: 8080, web_port_scan_max: 10 };
+    let adminRuntimeBaseline = { web_port: 8080, web_port_scan_max: 10, recordings_write_tsv: false };
 
     function updateAdminApplyButtonState() {
         if (!adminApplyRuntimeBtn) return;
         const base = Number(adminBasePortInput?.value || 8080);
         const rng = Number(adminPortRangeInput?.value || 10);
-        const hasChanges = base !== adminRuntimeBaseline.web_port || rng !== adminRuntimeBaseline.web_port_scan_max;
+        const rw = !!(adminRecordingsWriteTsvCheckbox && adminRecordingsWriteTsvCheckbox.checked);
+        const hasChanges = base !== adminRuntimeBaseline.web_port
+            || rng !== adminRuntimeBaseline.web_port_scan_max
+            || rw !== !!adminRuntimeBaseline.recordings_write_tsv;
         adminApplyRuntimeBtn.classList.toggle("admin-apply-has-changes", !!hasChanges);
     }
 
@@ -4099,6 +4247,9 @@
     if (adminPortRangeInput) {
         adminPortRangeInput.addEventListener("input", updateAdminApplyButtonState);
         adminPortRangeInput.addEventListener("change", updateAdminApplyButtonState);
+    }
+    if (adminRecordingsWriteTsvCheckbox) {
+        adminRecordingsWriteTsvCheckbox.addEventListener("change", updateAdminApplyButtonState);
     }
 
     if (adminStorageBtn && adminStorageOverlay) {
@@ -4234,6 +4385,26 @@
                 loadRemotePath(path);
                 return;
             }
+            if (remoteBrowserPickForAnalysis && name.toLowerCase().endsWith(".parquet")) {
+                beginOfflineDatasetLoad();
+                try {
+                    const params = new URLSearchParams({ path });
+                    const resp = await fetch("/api/browse/download?" + params.toString());
+                    if (!resp.ok) throw new Error(resp.statusText);
+                    const blob = await resp.blob();
+                    const filename = path.split("/").pop() || name;
+                    const file = new File([blob], filename, { type: "application/vnd.apache.parquet" });
+                    const ds = await loadLocalParquetViaUpload(file);
+                    await loadOfflineDataset(ds, { recordingName: filename, preserveLayout: true });
+                    refreshServerRecordings();
+                    closeRemoteFileBrowser();
+                } catch (err) {
+                    alert("No se pudo cargar el archivo: " + (err.message || String(err)));
+                } finally {
+                    endOfflineDatasetLoad();
+                }
+                return;
+            }
             if (remoteBrowserPickForAnalysis && name.toLowerCase().endsWith(".tsv")) {
                 beginOfflineDatasetLoad();
                 try {
@@ -4327,10 +4498,15 @@
         adminApplyRuntimeBtn.addEventListener("click", async () => {
             const base = Math.max(1, Math.min(65535, Number(adminBasePortInput?.value || 8080)));
             const rng = Math.max(0, Math.min(100, Number(adminPortRangeInput?.value || 10)));
+            const rw = !!(adminRecordingsWriteTsvCheckbox && adminRecordingsWriteTsvCheckbox.checked);
             const r = await fetch("/api/admin/runtime_config", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ web_port: Math.floor(base), web_port_scan_max: Math.floor(rng) }),
+                body: JSON.stringify({
+                    web_port: Math.floor(base),
+                    web_port_scan_max: Math.floor(rng),
+                    recordings_write_tsv: rw,
+                }),
             });
             if (!r.ok) {
                 let msg = "No se pudo aplicar la configuración";
@@ -4461,9 +4637,45 @@
     // --- WebSocket ---
 
     let connectionId = 0;
+    /** Reintento automático si el WS cae (p. ej. UDS aún no listo, backend ocupado). Sin esto solo “enganchaba” tras F5 manual. */
+    let wsReconnectTimer = null;
+    let wsReconnectAttempt = 0;
+    let wsReconnectInFlight = false;
+    let wsSuppressAutoReconnect = false;
     let connectionInfo = null;
     let udsInstances = [];
     let warningDismissed = false;
+    /** Último `uds_path` enviado en el WS (`null` = sin query, el servidor elige). Para no reconectar en vano. */
+    let lastConnectUdsParam = null;
+
+    function effectiveUdsPathForWs() {
+        const sel = (portSelect && portSelect.value) ? String(portSelect.value).trim() : "";
+        if (sel.startsWith("uds:")) return sel.slice(4);
+        const saved = savedInstance ? String(savedInstance).trim() : "";
+        if (saved.startsWith("uds:")) return saved.slice(4);
+        return "";
+    }
+
+    function ensureWsMatchesSelection() {
+        if (!hasBackendConnectionMode()) {
+            setOfflineStatus();
+            return;
+        }
+        if (isOfflineMode()) return;
+        if (udsInstances.length === 0) {
+            statusEl.textContent = (I18N[currentLang] || I18N.es).statusNoInstances || "No hay instancias VarMonitor (UDS)";
+            statusEl.className = "status disconnected";
+            /* El handshake /ws vuelve a escanear UDS: intentar aunque la API HTTP devolviera vacío. */
+            if (!(ws && ws.readyState === WebSocket.OPEN)) {
+                connect();
+            }
+            return;
+        }
+        const wantRaw = effectiveUdsPathForWs();
+        const wantParam = wantRaw ? wantRaw : null;
+        if (ws && ws.readyState === WebSocket.OPEN && wantParam === lastConnectUdsParam) return;
+        connect();
+    }
 
     function fetchConnectionInfo() {
         return fetch("/api/connection_info")
@@ -4475,6 +4687,11 @@
                 try {
                     const u = await fetch(udsUrl).then((r) => r.ok ? r.json() : null);
                     udsInstances = (u && Array.isArray(u.instances)) ? u.instances : [];
+                    /* Filtro por usuario puede devolver [] aunque existan sockets (nombres distintos). El WS sin uds_path usa el primero del servidor. */
+                    if (udsInstances.length === 0 && user) {
+                        const u2 = await fetch("/api/uds_instances").then((r) => r.ok ? r.json() : null);
+                        udsInstances = (u2 && Array.isArray(u2.instances)) ? u2.instances : [];
+                    }
                 } catch (e) {
                     udsInstances = [];
                 }
@@ -4518,7 +4735,39 @@
             .catch(() => null);
     }
 
+    function clearWsReconnectTimer() {
+        if (wsReconnectTimer) {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+        }
+    }
+
+    function scheduleWsReconnect() {
+        if (wsSuppressAutoReconnect) return;
+        if (!hasBackendConnectionMode()) return;
+        if (isOfflineMode()) return;
+        clearWsReconnectTimer();
+        const exp = Math.min(Math.max(0, wsReconnectAttempt - 1), 14);
+        const delay = Math.min(30000, Math.round(450 * Math.pow(1.72, exp)));
+        wsReconnectTimer = setTimeout(() => {
+            wsReconnectTimer = null;
+            if (!hasBackendConnectionMode() || isOfflineMode()) return;
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+            if (wsReconnectInFlight) return;
+            wsReconnectInFlight = true;
+            fetchConnectionInfo()
+                .then(() => initialScanAndConnect())
+                .catch(() => {
+                    if (hasBackendConnectionMode() && !isOfflineMode()) connect();
+                })
+                .finally(() => {
+                    wsReconnectInFlight = false;
+                });
+        }, delay);
+    }
+
     function fillPortSelectWithUds() {
+        if (!portSelect) return;
         portSelect.innerHTML = "";
         for (const inst of udsInstances) {
             const opt = document.createElement("option");
@@ -4907,8 +5156,8 @@
         const desired = mode === "offline" ? "offline" : (mode === "replay" ? "replay" : "live");
         const changed = desired !== appMode;
         appMode = desired;
-        if (desired === "replay") {
-            // Al entrar en replay siempre obligamos a cargar referencia manualmente.
+        if (desired === "replay" && !opts.keepData) {
+            // Entrada manual a replay: referencia desde cero. Con keepData (p. ej. import) no borrar nombre guardado.
             offlineDataset = null;
             offlineRecordingName = "";
             offlineRecordingGlobalMinTs = null;
@@ -4919,6 +5168,9 @@
             stopOfflinePlayback();
             if (isLocalRecording) stopLocalRecording(false);
             if (desired === "offline") {
+                clearWsReconnectTimer();
+                wsReconnectAttempt = 0;
+                wsReconnectInFlight = false;
                 if (ws) {
                     try { ws.close(); } catch (e) {}
                     ws = null;
@@ -5068,6 +5320,35 @@
             isPreview: !!opts.isPreview,
             truncated: !!opts.isPreview && (stoppedEarly || lines.length > samples.length + 1),
         };
+    }
+
+    function isRecordingParquetFilename(fn) {
+        return (fn || "").toLowerCase().endsWith(".parquet");
+    }
+
+    function offlineDatasetFromParquetPayload(offline, filename) {
+        if (!offline || !Array.isArray(offline.samples)) throw new Error("Parquet offline inválido");
+        return {
+            sourceName: offline.sourceName || filename,
+            samples: offline.samples,
+            names: offline.names || [],
+            minTs: offline.minTs,
+            maxTs: offline.maxTs,
+            isEpoch: !!offline.isEpoch,
+            isPreview: !!offline.isPreview,
+            truncated: !!offline.truncated,
+        };
+    }
+
+    async function loadLocalParquetViaUpload(file) {
+        const fd = new FormData();
+        fd.append("file", file, file.name || "upload.parquet");
+        const mr = Math.max(100, Math.min(Number(offlineSafePreviewMaxRows) || 10000, 100000));
+        const r = await fetch(`/api/recordings/parquet_preview_upload?max_rows=${mr}`, { method: "POST", body: fd });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || r.statusText || "Parquet upload falló");
+        if (!j.offline) throw new Error("Respuesta sin datos offline");
+        return offlineDatasetFromParquetPayload(j.offline, file.name || "dataset.parquet");
     }
 
     function binarySearchSampleIndex(samples, ts) {
@@ -5579,6 +5860,29 @@
         return Number.isFinite(mb) && mb > offlineFullLoadMaxMb;
     }
 
+    function shouldUseSafeParquetLoad(meta, sizeBytes) {
+        const rows = Number(meta && meta.rows);
+        const cols = Number(meta && meta.columns);
+        if (Number.isFinite(rows) && rows > 0 && Number.isFinite(cols) && cols > 0) {
+            const cells = rows * cols;
+            const limitCells = Math.max(500000, (Number(offlineSafePreviewMaxRows) || 10000) * 300);
+            if (!shouldUseSafeOfflineLoad(sizeBytes) && cells <= limitCells) return false;
+            return true;
+        }
+        return shouldUseSafeOfflineLoad(sizeBytes);
+    }
+
+    async function loadWholeParquetFromServer(filename, meta, opts = {}) {
+        const rows = Number(meta && meta.rows);
+        const rc = (Number.isFinite(rows) && rows > 0) ? Math.min(Math.floor(rows), 100000) : 20000;
+        const r = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=1&row_start=0&row_count=${Math.max(100, rc)}`);
+        if (!r.ok) throw new Error("No se pudo descargar Parquet");
+        const payload = await r.json();
+        if (!payload || !payload.offline) throw new Error("Respuesta Parquet inválida");
+        const ds = offlineDatasetFromParquetPayload(payload.offline, filename);
+        await loadOfflineDataset(ds, { ...opts, recordingName: filename, safeInfo: null });
+    }
+
     function shouldForceFullLoadWithConfirmation(label, sizeBytes, estRamBytes) {
         if (!offlineAllowForceFullLoad) return false;
         const tr = I18N[currentLang] || I18N.es;
@@ -5622,6 +5926,51 @@
     async function loadLargeServerFileInSafeMode(filename, sizeBytes, byteOffset = 0) {
         const tr = I18N[currentLang] || I18N.es;
         const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+
+        if (isRecordingParquetFilename(filename)) {
+            const rowStart = Math.max(0, Number(byteOffset) || 0);
+            const rowCount = Math.max(100, Math.min(Number(offlineSafePreviewMaxRows) || 10000, 100000));
+            const url = `/api/recordings/${encodeURIComponent(filename)}?preview_bytes=1&row_start=${rowStart}&row_count=${rowCount}`;
+            const r = await fetch(url);
+            if (!r.ok) throw new Error("No se pudo descargar preview de la grabación Parquet");
+            const payload = await r.json();
+            const offline = payload && payload.offline;
+            if (!offline) throw new Error("Respuesta Parquet sin offline");
+            const ds = offlineDatasetFromParquetPayload(offline, filename);
+            const totalBytes = Number(sizeBytes) || Number(payload && payload.size) || 0;
+            const totalRows = Number(payload.total_rows) || 0;
+            const nextRow = Number(payload.segment_start) || 0;
+            const cols = Array.isArray(ds.names) ? ds.names.length : 1;
+            const estRamBytes = Math.max(1, totalRows) * Math.max(1, cols) * 48;
+            const segmentSpanSec = Math.max(0, ds.maxTs - ds.minTs);
+            const safeInfo = {
+                safeMode: true,
+                parquetMode: true,
+                totalBytes,
+                parquetTotalRows: totalRows,
+                parquetNextRow: nextRow,
+                parquetRowStart: rowStart,
+                segmentStartByte: rowStart,
+                segmentEndByte: nextRow,
+                segmentSpanSec,
+                estRamBytes,
+                columns: cols,
+                estRows: totalRows,
+                reason: "size",
+            };
+            if (rowStart === 0) {
+                offlineSegmentOffsetSec = 0;
+                alert(
+                    `${tr.offlineDatasetSafeMode || "Modo seguro"}: ${filename} (Parquet)\n` +
+                    `Tamaño: ${formatBytes(safeInfo.totalBytes)}\n` +
+                    `Filas (aprox.): ${totalRows}\n` +
+                    `Estimación RAM carga completa: ~${formatBytes(estRamBytes)}\n` +
+                    `Se carga por tramos de hasta ${rowCount} filas.`
+                );
+            }
+            return { ds, safeInfo };
+        }
+
         const url = byteOffset > 0
             ? `/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}&offset=${byteOffset}`
             : `/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`;
@@ -5641,6 +5990,7 @@
         const segmentSpanSec = Math.max(0, ds.maxTs - ds.minTs);
         const safeInfo = {
             safeMode: true,
+            parquetMode: false,
             totalBytes,
             segmentStartByte: segmentStart,
             segmentEndByte: segmentEnd,
@@ -5668,7 +6018,12 @@
         const filename = (offlineRecordingName || "").trim();
         if (!filename || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) return;
         const totalBytes = offlineSafetyInfo.totalBytes || 0;
-        if (byteOffset < 0 || byteOffset >= totalBytes) return;
+        if (offlineSafetyInfo.parquetMode) {
+            const tr = Number(offlineSafetyInfo.parquetTotalRows) || 0;
+            if (byteOffset < 0 || byteOffset >= tr) return;
+        } else if (byteOffset < 0 || byteOffset >= totalBytes) {
+            return;
+        }
         beginOfflineDatasetLoad();
         try {
             // Cargar el tramo tal cual viene en el TSV: la columna time_s ya es
@@ -5708,10 +6063,16 @@
         prevBtn.style.display = canChunk ? "" : "none";
         nextBtn.style.display = canChunk ? "" : "none";
         if (!canChunk) return;
+        if (offlineSafetyInfo.parquetMode) {
+            const tr = Number(offlineSafetyInfo.parquetTotalRows) || 0;
+            const next = Number(offlineSafetyInfo.parquetNextRow) || 0;
+            prevBtn.disabled = true;
+            nextBtn.disabled = next >= tr;
+            return;
+        }
         const start = offlineSafetyInfo.segmentStartByte || 0;
         const end = offlineSafetyInfo.segmentEndByte || 0;
         const total = offlineSafetyInfo.totalBytes || 0;
-        const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
         prevBtn.disabled = start <= 0;
         nextBtn.disabled = end >= total;
     }
@@ -5754,6 +6115,7 @@
     async function loadOfflineDataset(ds, opts = {}) {
         const preserveLayout = !!opts.preserveLayout;
         stopOfflinePlayback();
+        const prevOfflineRecordingName = offlineRecordingName;
         // En replay (modo híbrido) conservar nombres del backend para unir con los del TSV.
         const liveVarNamesForMerge = isReplayMode() ? baseKnownVarNames.slice() : [];
         if (!preserveLayout) clearUserLayout();
@@ -5778,6 +6140,12 @@
             offlineRecordingName = opts.recordingName;
         } else if (!offlineRecordingName && ds && ds.sourceName && recordingSelect && Array.from(recordingSelect.options).some((o) => o.value === ds.sourceName)) {
             offlineRecordingName = ds.sourceName;
+        }
+        // Si el usuario cargó una grabación diferente, resetear los límites globales.
+        // Esto evita que un maxTs previo (p.ej. de un tramo de modo seguro) limite el scrubber.
+        if (typeof offlineRecordingName === "string" && offlineRecordingName && prevOfflineRecordingName && offlineRecordingName !== prevOfflineRecordingName) {
+            offlineRecordingGlobalMinTs = null;
+            offlineRecordingGlobalMaxTs = null;
         }
         // Si conocemos el nombre de la grabación y aún no tenemos maxTs global,
         // pedirlo al backend para que el scrubber y el playback trabajen sobre
@@ -5852,19 +6220,25 @@
         try {
             const meta = recordingsMetaByName.get(filename) || null;
             const sizeBytes = Number(meta && meta.size);
-            if (shouldUseSafeOfflineLoad(sizeBytes)) {
+            const isPq = isRecordingParquetFilename(filename);
+            const useSafe = isPq
+                ? shouldUseSafeParquetLoad(meta, sizeBytes)
+                : shouldUseSafeOfflineLoad(sizeBytes);
+            if (useSafe) {
                 let forceFull = false;
-                try {
-                    const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
-                    const rMeta = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`);
-                    if (rMeta.ok) {
-                        const p = await rMeta.json();
-                        const previewText = trimTextToFullLines(p && p.preview ? p.preview : "");
-                        const risk = estimateTsvLoadRisk(previewText, sizeBytes || Number(p && p.size) || 0);
-                        forceFull = shouldForceFullLoadWithConfirmation(filename, sizeBytes || Number(p && p.size) || 0, risk.estRamBytes);
-                    }
-                } catch (e) { /* si falla, seguimos en modo seguro */ }
-                if (forceFull) {
+                if (!isPq) {
+                    try {
+                        const previewBytes = Math.max(1, Math.floor(offlinePreviewMb * 1024 * 1024));
+                        const rMeta = await fetch(`/api/recordings/${encodeURIComponent(filename)}?preview_bytes=${previewBytes}`);
+                        if (rMeta.ok) {
+                            const p = await rMeta.json();
+                            const previewText = trimTextToFullLines(p && p.preview ? p.preview : "");
+                            const risk = estimateTsvLoadRisk(previewText, sizeBytes || Number(p && p.size) || 0);
+                            forceFull = shouldForceFullLoadWithConfirmation(filename, sizeBytes || Number(p && p.size) || 0, risk.estRamBytes);
+                        }
+                    } catch (e) { /* si falla, seguimos en modo seguro */ }
+                }
+                if (forceFull && !isPq) {
                     const rFull = await fetch("/api/recordings/" + encodeURIComponent(filename));
                     if (!rFull.ok) throw new Error("No se pudo descargar la grabación");
                     const textFull = await rFull.text();
@@ -5873,15 +6247,15 @@
                     return;
                 }
                 const safe = await loadLargeServerFileInSafeMode(filename, sizeBytes);
-                // Primer tramo en modo seguro: timestamps tal cual (offset 0). Después
-                // de cargarlo, guardamos cuánto dura para poder desplazar los tramos
-                // siguientes y que el tiempo sea continuo.
                 await loadOfflineDataset(safe.ds, { ...opts, recordingName: filename, safeInfo: safe.safeInfo });
                 if (safe.safeInfo && Number.isFinite(safe.safeInfo.segmentSpanSec)) {
                     offlineSegmentOffsetSec = safe.safeInfo.segmentSpanSec;
-                    // La referencia global arranca en el primer timestamp real de la grabación.
                     offlineRecordingGlobalMinTs = safe.ds.minTs;
                 }
+                return;
+            }
+            if (isPq) {
+                await loadWholeParquetFromServer(filename, meta, opts);
                 return;
             }
             const r = await fetch("/api/recordings/" + encodeURIComponent(filename));
@@ -5934,20 +6308,37 @@
         }
         connectionId += 1;
         const thisId = connectionId;
-        const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        const sel = (portSelect && portSelect.value) ? (portSelect.value || "").trim() : "";
-        const qs = new URLSearchParams();
-        if (sel.startsWith("uds:")) {
-            qs.set("uds_path", sel.slice(4));
+        if (ws) {
+            try { ws.close(); } catch (e) { /* ignore */ }
         }
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const path = effectiveUdsPathForWs();
+        const qs = new URLSearchParams();
+        if (path) qs.set("uds_path", path);
+        lastConnectUdsParam = path ? path : null;
         const storedPass = sessionStorage.getItem("varmon_password");
         if (storedPass) qs.set("password", storedPass);
         const qp = qs.toString();
         const url = qp ? `${proto}//${location.host}/ws?${qp}` : `${proto}//${location.host}/ws`;
         const socket = new WebSocket(url);
         ws = socket;
+        let hangTimer = null;
+        hangTimer = setTimeout(() => {
+            hangTimer = null;
+            if (thisId !== connectionId) return;
+            if (socket.readyState === WebSocket.CONNECTING) {
+                try { socket.close(); } catch (e) { /* ignore */ }
+            }
+        }, 45000);
         socket.onopen = () => {
             if (thisId !== connectionId) return;
+            if (hangTimer) {
+                clearTimeout(hangTimer);
+                hangTimer = null;
+            }
+            wsReconnectAttempt = 0;
+            wsReconnectInFlight = false;
+            clearWsReconnectTimer();
             clearConnectionError();
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusConnected;
             statusEl.className = "status connected";
@@ -5961,6 +6352,10 @@
         };
         socket.onclose = () => {
             if (thisId !== connectionId) return;
+            if (hangTimer) {
+                clearTimeout(hangTimer);
+                hangTimer = null;
+            }
             discardLiveVarsCoalesce();
             ws = null;
             statusEl.textContent = (I18N[currentLang] || I18N.es).statusDisconnected;
@@ -5977,6 +6372,10 @@
             }
             if (recordTimerEl) recordTimerEl.style.display = "none";
             recordSizeBytes = 0;
+            if (hasBackendConnectionMode() && !isOfflineMode()) {
+                wsReconnectAttempt = Math.min(wsReconnectAttempt + 1, 200);
+                scheduleWsReconnect();
+            }
         };
         socket.onerror = () => socket.close();
         socket.onmessage = (e) => {
@@ -5989,6 +6388,8 @@
             const msg = JSON.parse(e.data);
             if (msg.type === "error") {
                 if (msg.message === "auth_required") {
+                    wsSuppressAutoReconnect = true;
+                    clearWsReconnectTimer();
                     sessionStorage.removeItem("varmon_password");
                     showAuthModal(msg.attempts_left, msg.attempt);
                     return;
@@ -6283,21 +6684,32 @@
         renderBrowserList();
     }
 
+    /** Lista plana virtual solo sin agrupar; con agrupar se usa árbol hasta un techo de hojas. */
+    const BROWSER_FLAT_VIRTUAL_MIN = 350;
+    const BROWSER_GROUP_MAX_LEAVES = 8000;
+
     function renderBrowserList() {
         const filterText = varFilter.value;
         const filtered = knownVarNames.filter(n => nameMatchesFilter(n, filterText));
-        // Con >350 coincidencias, siempre lista virtual: con "Agrupar" el árbol expandible crearía miles de nodos DOM
-        // (mismo orden de problema que un "seleccionar todo" masivo en la vista antigua).
-        if (filtered.length > 350) {
+        if (groupVariables && filtered.length > BROWSER_GROUP_MAX_LEAVES) {
             if (groupVarsCheckbox) {
-                if (groupVariables) {
-                    groupVarsCheckbox.title = (currentLang === "en")
-                        ? "Too many matches: flat virtual list. Narrow the filter to use grouping."
-                        : "Demasiadas coincidencias: lista plana virtual. Reduce el filtro para usar agrupación.";
-                } else {
-                    groupVarsCheckbox.title = "";
-                }
+                groupVarsCheckbox.title = (currentLang === "en")
+                    ? "Too many matches: narrow the filter to use grouping."
+                    : "Demasiadas coincidencias: reduce el filtro para usar agrupación.";
+                groupVarsCheckbox.checked = false;
             }
+            groupVariables = false;
+            const cAll = document.getElementById("collapseAll");
+            const eAll = document.getElementById("expandAll");
+            if (cAll) cAll.style.display = "none";
+            if (eAll) eAll.style.display = "none";
+            renderBrowserListVirtualFlat(filtered);
+            browserVirtualEnabled = true;
+            return;
+        }
+        // Sin agrupar y muchas coincidencias: lista virtual plana (evita miles de nodos DOM).
+        if (filtered.length > BROWSER_FLAT_VIRTUAL_MIN && !groupVariables) {
+            if (groupVarsCheckbox) groupVarsCheckbox.title = "";
             renderBrowserListVirtualFlat(filtered);
             browserVirtualEnabled = true;
             return;
@@ -6615,8 +7027,6 @@
 
     // --- Column 2: Monitored variables ---
 
-    let editingName = null;
-
     function computeStats(name) {
         const hist = historyCache[name];
         if (!hist || !hist.values || hist.values.length < 2) return null;
@@ -6813,6 +7223,7 @@
             wrap._selectionClickAttached = true;
             wrap.addEventListener("click", (e) => {
                 if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
+                if (e.target.closest(".mon-value") || e.target.closest(".mon-edit-input") || e.target.closest(".mon-edit-actions")) return;
                 if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
                 else monitorSelectedNames.add(name);
                 rebuildMonitorList();
@@ -6857,7 +7268,7 @@
             if (imposeWrap) imposeWrap.remove();
         }
         const rowForTags = wrap.querySelector(".monitor-item");
-        if (rowForTags) syncMonitorRowStatusTags(rowForTags, name);
+        if (rowForTags && name !== editingName) syncMonitorRowStatusTags(rowForTags, name);
         if (rowForTags) refreshMonitorItemDisplayedValue(rowForTags, name);
     }
 
@@ -6874,6 +7285,26 @@
                 const vHist = getReplayImposedValueAtTs(name, tNow);
                 if (vHist != null) {
                     monVal.textContent = formatValue(vHist, "double", name);
+                    usedHistory = true;
+                }
+            }
+        }
+        // En modo seguro (offline): el tramo inicial cargado puede no cubrir currentTs.
+        // Si tenemos histórico en historyCache, preferimos ese valor para actualizar el monitor.
+        if (!usedHistory
+            && isPlaybackMode()
+            && offlineNeedsServerWindowFetch()
+            && offlineRecordingName
+            && vd
+            && vd.type !== "bool"
+            && !Array.isArray(vd.value)
+        ) {
+            const tNow = Number.isFinite(offlinePlayback.currentTs) ? offlinePlayback.currentTs : null;
+            if (tNow != null) {
+                const hist = historyCache[name];
+                const vHist = getValueAtTs(hist, tNow);
+                if (vHist != null) {
+                    monVal.textContent = formatValue(vHist, vd.type, name);
                     usedHistory = true;
                 }
             }
@@ -6953,6 +7384,7 @@
         }
         wrap.addEventListener("click", (e) => {
             if (e.target.closest(".btn-mon-remove") || e.target.closest(".monitor-impose-wrap")) return;
+            if (e.target.closest(".mon-value") || e.target.closest(".mon-edit-input") || e.target.closest(".mon-edit-actions")) return;
             if (monitorSelectedNames.has(name)) monitorSelectedNames.delete(name);
             else monitorSelectedNames.add(name);
             rebuildMonitorList();
@@ -7040,7 +7472,10 @@
             } else {
                 valEl.textContent = "--";
             }
-            valEl.addEventListener("dblclick", () => startInlineEdit(el, name));
+            valEl.addEventListener("dblclick", (ev) => {
+                ev.stopPropagation();
+                startInlineEdit(el, name);
+            });
         }
 
         if (isArrayVar(name)) {
@@ -7157,6 +7592,15 @@
         if (endRow <= startRow) {
             endRow = Math.min(totalRows, startRow + 1);
         }
+        if (editingName && monitoredNames.has(editingName)) {
+            const ep = renderOrder.indexOf(editingName);
+            if (ep >= 0) {
+                const editRow = ep % rowsPerCol;
+                const buf = MONITOR_VM_BUFFER;
+                if (editRow < startRow) startRow = Math.max(0, editRow - buf);
+                if (editRow >= endRow) endRow = Math.min(totalRows, editRow + buf + 1);
+            }
+        }
         const visibleRows = [];
         for (let r = startRow; r < endRow; r++) visibleRows.push(r);
         const sliceByRow = new Map();
@@ -7173,7 +7617,9 @@
         sliceByRow.forEach((rowNames) => rowNames.forEach((n) => sliceSet.add(n)));
 
         monitorVmRows.querySelectorAll(".monitor-item-wrap").forEach((el) => {
-            if (!sliceSet.has(el.dataset.name)) el.remove();
+            const nm = el.dataset.name;
+            if (nm === editingName) return;
+            if (!sliceSet.has(nm)) el.remove();
         });
 
         monitorVmRows.querySelectorAll(".stats-panel").forEach((p) => p.remove());
@@ -7189,6 +7635,7 @@
             const rowNames = sliceByRow.get(rowIdx) || [];
             const rowSet = new Set(rowNames);
             rowEl.querySelectorAll(".monitor-item-wrap").forEach((el) => {
+                if (el.dataset.name === editingName) return;
                 if (!rowSet.has(el.dataset.name)) el.remove();
             });
             rowNames.forEach((name) => {
@@ -7351,6 +7798,7 @@
                 monitorVmResizeDebounce = setTimeout(() => {
                     monitorVmResizeDebounce = null;
                     if (!monitorListEl.classList.contains("monitor-list--virtual")) return;
+                    if (editingName) return;
                     monitorListEl._vmRowFrozen = false;
                     measureMonitorVmRowHeightFromSlice(true);
                     syncMonitorVirtualWindow();
@@ -7529,7 +7977,9 @@
         if (!isLiveMode()) return;
         if (cell.querySelector(".arr-cell-edit")) return;
         const oldText = cell.textContent;
+        const tr = I18N[currentLang] || I18N.es;
         cell.textContent = "";
+        cell.classList.add("arr-val--editing");
 
         const input = document.createElement("input");
         input.className = "arr-cell-edit";
@@ -7537,7 +7987,31 @@
         input.value = oldText;
         input.dataset.idx = index;
 
+        const actions = document.createElement("span");
+        actions.className = "arr-edit-actions";
+        const okBtn = document.createElement("button");
+        okBtn.type = "button";
+        okBtn.className = "btn-arr-edit-ok";
+        okBtn.textContent = "\u2713";
+        okBtn.title = tr.inlineEditConfirm || "Confirmar";
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "btn-arr-edit-cancel";
+        cancelBtn.textContent = "\u2715";
+        cancelBtn.title = tr.inlineEditCancel || "Cancelar";
+        okBtn.addEventListener("mousedown", (e) => e.preventDefault());
+        cancelBtn.addEventListener("mousedown", (e) => e.preventDefault());
+
+        let done = false;
+
+        function teardown() {
+            cell.classList.remove("arr-val--editing");
+            cell.replaceChildren();
+        }
+
         function commit() {
+            if (done) return;
+            done = true;
             const val = parseFloat(input.value);
             if (!isNaN(val)) {
                 sendWsAction({
@@ -7547,22 +8021,48 @@
                     value: val,
                 });
             }
+            teardown();
             cell.textContent = isNaN(val) ? oldText : val.toFixed(3);
         }
 
         function cancel() {
+            if (done) return;
+            done = true;
+            teardown();
             cell.textContent = oldText;
         }
+
+        okBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            commit();
+        });
+        cancelBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            cancel();
+        });
 
         input.addEventListener("keydown", (e) => {
             e.stopPropagation();
             if (e.key === "Enter") commit();
             else if (e.key === "Escape") cancel();
         });
-        input.addEventListener("blur", commit);
         input.addEventListener("click", (e) => e.stopPropagation());
 
+        cell.addEventListener("focusout", (e) => {
+            if (done) return;
+            const rt = e.relatedTarget;
+            if (rt && cell.contains(rt)) return;
+            window.setTimeout(() => {
+                if (done) return;
+                if (document.activeElement && cell.contains(document.activeElement)) return;
+                cancel();
+            }, 0);
+        });
+
+        actions.appendChild(okBtn);
+        actions.appendChild(cancelBtn);
         cell.appendChild(input);
+        cell.appendChild(actions);
         input.focus();
         input.select();
     }
@@ -7611,10 +8111,16 @@
         loIn.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") ok.click(); if (e.key === "Escape") cancel.click(); });
         hiIn.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") ok.click(); if (e.key === "Escape") cancel.click(); });
 
-        form.appendChild(loIn);
-        form.appendChild(hiIn);
-        form.appendChild(ok);
-        form.appendChild(cancel);
+        const rowLoHi = document.createElement("span");
+        rowLoHi.className = "arr-alarm-form-row";
+        rowLoHi.appendChild(loIn);
+        rowLoHi.appendChild(hiIn);
+        const rowBtns = document.createElement("span");
+        rowBtns.className = "arr-alarm-form-row";
+        rowBtns.appendChild(ok);
+        rowBtns.appendChild(cancel);
+        form.appendChild(rowLoHi);
+        form.appendChild(rowBtns);
         row.appendChild(form);
         loIn.focus();
     }
@@ -8792,18 +9298,25 @@
             updateStatsPanel(wrap, name);
         });
 
-        form.appendChild(loInput);
-        form.appendChild(hiInput);
-        form.appendChild(hysInput);
-        form.appendChild(delayInput);
-        form.appendChild(okBtn);
-        form.appendChild(cancelBtn);
+        const row1 = document.createElement("div");
+        row1.className = "alarm-form-row";
+        row1.appendChild(loInput);
+        row1.appendChild(hiInput);
+        row1.appendChild(hysInput);
+        const row2 = document.createElement("div");
+        row2.className = "alarm-form-row";
+        row2.appendChild(delayInput);
+        row2.appendChild(okBtn);
+        row2.appendChild(cancelBtn);
+        form.appendChild(row1);
+        form.appendChild(row2);
         alarmRow.appendChild(form);
 
         loInput.focus();
     }
 
     function refreshAllStats() {
+        if (editingName) return;
         const active = document.activeElement;
         const useDock = monitorDetailPanelUsesDock();
         if (useDock) {
@@ -8932,10 +9445,6 @@
         sendWsAction({ action: "set_send_file_on_finish", value: val });
     }
 
-    if ("Notification" in window && Notification.permission === "default") {
-        Notification.requestPermission();
-    }
-
     function sendAlarmNotification(reasons) {
         if (!("Notification" in window) || Notification.permission !== "granted") return;
         if (document.hasFocus()) return;
@@ -9010,7 +9519,7 @@
             el.style.display = path ? "block" : "none";
             if (recordPathAnalyzeBtn) {
                 const fn = (opts.filename || basenameFromPath(path)).trim();
-                const showAnalyze = !!(fn && fn.toLowerCase().endsWith(".tsv"));
+                const showAnalyze = !!(fn && (fn.toLowerCase().endsWith(".tsv") || fn.toLowerCase().endsWith(".parquet")));
                 recordPathAnalyzeBtn.style.display = showAnalyze ? "" : "none";
                 if (showAnalyze) {
                     recordPathAnalyzeBtn.onclick = () => { enterAnalysisForRecordedFile(path, fn); };
@@ -9032,11 +9541,15 @@
                 const bin = atob(msg.file_base64);
                 const bytes = new Uint8Array(bin.length);
                 for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                const isTsv = (msg.filename || "").toLowerCase().endsWith(".tsv");
-                const blob = new Blob([bytes], { type: isTsv ? "text/tab-separated-values" : "text/csv" });
+                const low = (msg.filename || "").toLowerCase();
+                const isTsv = low.endsWith(".tsv");
+                const isPq = low.endsWith(".parquet");
+                const blob = new Blob([bytes], {
+                    type: isPq ? "application/vnd.apache.parquet" : (isTsv ? "text/tab-separated-values" : "text/csv"),
+                });
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);
-                a.download = msg.filename || "record.tsv";
+                a.download = msg.filename || (isPq ? "record.parquet" : "record.tsv");
                 a.click();
                 URL.revokeObjectURL(a.href);
             } catch (e) { /* ignore */ }
@@ -9067,11 +9580,15 @@
                 const bin = atob(msg.file_base64);
                 const bytes = new Uint8Array(bin.length);
                 for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                const isTsv = (msg.filename || "").toLowerCase().endsWith(".tsv");
-                const blob = new Blob([bytes], { type: isTsv ? "text/tab-separated-values" : "text/csv" });
+                const low = (msg.filename || "").toLowerCase();
+                const isTsv = low.endsWith(".tsv");
+                const isPq = low.endsWith(".parquet");
+                const blob = new Blob([bytes], {
+                    type: isPq ? "application/vnd.apache.parquet" : (isTsv ? "text/tab-separated-values" : "text/csv"),
+                });
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);
-                a.download = msg.filename || "alarm.tsv";
+                a.download = msg.filename || (isPq ? "alarm.parquet" : "alarm.tsv");
                 a.click();
                 URL.revokeObjectURL(a.href);
             } catch (e) { /* ignore */ }
@@ -9176,6 +9693,7 @@
         editingName = name;
         const valEl = itemEl.querySelector(".mon-value");
         const currentText = valEl.textContent;
+        const tr = I18N[currentLang] || I18N.es;
 
         const input = document.createElement("input");
         const ori = (varFormat[name] && varFormat[name].ori) ? varFormat[name].ori : "dec";
@@ -9199,11 +9717,38 @@
         if (vd.type === "double") input.step = "any";
 
         valEl.textContent = "";
+        valEl.classList.add("mon-value--editing");
+
+        const actions = document.createElement("span");
+        actions.className = "mon-edit-actions";
+        const okBtn = document.createElement("button");
+        okBtn.type = "button";
+        okBtn.className = "btn-mon-edit-ok";
+        okBtn.textContent = "\u2713";
+        okBtn.title = tr.inlineEditConfirm || "Confirmar";
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "btn-mon-edit-cancel";
+        cancelBtn.textContent = "\u2715";
+        cancelBtn.title = tr.inlineEditCancel || "Cancelar";
+
+        okBtn.addEventListener("mousedown", (e) => e.preventDefault());
+        cancelBtn.addEventListener("mousedown", (e) => e.preventDefault());
+
         valEl.appendChild(input);
+        actions.appendChild(okBtn);
+        actions.appendChild(cancelBtn);
+        valEl.appendChild(actions);
+
         input.focus();
         input.select();
 
         let done = false;
+
+        function teardownEditingChrome() {
+            valEl.classList.remove("mon-value--editing");
+            valEl.replaceChildren();
+        }
 
         function commit() {
             if (done) return;
@@ -9211,13 +9756,13 @@
             let sendVal, varType;
             const raw = input.value.trim();
             const fmt = varFormat[name];
-            const ori = fmt ? (fmt.ori || "dec") : "dec";
+            const oriResolved = fmt ? (fmt.ori || "dec") : "dec";
 
             if (vd.type === "bool") {
                 sendVal = (raw === "1" || raw.toLowerCase() === "true") ? 1 : 0;
                 varType = "bool";
             } else if (vd.type === "int32") {
-                const parsed = parseNumericWithFormat(raw, ori);
+                const parsed = parseNumericWithFormat(raw, oriResolved);
                 sendVal = Number.isFinite(parsed) ? (Math.trunc(parsed) | 0) : 0;
                 varType = "int32";
             } else {
@@ -9228,7 +9773,7 @@
                     parsed = parseFloat(raw);
                     sendVal = Number.isFinite(parsed) ? physicalDisplayToRaw(parsed, pPhys) : 0;
                 } else {
-                    parsed = parseNumericWithFormat(raw, ori);
+                    parsed = parseNumericWithFormat(raw, oriResolved);
                     sendVal = Number.isFinite(parsed) ? parsed : 0;
                 }
                 varType = "double";
@@ -9240,25 +9785,44 @@
                 value: sendVal,
                 var_type: varType,
             });
-            finish();
+            editingName = null;
+            teardownEditingChrome();
+            valEl.textContent = formatValue(sendVal, varType, name);
         }
 
         function cancel() {
             if (done) return;
             done = true;
-            finish();
-        }
-
-        function finish() {
             editingName = null;
+            teardownEditingChrome();
             valEl.textContent = currentText;
         }
+
+        okBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            commit();
+        });
+        cancelBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            cancel();
+        });
 
         input.addEventListener("keydown", (e) => {
             if (e.key === "Enter") { e.preventDefault(); commit(); }
             else if (e.key === "Escape") { e.preventDefault(); cancel(); }
         });
-        input.addEventListener("blur", cancel);
+        input.addEventListener("click", (e) => e.stopPropagation());
+
+        valEl.addEventListener("focusout", (e) => {
+            if (done) return;
+            const rt = e.relatedTarget;
+            if (rt && valEl.contains(rt)) return;
+            window.setTimeout(() => {
+                if (done) return;
+                if (document.activeElement && valEl.contains(document.activeElement)) return;
+                cancel();
+            }, 0);
+        });
     }
 
     function onSetResult(msg) {
@@ -9284,8 +9848,8 @@
     // Vigilar peticiones de ventanas cortas lentas y activar modo \"pensativo\".
     const WINDOW_SLOW_THRESHOLD_MS = 1200;
     setInterval(() => {
-        // Solo considerar modo pensativo en análisis + modo seguro.
-        if (!isPlaybackMode() || !offlineSafetyInfo || !offlineSafetyInfo.safeMode) {
+        // Análisis con datos que siguen viniendo por ventanas (seguro o Parquet truncado).
+        if (!isPlaybackMode() || !offlineNeedsServerWindowFetch()) {
             if (windowFetchSlow) {
                 windowFetchSlow = false;
                 refreshOfflineLoadingIndicator();
@@ -11026,6 +11590,10 @@
     }
 
     reconnectBtn.addEventListener("click", async () => {
+        clearWsReconnectTimer();
+        wsReconnectAttempt = 0;
+        wsReconnectInFlight = false;
+        wsSuppressAutoReconnect = false;
         if (ws) {
             try { ws.close(); } catch (e) { /* ignore */ }
             ws = null;
@@ -11039,14 +11607,12 @@
             udsInstances = (udsResp && Array.isArray(udsResp.instances)) ? udsResp.instances : [];
             if (udsInstances.length > 0) {
                 fillPortSelectWithUds();
-                updateMultiInstanceWarning();
-                resetStateForNewTarget();
-                connect();
-            } else {
-                resetStateForNewTarget();
-                statusEl.textContent = (I18N[currentLang] || I18N.es).statusNoInstances || "No hay instancias VarMonitor (UDS)";
-                statusEl.className = "status disconnected";
+            } else if (portSelect) {
+                portSelect.innerHTML = "";
             }
+            updateMultiInstanceWarning();
+            resetStateForNewTarget();
+            connect();
         } catch (e) { resetStateForNewTarget(); }
     });
 
@@ -11240,17 +11806,28 @@
             return;
         }
         if (isReplayMode()) {
-            await refreshServerRecordings();
+            try {
+                await refreshServerRecordings();
+            } catch (e) {
+                console.warn("[VarMonitor] refreshServerRecordings:", e);
+            }
             setOfflineStatus();
         }
-        if (udsInstances.length > 0) {
-            fillPortSelectWithUds();
+        try {
+            if (udsInstances.length > 0) {
+                fillPortSelectWithUds();
+            } else if (portSelect) {
+                portSelect.innerHTML = "";
+            }
             updateMultiInstanceWarning();
-            connect();
-            return;
+        } catch (e) {
+            console.error("[VarMonitor] initialScanAndConnect (antes de WS):", e);
         }
-        statusEl.textContent = (I18N[currentLang] || I18N.es).statusNoInstances || "No hay instancias VarMonitor (UDS)";
-        statusEl.className = "status disconnected";
+        try {
+            ensureWsMatchesSelection();
+        } catch (e) {
+            console.error("[VarMonitor] ensureWsMatchesSelection:", e);
+        }
     }
 
     // --- Data handlers ---
@@ -11566,22 +12143,43 @@
                 return;
             }
         } catch (e) { /* ignorar */ }
-        await fetchConnectionInfo();
-        initialScanAndConnect();
+        try {
+            const fetchP = fetchConnectionInfo();
+            const canEarlyWs = hasBackendConnectionMode() && !isOfflineMode() && !!effectiveUdsPathForWs();
+            if (canEarlyWs) {
+                try {
+                    connect();
+                } catch (e2) {
+                    console.error("[VarMonitor] connect() (early):", e2);
+                }
+            }
+            await fetchP;
+            await initialScanAndConnect();
+        } catch (e) {
+            console.error("[VarMonitor] checkAuthThenStart:", e);
+            if (hasBackendConnectionMode()) {
+                try { connect(); } catch (e2) { console.error(e2); }
+            }
+        }
     }
 
     if (authSubmitBtn && authPasswordInput) {
-        authSubmitBtn.addEventListener("click", () => {
+        authSubmitBtn.addEventListener("click", async () => {
             const p = authPasswordInput.value.trim();
             if (!p) return;
             sessionStorage.setItem("varmon_password", p);
+            wsSuppressAutoReconnect = false;
+            wsReconnectInFlight = false;
             hideAuthModal();
-            initialScanAndConnect();
+            await checkAuthThenStart();
         });
         authPasswordInput.addEventListener("keydown", (e) => {
             if (e.key === "Enter") authSubmitBtn.click();
         });
     }
 
-    checkAuthThenStart();
+    /* Diferir a la siguiente tarea: no competir con el primer paint ni con listeners de la UI; evita sensación de pestaña “congelada”. */
+    setTimeout(() => {
+        checkAuthThenStart().catch((e) => console.error("[VarMonitor] checkAuthThenStart", e));
+    }, 0);
 })();

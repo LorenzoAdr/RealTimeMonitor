@@ -71,7 +71,11 @@ def chdir_for_packaged_web(packaged: Path, *, install_dir_env: str = "VARMON_INS
 
 
 def python_exe_for_web(web_dir: Path) -> Path:
+    """Preferir web_monitor/.venv; si no existe, repo/.venv (mismo layout que setup.sh vs venv manual en raíz)."""
     venv_py = web_dir / ".venv" / "bin" / "python"
     if venv_py.is_file():
         return venv_py
+    root_venv = web_dir.parent / ".venv" / "bin" / "python"
+    if root_venv.is_file():
+        return root_venv
     return Path(sys.executable)

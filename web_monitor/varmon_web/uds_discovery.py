@@ -14,13 +14,20 @@ def _list_uds_instances(user_filter: str | None) -> list[dict]:
     try:
         pattern = f"/tmp/varmon-{user_filter}-*.sock" if user_filter else "/tmp/varmon-*.sock"
         paths = glob.glob(pattern)
+        path_mtimes: list[tuple[float, str]] = []
         for path in paths:
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
                 mtime = 0.0
+            path_mtimes.append((mtime, path))
+        # Probar primero los sockets más recientes: suele haber uno vivo y evita esperar timeouts
+        # en ficheros basura antiguos antes de llegar al proceso actual.
+        path_mtimes.sort(key=lambda x: -x[0])
+        _probe_timeout = 0.25
+        for mtime, path in path_mtimes:
             try:
-                b = UdsBridge(path, timeout=0.6)
+                b = UdsBridge(path, timeout=_probe_timeout)
                 info = b.get_server_info()
                 b.disconnect()
             except Exception:

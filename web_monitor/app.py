@@ -20,9 +20,10 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 
 from queue import Empty, Queue
@@ -52,8 +53,29 @@ from varmon_web.log_buffer import (
     install_stdio_tee,
 )
 from varmon_web.uds_discovery import _first_uds_bridge, _list_uds_instances
+from varmon_web.recordings_parquet import (
+    cap_parquet_preview_rows,
+    convert_tsv_file_to_parquet,
+    export_parquet_to_tsv,
+    file_has_parquet_magic,
+    is_parquet_path,
+    parquet_num_columns,
+    parquet_num_rows,
+    parquet_slice_to_offline_payload,
+    read_single_var_history_parquet,
+    read_time_bounds_parquet,
+    read_var_window_batch_parquet,
+    read_var_window_parquet,
+    RecordingParquetAppender,
+    sibling_tsv_for_parquet,
+    write_snapshots_parquet,
+)
 
 install_stdio_tee()
+
+
+def _recordings_mirror_tsv() -> bool:
+    return bool(_config.get("recordings_write_tsv"))
 
 
 # Numero de conexiones WebSocket activas
@@ -252,6 +274,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="VarMonitor", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+# JS/CSS/HTML grandes: menos bytes en red (el navegador igual descomprime y parsea el JS completo).
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 @app.middleware("http")
@@ -275,6 +299,42 @@ async def log_requests_middleware(request: Request, call_next):
 
 # Marcador en index.html para inyectar la etiqueta del cliente (módulo ES o bundle IIFE vía VARMON_WEB_APP_JS).
 _VARMON_APP_SCRIPT_PLACEHOLDER = "<!--VARMON_APP_SCRIPT-->"
+_HEAD_INJECT_PLACEHOLDER = "<!--VARMON_HEAD_INJECT-->"
+_logged_clear_storage_index_once = False
+
+
+def _head_inject_clear_storage_script() -> str:
+    """Script inline: borra localStorage y sessionStorage del origen antes de cargar el cliente."""
+    env = (os.environ.get("VARMON_WEB_CLEAR_BROWSER_STORAGE") or "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        clear = True
+    elif env in ("0", "false", "no", "off"):
+        clear = False
+    else:
+        clear = bool(_config.get("web_clear_browser_storage"))
+    if not clear:
+        return ""
+    return '<script>(function(){try{localStorage.clear();sessionStorage.clear();}catch(e){}})();</script>'
+
+
+def _html_index_apply_injects(html: str) -> str:
+    """Inyecta borrado opcional de almacenamiento y la etiqueta del script principal."""
+    inject = _head_inject_clear_storage_script()
+    global _logged_clear_storage_index_once
+    if inject and not _logged_clear_storage_index_once:
+        _logged_clear_storage_index_once = True
+        print(
+            "[VarMonitor Web] HTML principal: inyectado borrado de localStorage/sessionStorage (web_clear_browser_storage o VARMON_WEB_CLEAR_BROWSER_STORAGE).",
+            flush=True,
+        )
+    if _HEAD_INJECT_PLACEHOLDER in html:
+        html = html.replace(_HEAD_INJECT_PLACEHOLDER, inject, 1)
+    elif inject:
+        html = html.replace("<head>", "<head>" + inject, 1)
+    tag = html_main_script_tag()
+    if _VARMON_APP_SCRIPT_PLACEHOLDER in html:
+        html = html.replace(_VARMON_APP_SCRIPT_PLACEHOLDER, tag, 1)
+    return html
 
 
 @app.get("/")
@@ -285,9 +345,8 @@ async def index():
             html = f.read()
     except OSError:
         return FileResponse(index_path)
-    if _VARMON_APP_SCRIPT_PLACEHOLDER in html:
-        tag = html_main_script_tag()
-        html = html.replace(_VARMON_APP_SCRIPT_PLACEHOLDER, tag, 1)
+    if _VARMON_APP_SCRIPT_PLACEHOLDER in html or _HEAD_INJECT_PLACEHOLDER in html:
+        html = _html_index_apply_injects(html)
         return HTMLResponse(content=html, media_type="text/html")
     # Compatibilidad: HTML antiguo sin marcador
     import re
@@ -299,6 +358,7 @@ async def index():
     if m:
         tag = html_main_script_tag()
         html = html[: m.start()] + tag + html[m.end() :]
+        html = _html_index_apply_injects(html)
         return HTMLResponse(content=html, media_type="text/html")
     return FileResponse(index_path)
 
@@ -977,7 +1037,7 @@ def _json_path(base_dir: str, name: str) -> str | None:
 
 def _save_runtime_config_overrides(updates: dict) -> None:
     """Persist selected runtime config keys into varmon.conf."""
-    allowed = {"web_port", "web_port_scan_max", "server_state_dir"}
+    allowed = {"web_port", "web_port_scan_max", "server_state_dir", "recordings_write_tsv"}
     clean = {k: updates[k] for k in updates.keys() if k in allowed}
     if not clean:
         return
@@ -995,7 +1055,10 @@ def _save_runtime_config_overrides(updates: dict) -> None:
             k, v = s.split("=", 1)
             existing[k.strip()] = v.strip()
     for k, v in clean.items():
-        existing[k] = str(v)
+        if k == "recordings_write_tsv":
+            existing[k] = "1" if v else "0"
+        else:
+            existing[k] = str(v)
     output: list[str] = []
     seen: set[str] = set()
     for ln in lines:
@@ -1080,12 +1143,17 @@ def _finalize_alarm_recording_sync(
             flush=True,
         )
     os.makedirs(recordings_dir, exist_ok=True)
-    fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+    fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
     path = os.path.join(recordings_dir, fn)
     var_names = sorted(set(e["name"] for _, data in buf for e in data))
     if not var_names:
         var_names = ["time_s"]
-    _write_snapshots_tsv(path, buf, var_names)
+    write_snapshots_parquet(path, buf, var_names)
+    if _recordings_mirror_tsv():
+        try:
+            export_parquet_to_tsv(path, sibling_tsv_for_parquet(path))
+        except Exception:
+            pass
     file_b64: str | None = None
     if send_file_on_finish:
         try:
@@ -1140,15 +1208,21 @@ def _flush_record_buffer_to_tsv(
     record_buffer: list[tuple[float, list[dict]]],
     recording_var_names: list[str] | None,
 ) -> tuple[str, str, int]:
-    """Vuelca el buffer de grabación a TSV y devuelve (path, filename, size_bytes)."""
+    """Vuelca el buffer de grabación a Parquet (y TSV opcional) y devuelve (path, filename, size_bytes)."""
     if not record_buffer:
         return "", "", 0
     _ensure_recordings_dir()
     from datetime import datetime
-    fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+    fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
     path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
     var_names = recording_var_names or sorted(set(e["name"] for _, data in record_buffer for e in data))
-    _write_snapshots_tsv(path_saved, record_buffer, var_names)
+    write_snapshots_parquet(path_saved, record_buffer, var_names)
+    if _recordings_mirror_tsv():
+        path_tsv = sibling_tsv_for_parquet(path_saved)
+        try:
+            export_parquet_to_tsv(path_saved, path_tsv)
+        except Exception as e:
+            print(f"[VarMonitor Web] No se pudo escribir TSV espejo: {e}", flush=True)
     try:
         size_bytes = int(os.path.getsize(path_saved))
     except Exception:
@@ -1254,11 +1328,13 @@ def _recording_writer_thread(
     var_names: list[str] | None,
     rows_written_ref: list[int],
 ) -> None:
-    """Hilo que escribe (t_rel, snapshot) a disco; no depende del event loop."""
+    """Hilo que escribe (t_rel, snapshot) a Parquet incremental; TSV espejo opcional."""
     _ensure_recordings_dir()
-    f = None
+    appender: RecordingParquetAppender | None = None
+    tsv_f = None
     col_spec: list[tuple[str, int]] | None = None
     row_layout: tuple[dict[str, tuple[int, int]], int] | None = None
+    mirror = _recordings_mirror_tsv()
     try:
         while True:
             item = queue.get()
@@ -1267,42 +1343,106 @@ def _recording_writer_thread(
             t_rel, snapshot = item
             if not snapshot:
                 continue
-            if col_spec is None:
-                names = var_names or sorted(set(e.get("name") for e in snapshot if isinstance(e, dict)))
+            if appender is None:
+                appender = RecordingParquetAppender(path, batch_rows=512)
+            if mirror and col_spec is None:
+                names = var_names or sorted(
+                    {e.get("name") for e in snapshot if isinstance(e, dict) and e.get("name") is not None}
+                )
                 col_spec = _build_record_col_spec(names, snapshot)
                 row_layout = _record_row_layout(col_spec)
-                f = open(path, "w", buffering=1024 * 1024)
-                _write_record_header_stream(f, col_spec)
-            _write_record_row_stream(f, t_rel, snapshot, col_spec, row_layout)
+                tsv_f = open(path + ".mirror.tsv", "w", buffering=1024 * 1024)
+                _write_record_header_stream(tsv_f, col_spec)
+            if appender is not None:
+                appender.append_row(t_rel, snapshot, var_names)
+            if mirror and tsv_f is not None and col_spec is not None and row_layout is not None:
+                _write_record_row_stream(tsv_f, t_rel, snapshot, col_spec, row_layout)
             rows_written_ref[0] += 1
     finally:
-        if f is not None:
+        if appender is not None:
             try:
-                f.flush()
-                f.close()
+                appender.close()
+            except Exception:
+                pass
+        if tsv_f is not None:
+            try:
+                tsv_f.flush()
+                tsv_f.close()
             except Exception:
                 pass
 
 
 def _finalize_recording_temp_file(temp_path: str | None, rows_written: int) -> tuple[str, str, int]:
-    """Cierra grabación incremental: renombra temporal a record_*.tsv."""
+    """Cierra grabación: temporal .parquet.part o .tsv.part → record_*.parquet (+ TSV espejo opcional)."""
     if not temp_path:
         return "", "", 0
+    mirror_path = temp_path + ".mirror.tsv"
     try:
         if rows_written <= 0:
-            if os.path.isfile(temp_path):
-                os.remove(temp_path)
+            for p in (temp_path, mirror_path):
+                if p and os.path.isfile(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
             return "", "", 0
         _ensure_recordings_dir()
         from datetime import datetime
-        fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
-        path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
-        os.replace(temp_path, path_saved)
+        fn_pq = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+        path_saved = os.path.join(RECORDINGS_DIR, fn_pq)
+        low = temp_path.lower()
+        if low.endswith(".parquet.part") or low.endswith(".parquet"):
+            if os.path.isfile(temp_path):
+                os.replace(temp_path, path_saved)
+        else:
+            if not os.path.isfile(temp_path):
+                return "", "", 0
+            convert_tsv_file_to_parquet(temp_path, path_saved)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        tsv_out = sibling_tsv_for_parquet(path_saved)
+        mirror_ok = False
+        if _recordings_mirror_tsv():
+            # Durante la grabación Parquet ya escribimos el TSV en .mirror.tsv: reutilizarlo
+            # (evita leer Parquet con PyArrow y fallos "binary file expected" en write_csv).
+            if os.path.isfile(mirror_path) and os.path.getsize(mirror_path) > 0:
+                try:
+                    os.replace(mirror_path, tsv_out)
+                    mirror_ok = True
+                except OSError as e:
+                    print(f"[VarMonitor Web] TSV espejo tras grabación (mover mirror): {e}", flush=True)
+                    try:
+                        os.remove(mirror_path)
+                    except OSError:
+                        pass
+            elif os.path.isfile(mirror_path):
+                try:
+                    os.remove(mirror_path)
+                except OSError:
+                    pass
+            if not mirror_ok and os.path.isfile(path_saved) and file_has_parquet_magic(path_saved):
+                try:
+                    export_parquet_to_tsv(path_saved, tsv_out)
+                except Exception as e:
+                    print(f"[VarMonitor Web] TSV espejo tras grabación: {e}", flush=True)
+            elif not mirror_ok and os.path.isfile(path_saved) and not file_has_parquet_magic(path_saved):
+                print(
+                    "[VarMonitor Web] TSV espejo tras grabación: sin mirror útil y el .parquet no tiene magic PAR1; "
+                    "no se generó .tsv",
+                    flush=True,
+                )
+        elif os.path.isfile(mirror_path):
+            try:
+                os.remove(mirror_path)
+            except OSError:
+                pass
         try:
             size_saved = int(os.path.getsize(path_saved))
         except Exception:
             size_saved = 0
-        return path_saved, fn_saved, size_saved
+        return path_saved, fn_pq, size_saved
     except Exception:
         return "", "", 0
 
@@ -1392,29 +1532,89 @@ async def api_uds_instances(user: str | None = Query(None, description="Filtrar 
     return {"instances": instances}
 
 
-@app.get("/api/recordings")
-async def api_recordings():
-    """Lista grabaciones TSV del backend (recordings/), ordenadas por mtime desc."""
-    _ensure_recordings_dir()
-    rows: list[dict] = []
+def _sync_sidecar_alarm_tsv_to_parquet() -> None:
+    """Convierte alarm_*.tsv del sidecar C++ a Parquet; elimina TSV si no se pide espejo."""
+    mirror = _recordings_mirror_tsv()
     try:
         for fn in os.listdir(RECORDINGS_DIR):
             if not fn.lower().endswith(".tsv"):
                 continue
+            if not fn.lower().startswith("alarm_"):
+                continue
+            tsv_path = os.path.join(RECORDINGS_DIR, fn)
+            if not os.path.isfile(tsv_path):
+                continue
+            pq_path = tsv_path[:-4] + ".parquet"
+            need_conv = True
+            if os.path.isfile(pq_path):
+                try:
+                    if os.path.getmtime(pq_path) >= os.path.getmtime(tsv_path):
+                        need_conv = False
+                except OSError:
+                    pass
+            if not need_conv:
+                continue
+            try:
+                convert_tsv_file_to_parquet(tsv_path, pq_path)
+                if not mirror:
+                    try:
+                        os.remove(tsv_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                print(f"[VarMonitor Web] Aviso: alarm TSV→Parquet ({fn}): {e}", flush=True)
+    except Exception:
+        pass
+
+
+def _list_recordings_rows() -> list[dict]:
+    """Una entrada por stem; prioriza .parquet sobre .tsv legacy."""
+    _sync_sidecar_alarm_tsv_to_parquet()
+    _ensure_recordings_dir()
+    rows: list[dict] = []
+    try:
+        names = [f for f in os.listdir(RECORDINGS_DIR) if not f.startswith(".")]
+        stems = {f.rsplit(".", 1)[0] for f in names if f.lower().endswith((".tsv", ".parquet"))}
+        for stem in stems:
+            fn_pq = stem + ".parquet"
+            fn_tsv = stem + ".tsv"
+            fn = fn_pq if fn_pq in names else (fn_tsv if fn_tsv in names else None)
+            if not fn:
+                continue
+            fl = fn.lower()
             path = os.path.join(RECORDINGS_DIR, fn)
             if not os.path.isfile(path):
                 continue
             st = os.stat(path)
-            kind = "alarm" if fn.lower().startswith("alarm_") else ("record" if fn.lower().startswith("record_") else "other")
-            rows.append({
+            kind = "alarm" if fl.startswith("alarm_") else ("record" if fl.startswith("record_") else "other")
+            if fl.startswith("snapshot_"):
+                kind = "snapshot"
+            if fl.startswith("segment_"):
+                kind = "segment"
+            row = {
                 "filename": fn,
+                "format": "parquet" if fl.endswith(".parquet") else "tsv",
                 "size": int(st.st_size),
                 "mtime": float(st.st_mtime),
                 "kind": kind,
-            })
+            }
+            if fl.endswith(".parquet"):
+                try:
+                    row["rows"] = int(parquet_num_rows(path))
+                    row["columns"] = int(parquet_num_columns(path))
+                except Exception:
+                    pass
+            rows.append(row)
     except Exception:
         rows = []
     rows.sort(key=lambda x: -x["mtime"])
+    return rows
+
+
+@app.get("/api/recordings")
+async def api_recordings():
+    """Lista grabaciones Parquet/TSV en recordings/, ordenadas por mtime desc."""
+    rows = await asyncio.to_thread(_list_recordings_rows)
     return JSONResponse(
         {"recordings": rows},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
@@ -1514,12 +1714,13 @@ async def api_recording_download(
     filename: str,
     preview_bytes: int = Query(0),
     offset: int = Query(0),
+    row_start: int = Query(0, description="Parquet: primera fila del tramo (con preview_bytes>0)"),
+    row_count: int = Query(0, description="Parquet: filas a leer; 0 = defecto 10000"),
 ):
     """Descarga segura de una grabación dentro de recordings/.
 
-    Si preview_bytes > 0, devuelve un preview de texto parcial para análisis seguro
-    sin transferir el TSV completo. offset (bytes) permite pedir un tramo posterior
-    (Fase 1: navegación por tramos en archivos grandes).
+    TSV + preview_bytes: preview textual por offset en bytes (modo seguro).
+    Parquet + preview_bytes: tramo por filas (row_start/row_count); respuesta incluye `offline`.
     """
     _ensure_recordings_dir()
     safe_name = os.path.basename(filename or "")
@@ -1532,6 +1733,38 @@ async def api_recording_download(
     if not os.path.isfile(path):
         return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
     if int(preview_bytes or 0) > 0:
+        if is_parquet_path(path):
+            try:
+                rc = int(row_count or 0)
+                if rc <= 0:
+                    rc = 10_000
+                rc = max(100, min(rc, 100_000))
+                rc = cap_parquet_preview_rows(path, rc)
+                rs = max(0, int(row_start or 0))
+
+                def _pq_preview() -> dict:
+                    return parquet_slice_to_offline_payload(path, rs, rc, is_preview=True, source_name=safe_name)
+
+                offline = await asyncio.to_thread(_pq_preview)
+                st = os.stat(path)
+                next_row = offline["row_start"] + offline["row_count"]
+                total_r = int(offline["total_rows"])
+                return {
+                    "filename": safe_name,
+                    "format": "parquet",
+                    "size": int(st.st_size),
+                    "total_rows": total_r,
+                    "row_start": offline["row_start"],
+                    "row_count": offline["row_count"],
+                    "segment_start": next_row,
+                    "offset": int(offset or 0),
+                    "preview_bytes": 0,
+                    "truncated": next_row < total_r,
+                    "preview": "",
+                    "offline": offline,
+                }
+            except Exception as e:
+                return JSONResponse({"error": f"No se pudo leer preview Parquet: {e}"}, status_code=500)
         try:
             max_bytes = max(1024, min(int(preview_bytes), 8 * 1024 * 1024))
             seek_offset = max(0, int(offset or 0))
@@ -1539,13 +1772,10 @@ async def api_recording_download(
             header_raw: bytes
             body_raw: bytes
             with open(path, "rb") as f:
-                # Leer siempre la cabecera completa (primera línea) para poder
-                # reconstruir un TSV válido en cualquier tramo.
                 header_raw = f.readline()
                 header_text = header_raw.decode("utf-8", errors="ignore")
                 header_len = len(header_raw)
                 if seek_offset > 0:
-                    # Buscar un inicio de línea cercano al offset solicitado.
                     f.seek(seek_offset)
                     back = min(seek_offset, 8192)
                     f.seek(max(0, seek_offset - back))
@@ -1554,26 +1784,30 @@ async def api_recording_download(
                     segment_start = seek_offset - back + last_nl + 1 if last_nl >= 0 else seek_offset
                     f.seek(segment_start)
                 else:
-                    # Primer tramo: empezar justo después de la cabecera.
                     segment_start = header_len
                     f.seek(segment_start)
                 body_raw = f.read(max_bytes)
-            # Siempre devolvemos cabecera + tramo para que el cliente pueda parsear el TSV.
             body_text = body_raw.decode("utf-8", errors="ignore")
             text = header_text + body_text
             st = os.stat(path)
             return {
                 "filename": safe_name,
+                "format": "tsv",
                 "size": int(st.st_size),
                 "offset": seek_offset,
                 "segment_start": segment_start,
-                # Solo contabilizamos los bytes de cuerpo para el control de tramos.
                 "preview_bytes": len(body_raw),
                 "truncated": int(st.st_size) > (segment_start + len(body_raw)),
                 "preview": text,
             }
         except Exception as e:
             return JSONResponse({"error": f"No se pudo leer preview: {e}"}, status_code=500)
+    if is_parquet_path(path):
+        return FileResponse(
+            path,
+            media_type="application/vnd.apache.parquet",
+            filename=safe_name,
+        )
     return FileResponse(path, media_type="text/tab-separated-values", filename=safe_name)
 
 
@@ -1783,6 +2017,12 @@ def _read_time_bounds_tsv(path: str) -> dict:
     return _build_time_index_and_bounds(path)
 
 
+def _read_time_bounds_any(path: str) -> dict:
+    if is_parquet_path(path):
+        return read_time_bounds_parquet(path)
+    return _read_time_bounds_tsv(path)
+
+
 @app.get("/api/recordings/{filename}/history")
 async def api_recording_var_history(filename: str, var: str = Query(...), max_points: int = Query(20000)):
     """Histórico completo de una variable concreta desde el TSV (modo análisis offline).
@@ -1807,8 +2047,13 @@ async def api_recording_var_history(filename: str, var: str = Query(...), max_po
         mp = max(1000, min(int(max_points or 0), 100000))
     except Exception:
         mp = 20000
+    def _read_hist() -> dict:
+        if is_parquet_path(path):
+            return read_single_var_history_parquet(path, var_name, mp)
+        return _read_single_var_history_tsv(path, var_name, mp)
+
     try:
-        data = await asyncio.to_thread(_read_single_var_history_tsv, path, var_name, mp)
+        data = await asyncio.to_thread(_read_hist)
         return JSONResponse(data)
     except KeyError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
@@ -1848,15 +2093,13 @@ async def api_recording_var_window(
         mp = max(500, min(int(max_points or 0), 50000))
     except Exception:
         mp = 5000
+    def _read_win() -> dict:
+        if is_parquet_path(path):
+            return read_var_window_parquet(path, var_name, float(t_center), float(t_span), mp)
+        return _read_var_window_tsv(path, var_name, float(t_center), float(t_span), mp)
+
     try:
-        data = await asyncio.to_thread(
-            _read_var_window_tsv,
-            path,
-            var_name,
-            float(t_center),
-            float(t_span),
-            mp,
-        )
+        data = await asyncio.to_thread(_read_win)
         return JSONResponse(data)
     except KeyError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
@@ -1897,26 +2140,23 @@ async def api_recording_var_window_batch(
     except Exception:
         mp = 5000
 
-    async def _read_one(name: str) -> dict:
-        return await asyncio.to_thread(
-            _read_var_window_tsv,
-            path,
-            name,
-            float(t_center),
-            float(t_span),
-            mp,
-        )
+    def _window_batch_sync() -> list[dict]:
+        if is_parquet_path(path):
+            return read_var_window_batch_parquet(path, names, float(t_center), float(t_span), mp)
+        out: list[dict] = []
+        for name in names:
+            try:
+                out.append(_read_var_window_tsv(path, name, float(t_center), float(t_span), mp))
+            except KeyError:
+                continue
+            except Exception:
+                continue
+        return out
 
-    series: list[dict] = []
-    for name in names:
-        try:
-            data = await _read_one(name)
-            series.append(data)
-        except KeyError:
-            # Variable no encontrada: se omite en el resultado
-            continue
-        except Exception:
-            continue
+    try:
+        series = await asyncio.to_thread(_window_batch_sync)
+    except Exception:
+        series = []
     return JSONResponse({
         "t_center": float(t_center),
         "span": float(t_span),
@@ -1938,7 +2178,7 @@ async def api_recording_time_bounds(filename: str):
     if not os.path.isfile(path):
         return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
     try:
-        data = await asyncio.to_thread(_read_time_bounds_tsv, path)
+        data = await asyncio.to_thread(_read_time_bounds_any, path)
         return JSONResponse(data)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -1949,8 +2189,10 @@ async def api_recording_time_bounds(filename: str):
 @app.post("/api/save_tsv")
 @app.post("/api/recordings/save_tsv")
 async def api_recording_save_tsv(request: Request, download: int = Query(0), kind: str = Query("snapshot")):
-    """Guarda TSV recibido en body JSON {content, filename?}. Devuelve ruta/filename o descarga directa."""
+    """Body JSON {content, filename?}: texto TSV; guarda Parquet canónico (+ TSV espejo si recordings_write_tsv)."""
     _ensure_recordings_dir()
+    import tempfile
+
     try:
         payload = await request.json()
         content = payload.get("content")
@@ -1960,22 +2202,86 @@ async def api_recording_save_tsv(request: Request, download: int = Query(0), kin
         safe_kind = "segment" if str(kind).strip().lower().startswith("seg") else "snapshot"
         base_name = payload.get("filename")
         if isinstance(base_name, str) and base_name.strip():
-            safe_name = os.path.basename(base_name.strip())
-            if not safe_name.lower().endswith(".tsv"):
-                safe_name += ".tsv"
+            raw = os.path.basename(base_name.strip())
+            stem = raw
+            for ext in (".tsv", ".parquet"):
+                if stem.lower().endswith(ext):
+                    stem = stem[: -len(ext)]
+            safe_pq = stem + ".parquet"
         else:
-            safe_name = f"{safe_kind}_{now}.tsv"
-        path = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_name))
+            safe_pq = f"{safe_kind}_{now}.parquet"
+        path_pq = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_pq))
         root = os.path.abspath(RECORDINGS_DIR)
-        if not path.startswith(root + os.sep):
+        if not path_pq.startswith(root + os.sep):
             return JSONResponse({"error": "Ruta inválida"}, status_code=400)
-        with open(path, "w") as f:
-            f.write(content if content.endswith("\n") else (content + "\n"))
+        text = content if content.endswith("\n") else (content + "\n")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False, encoding="utf-8") as tf:
+            tf.write(text)
+            ttmp = tf.name
+        try:
+
+            def _conv() -> None:
+                convert_tsv_file_to_parquet(ttmp, path_pq)
+
+            await asyncio.to_thread(_conv)
+        finally:
+            try:
+                os.unlink(ttmp)
+            except OSError:
+                pass
+        if _recordings_mirror_tsv():
+            try:
+                export_parquet_to_tsv(path_pq, sibling_tsv_for_parquet(path_pq))
+            except Exception as e:
+                print(f"[VarMonitor Web] TSV espejo save_tsv: {e}", flush=True)
         if int(download or 0) == 1:
-            return FileResponse(path, media_type="text/tab-separated-values", filename=safe_name)
-        return {"ok": True, "filename": safe_name, "path": path}
+            return FileResponse(
+                path_pq,
+                media_type="application/vnd.apache.parquet",
+                filename=safe_pq,
+            )
+        return {"ok": True, "filename": safe_pq, "path": path_pq}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/recordings/parquet_preview_upload")
+async def api_recording_parquet_preview_upload(
+    file: UploadFile = File(...),
+    max_rows: int = Query(10_000),
+):
+    """Sube un .parquet temporal y devuelve tramo inicial como `offline` (análisis sin lector en navegador)."""
+    import tempfile
+
+    mr = max(100, min(int(max_rows or 0), 100_000))
+    tmp: str | None = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".parquet")
+        os.close(fd)
+        data = await file.read()
+        with open(tmp, "wb") as wf:
+            wf.write(data)
+        mr = cap_parquet_preview_rows(tmp, mr)
+
+        def _slice() -> dict:
+            return parquet_slice_to_offline_payload(
+                tmp,
+                0,
+                mr,
+                is_preview=True,
+                source_name=file.filename or "upload.parquet",
+            )
+
+        offline = await asyncio.to_thread(_slice)
+        return {"ok": True, "offline": offline, "total_rows": offline.get("total_rows", 0)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 @app.get("/api/templates")
@@ -2178,20 +2484,20 @@ async def api_log(
 async def api_admin_storage():
     _ensure_recordings_dir()
     _ensure_state_dirs()
-    recs: list[dict] = []
     try:
-        for fn in os.listdir(RECORDINGS_DIR):
-            if not fn.lower().endswith(".tsv"):
-                continue
-            path = os.path.join(RECORDINGS_DIR, fn)
-            if not os.path.isfile(path):
-                continue
-            st = os.stat(path)
-            kind = "alarm" if fn.lower().startswith("alarm_") else ("record" if fn.lower().startswith("record_") else ("snapshot" if fn.lower().startswith("snapshot_") else ("segment" if fn.lower().startswith("segment_") else "other")))
-            recs.append({"name": fn, "kind": kind, "size": int(st.st_size), "mtime": float(st.st_mtime)})
+        rows = await asyncio.to_thread(_list_recordings_rows)
+        recs = [
+            {
+                "name": r["filename"],
+                "kind": r["kind"],
+                "size": r["size"],
+                "mtime": r["mtime"],
+                "format": r.get("format", "parquet"),
+            }
+            for r in rows
+        ]
     except Exception:
         recs = []
-    recs.sort(key=lambda x: -x["mtime"])
     templates = sorted([fn[:-5] for fn in os.listdir(TEMPLATES_DIR) if fn.lower().endswith(".json")]) if os.path.isdir(TEMPLATES_DIR) else []
     sessions = sorted([fn[:-5] for fn in os.listdir(SESSIONS_DIR) if fn.lower().endswith(".json")]) if os.path.isdir(SESSIONS_DIR) else []
     return {
@@ -2205,6 +2511,7 @@ async def api_admin_storage():
         "runtime": {
             "web_port": int(_config.get("web_port", 8080)),
             "web_port_scan_max": int(_config.get("web_port_scan_max", 10)),
+            "recordings_write_tsv": bool(_config.get("recordings_write_tsv")),
         },
         "recordings": recs,
         "templates": templates,
@@ -2230,6 +2537,9 @@ async def api_admin_storage_delete(request: Request):
             root = os.path.abspath(RECORDINGS_DIR)
             if not path.startswith(root + os.sep):
                 return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+            stem = safe_name.rsplit(".", 1)[0]
+            companion_tsv = os.path.join(RECORDINGS_DIR, stem + ".tsv")
+            companion_pq = os.path.join(RECORDINGS_DIR, stem + ".parquet")
         elif kind == "template":
             path = _json_path(TEMPLATES_DIR, name)
             if not path:
@@ -2242,6 +2552,13 @@ async def api_admin_storage_delete(request: Request):
             return JSONResponse({"error": "Tipo inválido"}, status_code=400)
         if os.path.exists(path):
             os.remove(path)
+        if kind == "recording":
+            for alt in (companion_tsv, companion_pq):
+                if alt != path and os.path.isfile(alt):
+                    try:
+                        os.remove(alt)
+                    except OSError:
+                        pass
         return {"ok": True}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2265,10 +2582,20 @@ async def api_admin_runtime_config(request: Request):
                 return JSONResponse({"error": "web_port_scan_max inválido"}, status_code=400)
             _config["web_port_scan_max"] = v
             updates["web_port_scan_max"] = v
+        if "recordings_write_tsv" in payload:
+            _config["recordings_write_tsv"] = bool(payload.get("recordings_write_tsv"))
+            updates["recordings_write_tsv"] = bool(_config["recordings_write_tsv"])
         if hasattr(request.app.state, "max_web_port_in_range"):
             request.app.state.max_web_port_in_range = None
         _save_runtime_config_overrides(updates)
-        return {"ok": True, "runtime": {"web_port": int(_config.get("web_port", 8080)), "web_port_scan_max": int(_config.get("web_port_scan_max", 10))}}
+        return {
+            "ok": True,
+            "runtime": {
+                "web_port": int(_config.get("web_port", 8080)),
+                "web_port_scan_max": int(_config.get("web_port_scan_max", 10)),
+                "recordings_write_tsv": bool(_config.get("recordings_write_tsv")),
+            },
+        }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -2572,6 +2899,13 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     global ACTIVE_WS
     ACTIVE_WS += 1
+    peer_s = "?"
+    scope = getattr(ws, "scope", None)
+    if isinstance(scope, dict):
+        c = scope.get("client")
+        if isinstance(c, (list, tuple)) and len(c) >= 2:
+            peer_s = f"{c[0]}:{c[1]}"
+    print(f"[VarMonitor Web] WebSocket /ws aceptado (cliente {peer_s})", flush=True)
 
     # Autenticación por contraseña (query param password)
     global FAILED_AUTH_ATTEMPTS
@@ -2656,6 +2990,7 @@ async def websocket_endpoint(ws: WebSocket):
         if inst:
             query_uds = inst[0]["uds_path"]
     if not query_uds:
+        print("[VarMonitor Web] WebSocket /ws: sin UDS disponible; cerrando.", flush=True)
         await ws.send_json({"type": "error", "message": "No hay instancias VarMonitor (UDS). Arranca la aplicación C++."})
         await ws.close()
         ACTIVE_WS -= 1
@@ -3996,7 +4331,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 await ws.send_json({"type": "error", "message": f"No se pudo arrancar el sidecar: {e}"})
                     elif shm_reader and shm_queue is not None:
                         _ensure_recordings_dir()
-                        recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                        recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.parquet.part")
                         recording_write_queue = Queue()
                         recording_rows_written_ref = [0]
                         recording_writer_thread = threading.Thread(
@@ -4247,6 +4582,15 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+_FAVICON_SVG = os.path.join(STATIC_DIR, "favicon.svg")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    """Evita 404: los navegadores piden /favicon.ico por defecto; servimos el mismo SVG que en /static/."""
+    return FileResponse(_FAVICON_SVG, media_type="image/svg+xml")
+
 
 # Documentación MkDocs: site/ (ES) y site_en/ (EN) en la raíz del proyecto
 _DOCS_ES_DIR = os.path.join(os.path.dirname(__file__), "..", "site")

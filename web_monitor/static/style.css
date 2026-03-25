@@ -271,6 +271,24 @@ body.theme-light.mode-replay {
     grid-column: 1 / -1;
 }
 
+.settings-group .notification-permission-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+}
+
+.settings-group .notification-permission-status {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    flex: 1;
+    min-width: 0;
+}
+
 .settings-group .port-control {
     display: flex;
     align-items: center;
@@ -1109,9 +1127,19 @@ main {
 
 .arr-alarm-form {
     display: inline-flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 2px;
     margin-left: 4px;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.arr-alarm-form-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex-wrap: wrap;
 }
 
 .arr-alarm-input {
@@ -1746,6 +1774,85 @@ body.monitor-compact .stats-panel {
     box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
+.monitor-item .mon-value.mon-value--editing {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    width: auto;
+    min-width: min(152px, 42vw);
+    max-width: min(240px, 55vw);
+}
+
+body.monitor-compact .monitor-item .mon-value.mon-value--editing {
+    min-width: min(136px, 40vw);
+    max-width: min(220px, 52vw);
+}
+
+.mon-value--editing .mon-edit-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+}
+
+.mon-edit-actions {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 1px;
+}
+
+.btn-mon-edit-ok,
+.btn-mon-edit-cancel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.65rem;
+    line-height: 1;
+    padding: 2px 4px;
+    color: var(--text-dim);
+}
+
+.btn-mon-edit-ok:hover { color: #4ade80; border-color: #4ade80; }
+.btn-mon-edit-cancel:hover { color: #f87171; border-color: #f87171; }
+
+.arr-val.arr-val--editing {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+    overflow: visible;
+}
+
+.arr-val--editing .arr-cell-edit {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+}
+
+.arr-edit-actions {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 1px;
+}
+
+.btn-arr-edit-ok,
+.btn-arr-edit-cancel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    cursor: pointer;
+    font-size: 0.6rem;
+    line-height: 1;
+    padding: 1px 3px;
+    color: var(--text-dim);
+}
+
+.btn-arr-edit-ok:hover { color: #4ade80; border-color: #4ade80; }
+.btn-arr-edit-cancel:hover { color: #f87171; border-color: #f87171; }
+
 /* graph assignment styles are now dynamic via JS */
 
 .monitor-item .mon-name { cursor: pointer; }
@@ -1762,6 +1869,7 @@ body.monitor-compact .stats-panel {
     color: var(--text-dim);
     border-top: 1px dashed var(--border);
     margin-top: 2px;
+    min-width: 0;
 }
 .stat-item b {
     color: var(--text);
@@ -1981,12 +2089,22 @@ body.monitor-compact .stats-panel {
 
 .alarm-form {
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.alarm-form-row {
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
 }
 
 .alarm-input {
-    width: 60px;
+    width: 52px;
     padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: 3px;

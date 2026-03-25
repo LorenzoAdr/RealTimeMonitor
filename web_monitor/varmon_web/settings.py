@@ -60,6 +60,10 @@ DEFAULTS = {
     "sidecar_cpu_affinity": "",
     "data_root": "",
     "recordings_dir": "",
+    # Si es true: el HTML inyecta un script que borra localStorage y sessionStorage del origen antes de cargar el cliente (arranque siempre limpio).
+    "web_clear_browser_storage": False,
+    # Si es true: además del .parquet canónico se escribe un .tsv espejo (interoperabilidad; más disco y CPU).
+    "recordings_write_tsv": False,
 }
 
 CONFIG_ABS_PATH = ""
@@ -123,8 +127,16 @@ def load_config() -> dict:
                     "sidecar_cpu_affinity",
                 ):
                     cfg[key] = val
+                elif key == "web_clear_browser_storage":
+                    cfg[key] = val.strip().lower() in ("1", "true", "yes", "on")
+                elif key == "recordings_write_tsv":
+                    cfg[key] = val.strip().lower() in ("1", "true", "yes", "on")
         CONFIG_ABS_PATH = os.path.abspath(path)
         print(f"[VarMonitor Web] Config cargada desde {CONFIG_ABS_PATH}")
+        if cfg.get("web_clear_browser_storage"):
+            print(
+                "[VarMonitor Web] web_clear_browser_storage=1: cada GET / borrará localStorage y sessionStorage del navegador para este origen (antes del JS)."
+            )
         if (cfg.get("auth_password") or "").strip():
             print("[VarMonitor Web] Auth: activada (se requiere contraseña en el WebSocket)")
         else:

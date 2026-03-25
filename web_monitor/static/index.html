@@ -2,10 +2,11 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
+    <!--VARMON_HEAD_INJECT-->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarMonitor</title>
-    <link rel="stylesheet" href="/static/style.css?v=23">
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/style.css?v=25">
 </head>
 <body class="theme-light">
     <div id="authOverlay" class="auth-overlay" style="display:none">
@@ -68,8 +69,8 @@
             <button id="perfBtn" class="btn-small" type="button" title="Rendimiento por fases (activa medición al abrir; también con estadísticas avanzadas)">Perf</button>
             <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
             <div id="offlineControls" class="offline-controls" style="display:none">
-                <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV local en Run A">Cargar</button>
-                <input type="file" id="localTsvInput" accept=".tsv,text/tab-separated-values" style="display:none">
+                <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV o Parquet local en Run A">Cargar</button>
+                <input type="file" id="localTsvInput" accept=".tsv,.parquet,text/tab-separated-values,application/vnd.apache.parquet" style="display:none">
                 <label id="recordingSelectLabel">Run A:
                     <select id="recordingSelectA">
                         <option value="">(sin grabaciones)</option>
@@ -115,6 +116,10 @@
                             <option value="dark">Oscuro</option>
                         </select>
                     </label>
+                    <div class="notification-permission-row">
+                        <button type="button" id="notificationPermissionBtn" class="btn-small">Notificaciones…</button>
+                        <span id="notificationPermissionStatus" class="notification-permission-status"></span>
+                    </div>
                     <label id="visualBufferLabel">Buffer visual:
                         <select id="timeWindow">
                             <option value="10" selected>10s</option>
@@ -206,6 +211,10 @@
                         </label>
                         <button id="adminApplyRuntimeBtn" class="btn-small" title="Guardar cambios de configuración avanzada">Guardar cambios</button>
                     </div>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="adminRecordingsWriteTsvCheckbox" title="Además del Parquet canónico, escribir TSV para interoperabilidad externa (varmon.conf: recordings_write_tsv)">
+                        <span id="recordingsWriteTsvLabel">Generar también TSV</span>
+                    </label>
                 </div>
                 <h4>Recordings / Snapshots / Segmentos</h4>
                 <div class="monitor-menu-row">
