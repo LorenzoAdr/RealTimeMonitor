@@ -26,6 +26,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
+    --panel-bg: var(--surface);
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
     background:
         radial-gradient(1200px 420px at 50% -120px, var(--mode-wash), transparent 72%),
@@ -102,6 +103,18 @@ body.theme-light.mode-replay {
     --mode-wash: rgba(16, 185, 129, 0.10);
     --mode-header-bg: linear-gradient(180deg, rgba(16, 185, 129, 0.12), var(--surface) 60%);
     --mode-header-border: rgba(16, 185, 129, 0.38);
+}
+
+/* Registro ARINC: mismo contrato de tema que live (mode-live sigue activo); toque distinto en cabecera. */
+body.mode-arinc-registry {
+    --mode-wash: rgba(245, 158, 11, 0.14);
+    --mode-header-bg: linear-gradient(180deg, rgba(245, 158, 11, 0.18), var(--surface) 58%);
+    --mode-header-border: rgba(245, 158, 11, 0.45);
+}
+body.theme-light.mode-arinc-registry {
+    --mode-wash: rgba(217, 119, 6, 0.10);
+    --mode-header-bg: linear-gradient(180deg, rgba(217, 119, 6, 0.14), var(--surface) 60%);
+    --mode-header-border: rgba(217, 119, 6, 0.40);
 }
 
 .header-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -2586,6 +2599,428 @@ body.monitor-compact .monitor-item .mon-value.mon-value--editing {
     flex-direction: column;
     gap: 2px;
 }
+
+#arincRegistryWorkspace {
+    display: none;
+}
+.arinc-registry-workspace {
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    padding: 8px 12px;
+    overflow: hidden;
+    background: var(--surface);
+    color: var(--text);
+}
+.arinc-registry-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    flex: 1;
+}
+.arinc-registry-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+.arinc-registry-title {
+    margin: 0;
+    font-size: 1rem;
+    flex: 1 1 100%;
+}
+.arinc-registry-filter {
+    min-width: 200px;
+    flex: 1 1 180px;
+    padding: 4px 8px;
+}
+.arinc-registry-count {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
+.arinc-registry-check {
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.arinc-registry-table-wrap {
+    overflow: auto;
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.06) inset,
+        0 8px 24px rgba(0, 0, 0, 0.12);
+}
+body.theme-light .arinc-registry-table-wrap {
+    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.08);
+}
+.arinc-registry-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.74rem;
+}
+.arinc-registry-table th,
+.arinc-registry-table td {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: middle;
+}
+.arinc-registry-table tbody tr.arinc-registry-row:hover {
+    background: var(--surface-hover);
+}
+.arinc-registry-table tbody tr.arinc-registry-row:nth-child(even) {
+    background: color-mix(in srgb, var(--surface) 88%, var(--border) 12%);
+}
+.arinc-registry-table tbody tr.arinc-registry-row:nth-child(even):hover {
+    background: var(--surface-hover);
+}
+.arinc-registry-table th {
+    position: sticky;
+    top: 0;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 12%, var(--panel-bg)) 0%, var(--panel-bg) 100%);
+    z-index: 1;
+    font-weight: 600;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    box-shadow: 0 1px 0 var(--border);
+}
+.arinc-registry-oct {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.arinc-registry-actions {
+    width: 64px;
+    text-align: center;
+    padding: 4px !important;
+    white-space: nowrap;
+}
+.btn-arinc-row-edit {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    margin-right: 4px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+    vertical-align: middle;
+}
+.btn-arinc-row-edit:hover {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.arinc-registry-sort-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    margin-right: -4px;
+}
+button.arinc-registry-sort-active {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+    font-weight: 600;
+}
+.btn-arinc-row-del {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--red) 45%, var(--border));
+    background: color-mix(in srgb, var(--red) 12%, transparent);
+    color: var(--red);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+}
+.btn-arinc-row-del:hover {
+    background: color-mix(in srgb, var(--red) 22%, transparent);
+    transform: scale(1.05);
+}
+.arinc-import-conflict-block {
+    margin: 10px 0 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    border: 1px solid color-mix(in srgb, var(--g3) 55%, var(--border));
+    background: color-mix(in srgb, var(--g3) 10%, var(--surface));
+}
+.arinc-import-conflict-msg {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text);
+}
+.arinc-import-conflict-list {
+    margin: 0 0 10px 1rem;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    max-height: 120px;
+    overflow: auto;
+}
+.arinc-import-conflict-list code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+}
+.arinc-import-conflict-more {
+    list-style: none;
+    margin-left: -1rem;
+    font-style: italic;
+}
+.arinc-import-conflict-opts {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.82rem;
+}
+.arinc-import-dup-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+}
+.arinc-registry-eureka {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--g2);
+    border: 1px solid color-mix(in srgb, var(--g2) 45%, var(--border));
+    background: color-mix(in srgb, var(--g2) 14%, transparent);
+    white-space: nowrap;
+}
+.mon-tag--reg-avionica {
+    color: #6ee7b7;
+    border-color: #059669;
+    background: rgba(5, 150, 105, 0.2);
+}
+body.theme-light .mon-tag--reg-avionica {
+    color: #047857;
+    border-color: #10b981;
+    background: rgba(16, 185, 129, 0.18);
+}
+.default-main-workspace {
+    display: contents;
+}
+body.mode-arinc-registry .default-main-workspace {
+    display: none;
+}
+body.mode-arinc-registry main {
+    flex-direction: column;
+}
+body.mode-arinc-registry #arincRegistryWorkspace {
+    display: flex;
+    width: 100%;
+    min-height: 0;
+}
+.arinc-import-modal {
+    max-width: 900px;
+    width: min(94vw, 900px);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.arinc-import-body {
+    overflow: auto;
+    padding: 0 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.arinc-import-hint {
+    font-size: 0.8rem;
+    margin: 0;
+    color: var(--text-dim);
+}
+.arinc-import-mode-row,
+.arinc-json-merge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 0.8rem;
+}
+.arinc-import-mapping-scroll {
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px;
+}
+.arinc-import-map-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 6px;
+    font-size: 0.75rem;
+}
+.arinc-import-preview {
+    max-height: 160px;
+    overflow: auto;
+    margin: 0;
+    padding: 8px;
+    background: var(--code-bg, rgba(0,0,0,0.06));
+    border-radius: var(--radius);
+    font-size: 0.68rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.arinc-preview-title {
+    margin: 0;
+    font-size: 0.85rem;
+}
+.arinc-import-actions {
+    margin-top: 4px;
+}
+.arinc-import-row-preview-wrap {
+    margin: 8px 0 4px;
+}
+.arinc-import-row-preview-note {
+    margin: 0 0 6px;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+}
+.arinc-import-row-preview-scroll {
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+}
+.arinc-import-row-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.72rem;
+}
+.arinc-import-row-preview-table th,
+.arinc-import-row-preview-table td {
+    border-bottom: 1px solid var(--border);
+    padding: 4px 6px;
+    text-align: left;
+    vertical-align: middle;
+}
+.arinc-import-row-preview-table th {
+    position: sticky;
+    top: 0;
+    background: var(--panel-bg);
+    z-index: 1;
+    font-weight: 600;
+    color: var(--text-dim);
+}
+.arinc-import-prev-idx {
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    width: 2.2rem;
+}
+.arinc-import-row-kind {
+    max-width: 9rem;
+    font-size: 0.72rem;
+    padding: 2px 4px;
+}
+.arinc-entry-edit-modal {
+    max-width: 480px;
+    width: min(94vw, 480px);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.arinc-entry-edit-body {
+    overflow: auto;
+    padding: 0 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.arinc-edit-field label {
+    display: block;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+}
+.arinc-edit-field input[type="text"],
+.arinc-edit-field select,
+.arinc-edit-field textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+.arinc-edit-field textarea {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    resize: vertical;
+    min-height: 4.5rem;
+}
+.arinc-edit-field-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px 12px;
+}
+.arinc-edit-field-inline label {
+    margin-bottom: 2px;
+}
+.arinc-edit-input-narrow {
+    width: 4.5rem !important;
+    max-width: 28%;
+}
+.arinc-edit-field-check label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+    cursor: pointer;
+}
+.arinc-edit-hint {
+    margin: 4px 0 0;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+}
+.arinc-entry-edit-actions {
+    margin-top: 6px;
+}
+.arinc-dis-bits-panel {
+    margin-top: 6px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.72rem;
+}
+.arinc-dis-bits-title {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+.arinc-dis-bit-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 2px 0;
+    border-bottom: 1px dashed var(--border);
+}
+.arinc-dis-bit-row:last-child {
+    border-bottom: none;
+}
+
 /* (Quitado content-visibility en lista larga no-VM: con filas más altas que 28px el scroll
    del portátil se quedaba “atascado” al entrar en la zona de muchas filas.) */
 .browser-virtual-window {

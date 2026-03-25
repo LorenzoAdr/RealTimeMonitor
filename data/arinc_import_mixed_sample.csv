@@ -1,0 +1,8 @@
+label_oct,name,encoding,bits,lsb,scale,signed,units,min,max,ssm,dis_bit_index,dis_bit_name
+310,MIXED_IAS,bnr,19,,1,false,kt,0,450,"0,3",,
+310,,,,,,,,,,,0,ON_GROUND
+310,,,,,,,,,,,1,IN_FLIGHT
+310,,,,,,,,,,,2,OVERSPEED_WARN
+271,MIXED_ALT,bcd,19,,1,false,ft,-1000,60000,"0,3",,
+271,,,,,,,,,,,10,TENS_OK
+271,,,,,,,,,,,11,DISPLAY_TEST

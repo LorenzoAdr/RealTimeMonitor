@@ -9,7 +9,7 @@ function readConfigModeAndInstance() {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return { mode: "live", instance: "" };
         const cfg = JSON.parse(raw);
-        const mode = cfg.appMode === "offline" || cfg.appMode === "replay" || cfg.appMode === "live"
+        const mode = cfg.appMode === "offline" || cfg.appMode === "replay" || cfg.appMode === "live" || cfg.appMode === "arinc_registry"
             ? cfg.appMode
             : "live";
         const instance = typeof cfg.instance === "string" ? cfg.instance.trim() : "";

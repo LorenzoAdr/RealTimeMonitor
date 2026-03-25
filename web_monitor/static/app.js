@@ -630,6 +630,8 @@
             runFetch();
         }, 250);
     }
+    /* Registro ARINC importable: la app servida por defecto usa `app-legacy.mjs` + `modules/arinc-registry.mjs`.
+       Este bundle IIFE legado mantiene solo demos estáticas; no hay modo «Registro ARINC» aquí. */
     const ARINC_LABEL_DEFS = {
         // Ejemplos demo para validar rápidamente la interpretación ARINC en UI.
         "203": { name: "PITCH_ANGLE_DEMO", encoding: "bnr", signed: true, bits: 19, scale: 1, units: "deg", min: -90, max: 90, ssmAllowed: [0, 3] },

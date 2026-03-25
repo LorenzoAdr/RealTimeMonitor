@@ -85,6 +85,8 @@ _inst = _install_dir()
 BROWSER_ROOT = Path(_inst) if _inst else Path(__file__).resolve().parent.parent.parent
 TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
 SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
+# Registro aviónica importado (JSON); el cliente puede guardar/cargar vía API.
+AVIONICS_REGISTRY_PATH = os.path.join(STATE_ROOT_DIR, "avionics_registry.json")
 
 print(
     f"[VarMonitor Web] Rutas datos: recordings={os.path.abspath(RECORDINGS_DIR)} | state={os.path.abspath(STATE_ROOT_DIR)}",

@@ -4,7 +4,7 @@ El frontend es una SPA en [web_monitor/static/](../web_monitor/static/): `index.
 
 ## Vista general de la interfaz
 
-Cabecera con estado de conexión, selector de **modo** (Live / Análisis / Replay), **Rel act**, tema e idioma; tres columnas (variables, monitor, gráficos).
+Cabecera con estado de conexión, selector de **modo** (Live / Análisis / Replay / **Registro ARINC**), **Rel act**, tema e idioma; tres columnas (variables, monitor, gráficos) salvo en modo registro.
 
 ![Interfaz en tema claro](images/general_claro.png){ width="100%" }
 
@@ -37,7 +37,15 @@ Cabecera con estado de conexión, selector de **modo** (Live / Análisis / Repla
 
 ## Persistencia (localStorage)
 
-- **saveConfig()** / **loadConfig()**: Guardan y cargan en `localStorage` (clave `varmon_config`) la lista de variables monitorizadas, `varGraphAssignment`, `graphList`, ventana de tiempo, tema, idioma, modo (live/offline), rutas de grabación, etc. Al cargar la página, `loadConfig()` restaura el estado y luego se llama a `rebuildPlotArea()` al final del init, de modo que los slots de gráficos existan desde el principio.
+- **saveConfig()** / **loadConfig()**: Guardan y cargan en `localStorage` (clave `varmon_config`) la lista de variables monitorizadas, `varGraphAssignment`, `graphList`, ventana de tiempo, tema, idioma, modo (live/offline/replay/arinc_registry), rutas de grabación, **`arincLabelRegistry`** (definiciones importadas por label en octal) y **`arincImportColumnMap`** (último mapeo columnas CSV → campos), etc. Al cargar la página, `loadConfig()` restaura el estado y luego se llama a `rebuildPlotArea()` al final del init, de modo que los slots de gráficos existan desde el principio.
+
+## Registro ARINC importable
+
+- **Módulo** [`js/modules/arinc-registry.mjs`](../web_monitor/static/js/modules/arinc-registry.mjs): parseo CSV/TSV/XML tabular, fusión de entradas, serialización JSON y resolución de definición por label (`getArincLabelDef`) combinando registro de usuario y demos integradas (`ARINC_BUILTIN_LABEL_DEFS`).
+- **Modo UI «Registro ARINC»**: tabla filtrable, importación con **modal de mapeo** (cada columna del fichero → campo lógico: label oct/hex/dec, nombre, codificación, bits, LSB, etc.; modo «una fila por label» o «filas DIS» con índice y nombre de bit), exportación JSON (opción de incluir demos), plantilla CSV mínima y vaciado del registro importado.
+- **Formato JSON canónico**: `{ "version": 1, "labels": { "203": { "name", "encoding", "bits", "scale", "signed", "units", "min", "max", "ssmAllowed", "lsb", "discreteBits": [{ "index", "name" }] }, ... } }` (claves `labels` en **octal de 3 dígitos**, como en la decodificación ARINC 429).
+- **XML**: se admiten documentos cuyos **hijos directos de la raíz** tengan subelementos homogéneos (cada hijo → fila; nombres de tags → cabeceras). Si el XML no encaja, exportar a CSV o usar la plantilla.
+- **DIS en detalle de variable**: con codificación `discrete` y `discreteBits` en el registro, el panel de estadísticas de la variable ARINC muestra el valor 0/1 por bit nombrado.
 
 ## Modos: live, análisis y replay híbrido
 

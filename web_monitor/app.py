@@ -40,6 +40,7 @@ from varmon_web.settings import (
     html_main_script_tag,
 )
 from varmon_web.paths import (
+    AVIONICS_REGISTRY_PATH,
     BROWSER_ROOT,
     RECORDINGS_DIR,
     SESSIONS_DIR,
@@ -2507,6 +2508,7 @@ async def api_admin_storage():
             "server_state_dir": os.path.abspath(STATE_ROOT_DIR),
             "templates_dir": os.path.abspath(TEMPLATES_DIR),
             "sessions_dir": os.path.abspath(SESSIONS_DIR),
+            "avionics_registry_path": os.path.abspath(AVIONICS_REGISTRY_PATH),
         },
         "runtime": {
             "web_port": int(_config.get("web_port", 8080)),
@@ -2596,6 +2598,62 @@ async def api_admin_runtime_config(request: Request):
                 "recordings_write_tsv": bool(_config.get("recordings_write_tsv")),
             },
         }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _read_avionics_registry_file() -> dict | None:
+    if not os.path.isfile(AVIONICS_REGISTRY_PATH):
+        return None
+    with open(AVIONICS_REGISTRY_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_avionics_registry_file(payload: dict) -> str:
+    root = os.path.dirname(AVIONICS_REGISTRY_PATH)
+    if root:
+        os.makedirs(root, exist_ok=True)
+    with open(AVIONICS_REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return AVIONICS_REGISTRY_PATH
+
+
+@app.get("/api/avionics_registry")
+async def api_avionics_registry_get():
+    """JSON del registro aviónica en server_state (si existe)."""
+    _ensure_state_dirs()
+    try:
+        data = await asyncio.to_thread(_read_avionics_registry_file)
+        if data is None:
+            return {"version": 1, "labels": {}, "missing": True}
+        if not isinstance(data, dict):
+            return JSONResponse({"error": "Fichero inválido"}, status_code=500)
+        return data
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/avionics_registry")
+async def api_avionics_registry_put(request: Request):
+    """Guarda registro en disco (mismo esquema que exporta el cliente: version + labels)."""
+    _ensure_state_dirs()
+    try:
+        body = await request.json()
+        labels = body.get("labels")
+        if not isinstance(labels, dict):
+            return JSONResponse({"error": "Se requiere objeto labels"}, status_code=400)
+        ver = body.get("version", 1)
+        try:
+            version = int(ver)
+        except (TypeError, ValueError):
+            version = 1
+        out = {
+            "version": version,
+            "labels": labels,
+            "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        path = await asyncio.to_thread(_write_avionics_registry_file, out)
+        return {"ok": True, "path": os.path.abspath(path)}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

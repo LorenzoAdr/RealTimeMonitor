@@ -4,7 +4,7 @@ The frontend is a SPA under [web_monitor/static/](../web_monitor/static/): `inde
 
 ## UI overview
 
-Header with connection state, **mode** selector (Live / Analysis / Replay), **Rel act**, theme and language; three columns (browser, monitor, plots).
+Header with connection state, **mode** selector (Live / Analysis / Replay / **ARINC registry**), **Rel act**, theme and language; three columns (browser, monitor, plots) except in registry mode.
 
 ![UI — light theme](images/general_claro.png){ width="100%" }
 
@@ -36,7 +36,15 @@ Header with connection state, **mode** selector (Live / Analysis / Replay), **Re
 
 ## Persistence (localStorage)
 
-- **saveConfig()** / **loadConfig()**: Store and load under `varmon_config` monitored list, `varGraphAssignment`, `graphList`, time window, theme, language, mode (live/offline/replay), recording paths, etc. On load, `rebuildPlotArea()` runs at end of init so chart slots exist immediately.
+- **saveConfig()** / **loadConfig()**: Store and load under `varmon_config` monitored list, `varGraphAssignment`, `graphList`, time window, theme, language, mode (live/offline/replay/arinc_registry), recording paths, **`arincLabelRegistry`**, **`arincImportColumnMap`**, etc. On load, `rebuildPlotArea()` runs at end of init so chart slots exist immediately.
+
+## Importable ARINC registry
+
+- **Module** [`js/modules/arinc-registry.mjs`](../web_monitor/static/js/modules/arinc-registry.mjs): CSV/TSV/tabular XML parsing, merge, JSON I/O, and `getArincLabelDef` (user registry + built-in demos).
+- **«ARINC registry» UI mode**: filterable table, import with **column-mapping modal** (per label row vs DIS rows with bit index/name), JSON export (optional built-ins), minimal CSV template, clear imported data.
+- **Canonical JSON**: `{ "version": 1, "labels": { "203": { "name", "encoding", "bits", …, "discreteBits": [{ "index", "name" }] } } }` (keys are **3-digit octal** label ids).
+- **XML**: root **direct children** with homogeneous sub-elements become rows (tag names = headers). Otherwise export to CSV or use the template.
+- **DIS in variable detail**: for `discrete` encoding and `discreteBits`, the stats panel lists each named bit as 0/1.
 
 ## Modes: live, analysis and hybrid replay
 

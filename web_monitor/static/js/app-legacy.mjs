@@ -12,6 +12,24 @@ import {
 } from "./modules/constants.mjs";
 import { createI18n } from "./modules/i18n.mjs";
 import { plotlyReady } from "./modules/plotly-bootstrap.mjs";
+import {
+    ARINC_BUILTIN_LABEL_DEFS,
+    ARINC_IMPORT_FIELD_IDS,
+    parseRegistryJson,
+    registryFromLabelsRoot,
+    serializeRegistryJson,
+    ARINC_REGISTRY_VERSION,
+    mergeRegistries,
+    parseDelimitedText,
+    xmlToTabularRows,
+    buildRegistryFromMappedRows,
+    guessMappingFromHeaders,
+    getArincLabelDef as registryGetArincLabelDef,
+    isArincLabelKnown as registryIsArincLabelKnown,
+    ARINC_CSV_TEMPLATE,
+    normalizeLabelEntry,
+    labelOctFromCell,
+} from "./modules/arinc-registry.mjs";
 
 const I18N = createI18n();
 
@@ -25,7 +43,7 @@ function whenPlotlyReady(fn) {
 }
 
 let ws = null;
-let appMode = "live"; // live | offline | replay
+let appMode = "live"; // live | offline | replay | arinc_registry
 let varsByName = {};
 let baseKnownVarNames = [];
 let knownVarNames = [];
@@ -89,6 +107,7 @@ let savedInstance = ""; // instancia UDS preferida (guardada/cargada en config)
 const statusEl = document.getElementById("connectionStatus");
 const varCountEl = document.getElementById("varCount");
 const intervalInput = document.getElementById("intervalInput");
+const portControl = document.getElementById("portControl");
 const portSelect = document.getElementById("portSelect");
 const reconnectBtn = document.getElementById("reconnectBtn");
 const modeSelect = document.getElementById("modeSelect");
@@ -640,13 +659,18 @@ function scheduleWindowFetchAroundTime(centerTs) {
         runFetch();
     }, 250);
 }
-const ARINC_LABEL_DEFS = {
-    // Ejemplos demo para validar rápidamente la interpretación ARINC en UI.
-    "203": { name: "PITCH_ANGLE_DEMO", encoding: "bnr", signed: true, bits: 19, scale: 1, units: "deg", min: -90, max: 90, ssmAllowed: [0, 3] },
-    "310": { name: "IAS_DEMO", encoding: "bnr", signed: false, bits: 19, scale: 1, units: "kt", min: 0, max: 450, ssmAllowed: [0, 3] },
-    "271": { name: "ALTITUDE_BCD_DEMO", encoding: "bcd", signed: false, bits: 19, scale: 1, units: "ft", min: -1000, max: 60000, ssmAllowed: [0, 3] },
-    "default": { name: "GENERIC_ARINC", encoding: "bnr", signed: false, bits: 19, scale: 1, units: "", min: null, max: null, ssmAllowed: [0, 1, 2, 3] },
-};
+const ARINC_LABEL_DEFS = ARINC_BUILTIN_LABEL_DEFS;
+/** Registro importado por el usuario (label oct → definición); se fusiona con demos integradas. */
+let arincLabelRegistry = {};
+/** Orden tabla reg. aviónica: oct | name | enc */
+let arincRegistrySort = "oct";
+/** Último mapeo columnas CSV → campos lógicos (persistido). */
+let arincImportColumnMap = {};
+let arincImportPending = null;
+
+function getArincLabelDefForOct(labelOct) {
+    return registryGetArincLabelDef(arincLabelRegistry, labelOct);
+}
 let offlinePlayback = {
     isPlaying: false,
     timer: null,
@@ -727,7 +751,7 @@ function computeGenValue(type, p, t) {
 }
 
 function startGenerator(name, type, params) {
-    if (!isLiveMode() && !isPlaybackMode()) return;
+    if (!isLiveMode() && !isArincRegistryMode() && !isPlaybackMode()) return;
     stopGenerator(name);
     const startTime = Date.now();
     const arrElem = isArrayElem(name);
@@ -739,7 +763,7 @@ function startGenerator(name, type, params) {
     }
     const vd = arrElem ? null : varsByName[name];
     const varType = vd ? (vd.type === "int32" ? "int32" : vd.type === "bool" ? "bool" : "double") : "double";
-    const playbackOnly = isPlaybackMode() && !isLiveMode();
+    const playbackOnly = isPlaybackMode() && !isLiveMode() && !isArincRegistryMode();
 
     const intervalId = setInterval(() => {
         const t = (Date.now() - startTime) / 1000;
@@ -791,7 +815,7 @@ function startGenerator(name, type, params) {
                 }
             }
         } else {
-            if (!isLiveMode() || !ws || ws.readyState !== WebSocket.OPEN) return;
+            if ((!isLiveMode() && !isArincRegistryMode()) || !ws || ws.readyState !== WebSocket.OPEN) return;
             if (arrElem) {
                 sendWsAction({ action: "set_array_element", name: arrName, index: arrIdx, value: val });
             } else {
@@ -828,7 +852,7 @@ function stopAllGenerators() {
 }
 
 function restorePendingGeneratorsIfPossible() {
-    if (!isLiveMode() || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if ((!isLiveMode() && !isArincRegistryMode()) || !ws || ws.readyState !== WebSocket.OPEN) return;
     if (!Array.isArray(pendingGeneratorRestore) || pendingGeneratorRestore.length === 0) return;
     const rows = pendingGeneratorRestore.slice();
     pendingGeneratorRestore = [];
@@ -1076,7 +1100,7 @@ function decodeArinc429(wordNumber, cfg = {}, labelDef = null) {
     const parity = (word >>> 31) & 0x1;
     const parityOk = (popcount32(word) % 2) === 1; // ARINC usa paridad impar
 
-    const baseDef = labelDef || ARINC_LABEL_DEFS[labelOct] || ARINC_LABEL_DEFS.default;
+    const baseDef = labelDef || getArincLabelDefForOct(labelOct);
     const def = { ...baseDef };
     if (cfg && typeof cfg.encodingOverride === "string" && cfg.encodingOverride) {
         def.encoding = cfg.encodingOverride;
@@ -1096,14 +1120,19 @@ function decodeArinc429(wordNumber, cfg = {}, labelDef = null) {
         }
         valueRaw = signedVal;
     }
-    const lsb = Number.isFinite(Number(cfg.lsb)) && Number(cfg.lsb) !== 0 ? Number(cfg.lsb) : 1;
+    let lsb = Number.isFinite(Number(cfg.lsb)) && Number(cfg.lsb) !== 0 ? Number(cfg.lsb) : 1;
+    if (lsb === 1 && def.lsb != null && Number.isFinite(Number(def.lsb)) && Number(def.lsb) !== 0) {
+        lsb = Number(def.lsb);
+    }
     const scale = Number.isFinite(Number(def.scale)) ? Number(def.scale) : 1;
     const value = Number.isFinite(valueRaw) ? valueRaw * lsb * scale : Number.NaN;
     const min = Number.isFinite(Number(def.min)) ? Number(def.min) : null;
     const max = Number.isFinite(Number(def.max)) ? Number(def.max) : null;
     const rangeOk = Number.isFinite(value) ? ((min == null || value >= min) && (max == null || value <= max)) : false;
     const ssmOk = isSsmOkForEncoding({ encoding: def.encoding, ssm }, cfg);
-    const labelKnown = !!ARINC_LABEL_DEFS[labelOct];
+    const labelKnown = registryIsArincLabelKnown(arincLabelRegistry, labelOct);
+    const userRegistryHit = !!(arincLabelRegistry && arincLabelRegistry[labelOct]);
+    const discreteBits = Array.isArray(def.discreteBits) ? def.discreteBits : [];
 
     return {
         label,
@@ -1121,6 +1150,8 @@ function decodeArinc429(wordNumber, cfg = {}, labelDef = null) {
         rangeOk,
         ssmOk,
         labelKnown,
+        userRegistryHit,
+        discreteBits,
     };
 }
 
@@ -1567,6 +1598,95 @@ function applyLanguage(lang) {
         modeSelect.options[0].textContent = tr.modeLive || "Live";
         modeSelect.options[1].textContent = tr.modeOffline || "Análisis";
         modeSelect.options[2].textContent = tr.modeReplay || "Replay";
+        if (modeSelect.options[3]) modeSelect.options[3].textContent = tr.modeArincRegistry || "Reg aviónica";
+    }
+    const arF = document.getElementById("arincRegistryFilter");
+    if (arF) arF.placeholder = tr.arincRegistryFilterPh || "";
+    const arT = document.getElementById("arincRegistryTitle");
+    if (arT) arT.textContent = tr.arincRegistryTitle || "Reg aviónica";
+    const b1 = document.getElementById("arincRegistryImportBtn");
+    if (b1) b1.textContent = tr.arincRegistryImport || "";
+    const b2 = document.getElementById("arincRegistryImportJsonBtn");
+    if (b2) b2.textContent = tr.arincRegistryImportJson || "";
+    const b3 = document.getElementById("arincRegistryExportBtn");
+    if (b3) b3.textContent = tr.arincRegistryExport || "";
+    const b4 = document.getElementById("arincRegistryTemplateBtn");
+    if (b4) b4.textContent = tr.arincRegistryTemplate || "";
+    const b5 = document.getElementById("arincRegistryClearBtn");
+    if (b5) b5.textContent = tr.arincRegistryClear || "";
+    const bSortL = document.getElementById("arincRegistrySortLabel");
+    if (bSortL) bSortL.textContent = tr.arincRegistrySortLabel || "";
+    const bSo = document.getElementById("arincRegistrySortOctBtn");
+    if (bSo) bSo.textContent = tr.arincRegistrySortOct || "";
+    const bSn = document.getElementById("arincRegistrySortNameBtn");
+    if (bSn) bSn.textContent = tr.arincRegistrySortName || "";
+    const bSe = document.getElementById("arincRegistrySortEncBtn");
+    if (bSe) bSe.textContent = tr.arincRegistrySortEnc || "";
+    const bAdd = document.getElementById("arincRegistryAddBtn");
+    if (bAdd) bAdd.textContent = tr.arincRegistryAddEntry || "";
+    const bSrv = document.getElementById("arincRegistryExportServerBtn");
+    if (bSrv) bSrv.textContent = tr.arincRegistryExportServer || "";
+    const bLd = document.getElementById("arincRegistryLoadServerBtn");
+    if (bLd) bLd.textContent = tr.arincRegistryLoadServer || "";
+    const exL = document.getElementById("arincRegistryExportBuiltinsLabel");
+    if (exL) exL.textContent = tr.arincRegistryExportBuiltins || "";
+    const aiT = document.getElementById("arincImportTitle");
+    if (aiT) aiT.textContent = tr.arincImportTitle || "";
+    const ml = document.getElementById("arincImportModeLabels");
+    if (ml) ml.textContent = tr.arincImportModeLabels || "";
+    const md = document.getElementById("arincImportModeDis");
+    if (md) md.textContent = tr.arincImportModeDis || "";
+    const pt = document.getElementById("arincImportPreviewTitle");
+    if (pt) pt.textContent = tr.arincImportPreviewTitle || "";
+    const ic = document.getElementById("arincImportConfirmBtn");
+    if (ic) ic.textContent = tr.arincImportConfirm || "";
+    const ica = document.getElementById("arincImportCancelBtn");
+    if (ica) ica.textContent = tr.arincImportCancel || "";
+    const jm = document.getElementById("arincJsonMergeLabel");
+    if (jm) jm.textContent = tr.arincJsonMergeLabel || "";
+    const jr = document.getElementById("arincJsonReplaceLabel");
+    if (jr) jr.textContent = tr.arincJsonReplaceLabel || "";
+    const arThAct = document.getElementById("arincRegistryThActions");
+    if (arThAct) arThAct.textContent = tr.arincRegistryColActions || "";
+    const dsk = document.getElementById("arincImportDupSkipLabel");
+    if (dsk) dsk.textContent = tr.arincImportDupSkip || "";
+    const dov = document.getElementById("arincImportDupOverwriteLabel");
+    if (dov) dov.textContent = tr.arincImportDupOverwrite || "";
+    const irpT = document.getElementById("arincImportRowPreviewTitle");
+    if (irpT) irpT.textContent = tr.arincImportRowPreviewTitle || "";
+    const irpK = document.getElementById("arincImportRowPreviewThKind");
+    if (irpK) irpK.textContent = tr.arincImportRowPreviewThKind || "";
+    const irpD = document.getElementById("arincImportRowPreviewThData");
+    if (irpD) irpD.textContent = tr.arincImportRowPreviewThData || "";
+    const aeClose = document.getElementById("arincEntryEditCloseBtn");
+    if (aeClose) aeClose.setAttribute("aria-label", tr.arincEditCloseAria || "Cerrar");
+    const aeSave = document.getElementById("arincEntryEditSaveBtn");
+    if (aeSave) aeSave.textContent = tr.arincEditSave || "";
+    const aeCan = document.getElementById("arincEntryEditCancelBtn");
+    if (aeCan) aeCan.textContent = tr.arincEditCancel || "";
+    const setLab = (id, key) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = tr[key] || "";
+    };
+    setLab("arincEditLabelOctLabel", "arincEditFieldOct");
+    setLab("arincEditNameLabel", "arincEditFieldName");
+    setLab("arincEditEncodingLabel", "arincEditFieldEncoding");
+    setLab("arincEditBitsLabel", "arincEditFieldBits");
+    setLab("arincEditLsbLabel", "arincEditFieldLsb");
+    setLab("arincEditScaleLabel", "arincEditFieldScale");
+    setLab("arincEditSignedLabel", "arincEditFieldSigned");
+    setLab("arincEditUnitsLabel", "arincEditFieldUnits");
+    setLab("arincEditMinLabel", "arincEditFieldMin");
+    setLab("arincEditMaxLabel", "arincEditFieldMax");
+    setLab("arincEditSsmLabel", "arincEditFieldSsm");
+    setLab("arincEditDiscreteLabel", "arincEditFieldDiscrete");
+    const aeHint = document.getElementById("arincEditDiscreteHint");
+    if (aeHint) aeHint.textContent = tr.arincEditDiscreteHint || "";
+    updateArincRegistrySortButtonsUi();
+    if (isArincRegistryMode()) renderArincRegistryTable();
+    const impOv = document.getElementById("arincImportOverlay");
+    if (impOv && impOv.style.display !== "none" && arincImportPending && arincImportPending.type === "tabular") {
+        renderArincImportRowPreview();
     }
     if (loadLocalTsvBtn) {
         loadLocalTsvBtn.textContent = tr.offlineLoadLocal || "Cargar archivo local";
@@ -1890,6 +2010,711 @@ function renderArincBusHealth() {
         `<div>Top labels (paridad): ${topParityTxt}</div>`;
 }
 
+function arincTrFieldLabel(fieldId) {
+    const tr = I18N[currentLang] || I18N.es;
+    const k = fieldId ? `arincField_${String(fieldId).replace(/[^a-z0-9_]/gi, "_")}` : "arincField_ignore";
+    return tr[k] || fieldId || "";
+}
+
+function updateArincRegistrySortButtonsUi() {
+    const oct = document.getElementById("arincRegistrySortOctBtn");
+    const nm = document.getElementById("arincRegistrySortNameBtn");
+    const enc = document.getElementById("arincRegistrySortEncBtn");
+    const set = (el, on) => {
+        if (!el) return;
+        el.classList.toggle("arinc-registry-sort-active", !!on);
+    };
+    set(oct, arincRegistrySort === "oct");
+    set(nm, arincRegistrySort === "name");
+    set(enc, arincRegistrySort === "enc");
+}
+
+function sortArincRegistryKeyList(keys) {
+    const k = arincRegistrySort;
+    const arr = keys.slice();
+    if (k === "name") {
+        arr.sort((a, b) => String(arincLabelRegistry[a]?.name || "").localeCompare(String(arincLabelRegistry[b]?.name || ""), undefined, { sensitivity: "base" }) || a.localeCompare(b));
+    } else if (k === "enc") {
+        arr.sort((a, b) => String(arincLabelRegistry[a]?.encoding || "").localeCompare(String(arincLabelRegistry[b]?.encoding || "")) || a.localeCompare(b));
+    } else {
+        arr.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    }
+    return arr;
+}
+
+function renderArincRegistryTable() {
+    const tbody = document.getElementById("arincRegistryTableBody");
+    const countEl = document.getElementById("arincRegistryCount");
+    const filt = document.getElementById("arincRegistryFilter");
+    if (!tbody) return;
+    const tr = I18N[currentLang] || I18N.es;
+    const q = (filt && filt.value ? filt.value : "").trim().toLowerCase();
+    const allKeys = Object.keys(arincLabelRegistry);
+    const sortedKeys = sortArincRegistryKeyList(allKeys);
+    const rows = [];
+    for (const oct of sortedKeys) {
+        const def = arincLabelRegistry[oct];
+        if (!def) continue;
+        const name = String(def.name || "");
+        if (q && !oct.includes(q) && !name.toLowerCase().includes(q)) continue;
+        const nbits = (def.discreteBits && def.discreteBits.length) || 0;
+        rows.push({ oct, def, nbits });
+    }
+    if (countEl) {
+        const tpl = tr.arincRegistryCount || "%d etiquetas";
+        countEl.textContent = tpl.replace("%d", String(allKeys.length));
+    }
+    const delTitle = escapeHtml(tr.arincRegistryRowDeleteTitle || "Eliminar esta etiqueta del registro");
+    const editTitle = escapeHtml(tr.arincRegistryRowEditTitle || "Editar");
+    const html = rows.map(({ oct, def, nbits }) =>
+        "<tr class=\"arinc-registry-row\">" +
+        `<td><code class="arinc-registry-oct">${escapeHtml(oct)}</code></td>` +
+        `<td>${escapeHtml(String(def.name || ""))}</td>` +
+        `<td>${escapeHtml(String(def.encoding || ""))}</td>` +
+        `<td>${def.bits != null ? escapeHtml(String(def.bits)) : ""}</td>` +
+        `<td>${def.lsb != null ? escapeHtml(String(def.lsb)) : ""}</td>` +
+        `<td>${escapeHtml(String(def.units || ""))}</td>` +
+        `<td>${nbits ? nbits + " bits" : "—"}</td>` +
+        `<td class="arinc-registry-actions">` +
+        `<button type="button" class="btn-arinc-row-edit" data-oct="${escapeHtml(oct)}" title="${editTitle}" aria-label="${editTitle}">\u270E</button>` +
+        `<button type="button" class="btn-arinc-row-del" data-oct="${escapeHtml(oct)}" title="${delTitle}">` +
+        "\u00D7</button></td>" +
+        "</tr>"
+    ).join("");
+    tbody.innerHTML = html;
+}
+
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function guessArincRowImportKind(row, mapping) {
+    const inv = {};
+    for (const [csvCol, fieldId] of Object.entries(mapping || {})) {
+        if (fieldId) inv[fieldId] = csvCol;
+    }
+    const idxCol = inv.dis_bit_index;
+    const nameCol = inv.dis_bit_name;
+    if (idxCol && nameCol) {
+        const bitI = String(row[idxCol] != null ? row[idxCol] : "").trim();
+        const bitN = String(row[nameCol] != null ? row[nameCol] : "").trim();
+        if (bitI !== "" && bitN !== "" && Number.isFinite(Number(bitI))) return "dis";
+    }
+    if (inv.label_oct && String(row[inv.label_oct] ?? "").trim() !== "") return "label";
+    if (inv.label_hex && String(row[inv.label_hex] ?? "").trim() !== "") return "label";
+    if (inv.label_dec && String(row[inv.label_dec] ?? "").trim() !== "") return "label";
+    return "skip";
+}
+
+function parseDiscreteBitsTextarea(text) {
+    const bits = [];
+    for (const ln of String(text || "").split(/\n/)) {
+        const t = ln.trim();
+        if (!t) continue;
+        const m = /^(\d+)\s*[:=]\s*(.+)$/.exec(t);
+        if (!m) continue;
+        const idx = parseInt(m[1], 10);
+        const name = String(m[2] || "").trim();
+        if (Number.isFinite(idx) && name) bits.push({ index: idx, name });
+    }
+    return bits;
+}
+
+function mergeTabularImportByRowKinds(headers, rows, mapping, rowKinds) {
+    const rk = rows.map((r, i) => {
+        const k = rowKinds && rowKinds[i];
+        if (k === "label" || k === "dis" || k === "skip") return k;
+        return guessArincRowImportKind(r, mapping);
+    });
+    const labelRows = rows.filter((_, i) => rk[i] === "label");
+    const disRows = rows.filter((_, i) => rk[i] === "dis");
+    let acc = {};
+    if (labelRows.length > 0) {
+        acc = mergeRegistries(acc, buildRegistryFromMappedRows(headers, labelRows, mapping, "labels", "oct"), "merge");
+    }
+    if (disRows.length > 0) {
+        acc = mergeRegistries(acc, buildRegistryFromMappedRows(headers, disRows, mapping, "dis_bits", "oct"), "merge");
+    }
+    return acc;
+}
+
+function renderArincImportRowPreview() {
+    const wrap = document.getElementById("arincImportRowPreviewWrap");
+    const tbody = document.getElementById("arincImportRowPreviewBody");
+    if (!wrap || !tbody) return;
+    if (!arincImportPending || arincImportPending.type !== "tabular") {
+        wrap.style.display = "none";
+        tbody.innerHTML = "";
+        return;
+    }
+    const tr = I18N[currentLang] || I18N.es;
+    const { headers, rows, mapping, rowKinds } = arincImportPending;
+    const rk = rowKinds || rows.map(() => "label");
+    const showMax = 300;
+    const hPrev = headers.slice(0, 7);
+    const sliceLen = Math.min(rows.length, showMax);
+    let html = "";
+    for (let i = 0; i < sliceLen; i++) {
+        const row = rows[i];
+        const kind = rk[i] || "skip";
+        const cells = hPrev.map((h) => escapeHtml(String(row[h] ?? "").slice(0, 40))).join("</td><td>");
+        html += "<tr>" +
+            `<td class="arinc-import-prev-idx">${i + 1}</td>` +
+            `<td><select class="arinc-import-row-kind" data-row-index="${i}" title="">` +
+            `<option value="label"${kind === "label" ? " selected" : ""}>${escapeHtml(tr.arincImportRowKindLabel || "Etiqueta")}</option>` +
+            `<option value="dis"${kind === "dis" ? " selected" : ""}>${escapeHtml(tr.arincImportRowKindDis || "DIS")}</option>` +
+            `<option value="skip"${kind === "skip" ? " selected" : ""}>${escapeHtml(tr.arincImportRowKindSkip || "Omitir")}</option>` +
+            "</select></td>" +
+            `<td>${cells || "—"}</td>` +
+            "</tr>";
+    }
+    tbody.innerHTML = html;
+    wrap.style.display = "block";
+    const note = document.getElementById("arincImportRowPreviewNote");
+    if (note) {
+        note.textContent = rows.length > showMax
+            ? (tr.arincImportRowPreviewTrunc || "").replace("%d", String(rows.length)).replace("%s", String(showMax))
+            : "";
+    }
+}
+
+let arincEditOriginalOct = null;
+
+function closeArincEntryEditor() {
+    const ov = document.getElementById("arincEntryEditOverlay");
+    if (ov) ov.style.display = "none";
+    arincEditOriginalOct = null;
+}
+
+function openArincEntryEditor(octExisting) {
+    const ov = document.getElementById("arincEntryEditOverlay");
+    if (!ov) return;
+    const tr = I18N[currentLang] || I18N.es;
+    arincEditOriginalOct = octExisting || null;
+    const titleEl = document.getElementById("arincEntryEditTitle");
+    if (titleEl) titleEl.textContent = octExisting ? (tr.arincEditTitleEdit || "Editar etiqueta") : (tr.arincEditTitleNew || "Nueva etiqueta");
+    const inpOct = document.getElementById("arincEditLabelOct");
+    if (inpOct) {
+        inpOct.value = octExisting || "";
+        inpOct.readOnly = !!octExisting;
+    }
+    const def = (octExisting && arincLabelRegistry[octExisting]) ? arincLabelRegistry[octExisting] : {};
+    const setv = (id, v) => {
+        const el = document.getElementById(id);
+        if (el) el.value = v != null ? String(v) : "";
+    };
+    setv("arincEditName", def.name || "");
+    const encEl = document.getElementById("arincEditEncoding");
+    if (encEl) encEl.value = String(def.encoding || "bnr").toLowerCase();
+    setv("arincEditBits", def.bits != null ? def.bits : 19);
+    setv("arincEditLsb", def.lsb != null ? def.lsb : "");
+    setv("arincEditScale", def.scale != null ? def.scale : 1);
+    const signedEl = document.getElementById("arincEditSigned");
+    if (signedEl) signedEl.checked = !!def.signed;
+    setv("arincEditUnits", def.units || "");
+    setv("arincEditMin", def.min != null ? def.min : "");
+    setv("arincEditMax", def.max != null ? def.max : "");
+    const ssm = Array.isArray(def.ssmAllowed) ? def.ssmAllowed.join(",") : "";
+    setv("arincEditSsm", ssm);
+    const disEl = document.getElementById("arincEditDiscreteLines");
+    if (disEl) {
+        disEl.value = (def.discreteBits && def.discreteBits.length)
+            ? def.discreteBits.map((b) => `${b.index}:${b.name}`).join("\n")
+            : "";
+    }
+    ov.style.display = "flex";
+}
+
+function submitArincEntryEditor() {
+    const tr = I18N[currentLang] || I18N.es;
+    const rawOct = (document.getElementById("arincEditLabelOct")?.value || "").trim();
+    const oct = labelOctFromCell(rawOct, "oct");
+    if (!oct) {
+        alert(tr.arincEditBadOct || "Label octal inválida (tres dígitos octales, p. ej. 310)");
+        return;
+    }
+    if (!arincEditOriginalOct && arincLabelRegistry[oct]) {
+        alert(tr.arincEditDupOct || "Esa label ya existe; edítala desde la tabla.");
+        return;
+    }
+    if (arincEditOriginalOct && arincEditOriginalOct !== oct) {
+        alert(tr.arincEditOctLocked || "No se puede cambiar el octal de una entrada existente.");
+        return;
+    }
+    const prev = arincEditOriginalOct ? { ...arincLabelRegistry[arincEditOriginalOct] } : {};
+    const partial = {
+        name: (document.getElementById("arincEditName")?.value || "").trim() || "UNNAMED",
+        encoding: document.getElementById("arincEditEncoding")?.value || "bnr",
+        bits: document.getElementById("arincEditBits")?.value,
+        lsb: document.getElementById("arincEditLsb")?.value,
+        scale: document.getElementById("arincEditScale")?.value,
+        signed: document.getElementById("arincEditSigned")?.checked,
+        units: document.getElementById("arincEditUnits")?.value,
+        min: document.getElementById("arincEditMin")?.value,
+        max: document.getElementById("arincEditMax")?.value,
+        ssmAllowed: document.getElementById("arincEditSsm")?.value,
+        discreteBits: parseDiscreteBitsTextarea(document.getElementById("arincEditDiscreteLines")?.value),
+    };
+    const merged = normalizeLabelEntry({ ...prev, ...partial });
+    if (!merged) {
+        alert(tr.arincEditNormalizeFail || "No se pudo validar la entrada.");
+        return;
+    }
+    arincLabelRegistry[oct] = merged;
+    saveConfig();
+    closeArincEntryEditor();
+    renderArincRegistryTable();
+    rebuildMonitorList();
+    updateMonitorValues();
+}
+
+function closeArincImportModal() {
+    const ov = document.getElementById("arincImportOverlay");
+    if (ov) ov.style.display = "none";
+    arincImportPending = null;
+    const rw = document.getElementById("arincImportRowPreviewWrap");
+    if (rw) rw.style.display = "none";
+    const prevBody = document.getElementById("arincImportRowPreviewBody");
+    if (prevBody) prevBody.innerHTML = "";
+}
+
+function buildArincImportMappingUi() {
+    const scroll = document.getElementById("arincImportMappingScroll");
+    if (!scroll || !arincImportPending || arincImportPending.type !== "tabular") return;
+    scroll.innerHTML = "";
+    const { headers, mapping } = arincImportPending;
+    for (const h of headers) {
+        const row = document.createElement("div");
+        row.className = "arinc-import-map-row";
+        const lab = document.createElement("label");
+        lab.textContent = h;
+        const sel = document.createElement("select");
+        sel.dataset.header = h;
+        for (const opt of ARINC_IMPORT_FIELD_IDS) {
+            const o = document.createElement("option");
+            o.value = opt.id;
+            o.textContent = arincTrFieldLabel(opt.id);
+            sel.appendChild(o);
+        }
+        sel.value = mapping[h] || "";
+        sel.addEventListener("change", () => {
+            mapping[h] = sel.value;
+            if (arincImportPending && arincImportPending.type === "tabular" && arincImportPending.rows) {
+                arincImportPending.rowKinds = arincImportPending.rows.map((r) => guessArincRowImportKind(r, mapping));
+            }
+            updateArincImportPreview();
+        });
+        row.appendChild(lab);
+        row.appendChild(sel);
+        scroll.appendChild(row);
+    }
+}
+
+function collectArincImportIncomingBuilt() {
+    if (!arincImportPending) return null;
+    if (arincImportPending.type === "json") {
+        return { ...(arincImportPending.labels || {}) };
+    }
+    const { headers, rows, mapping, rowKinds } = arincImportPending;
+    return mergeTabularImportByRowKinds(headers, rows, mapping, rowKinds);
+}
+
+function refreshArincImportConflictUi() {
+    const block = document.getElementById("arincImportConflictBlock");
+    const msg = document.getElementById("arincImportConflictMsg");
+    const list = document.getElementById("arincImportConflictList");
+    if (!block || !msg || !list) return;
+    const tr = I18N[currentLang] || I18N.es;
+    if (!arincImportPending) {
+        block.style.display = "none";
+        return;
+    }
+    if (arincImportPending.type === "json") {
+        const mergeMode = document.querySelector('input[name="arincJsonMerge"]:checked');
+        if (mergeMode && mergeMode.value === "replace") {
+            block.style.display = "none";
+            return;
+        }
+    }
+    let incoming = null;
+    try {
+        incoming = collectArincImportIncomingBuilt();
+    } catch (e) {
+        block.style.display = "none";
+        return;
+    }
+    if (!incoming || typeof incoming !== "object") {
+        block.style.display = "none";
+        return;
+    }
+    const conflicts = Object.keys(incoming).filter((k) => !!arincLabelRegistry[k]);
+    if (conflicts.length === 0) {
+        block.style.display = "none";
+        return;
+    }
+    block.style.display = "block";
+    const intro = tr.arincImportDupIntro || "Hay %d etiquetas que ya están en el registro:";
+    msg.textContent = intro.replace("%d", String(conflicts.length));
+    const show = conflicts.slice(0, 28);
+    list.innerHTML = show.map((o) => `<li><code>${escapeHtml(o)}</code></li>`).join("") +
+        (conflicts.length > 28 ? `<li class="arinc-import-conflict-more">…</li>` : "");
+}
+
+function updateArincImportPreview() {
+    const pre = document.getElementById("arincImportPreview");
+    if (!pre) return;
+    const tr = I18N[currentLang] || I18N.es;
+    try {
+        if (!arincImportPending) {
+            pre.textContent = "";
+            refreshArincImportConflictUi();
+            return;
+        }
+        if (arincImportPending.type === "json") {
+            const sample = Object.keys(arincImportPending.labels || {}).slice(0, 12);
+            pre.textContent = JSON.stringify(
+                Object.fromEntries(sample.map((k) => [k, arincImportPending.labels[k]])),
+                null,
+                2
+            );
+            const rw = document.getElementById("arincImportRowPreviewWrap");
+            if (rw) rw.style.display = "none";
+            refreshArincImportConflictUi();
+            return;
+        }
+        const { headers, rows, mapping, rowKinds } = arincImportPending;
+        const built = mergeTabularImportByRowKinds(headers, rows, mapping, rowKinds);
+        renderArincImportRowPreview();
+        const sampleKeys = Object.keys(built).slice(0, 8);
+        const sample = Object.fromEntries(sampleKeys.map((k) => [k, built[k]]));
+        pre.textContent = JSON.stringify(sample, null, 2);
+    } catch (e) {
+        pre.textContent = (tr.arincImportParseError || "%s").replace("%s", e.message || String(e));
+    }
+    refreshArincImportConflictUi();
+}
+
+function applyArincImportDupPolicyToIncoming(incoming) {
+    if (!incoming || typeof incoming !== "object") return incoming;
+    const pol = document.querySelector('input[name="arincImportDupPolicy"]:checked');
+    const mode = pol ? pol.value : "overwrite";
+    if (mode !== "skip") return { ...incoming };
+    const out = { ...incoming };
+    for (const k of Object.keys(out)) {
+        if (arincLabelRegistry[k]) delete out[k];
+    }
+    return out;
+}
+
+function openArincImportModalTabular(headers, rows, fileName) {
+    const tr = I18N[currentLang] || I18N.es;
+    const mapping = guessMappingFromHeaders(headers, arincImportColumnMap);
+    const rowKinds = rows.map((r) => guessArincRowImportKind(r, mapping));
+    arincImportPending = { type: "tabular", headers, rows, fileName, mapping, rowKinds };
+    const hint = document.getElementById("arincImportHint");
+    if (hint) {
+        hint.textContent = [tr.arincImportHintCsv || "", tr.arincImportHintCsvMixed || ""].filter(Boolean).join(" ");
+    }
+    const modeRow = document.querySelector(".arinc-import-mode-row");
+    if (modeRow) modeRow.style.display = "none";
+    const mapScroll = document.getElementById("arincImportMappingScroll");
+    if (mapScroll) mapScroll.style.display = "";
+    const jrow = document.getElementById("arincJsonMergeRow");
+    if (jrow) jrow.style.display = "none";
+    buildArincImportMappingUi();
+    updateArincImportPreview();
+    const ov = document.getElementById("arincImportOverlay");
+    if (ov) ov.style.display = "flex";
+}
+
+function openArincImportModalJson(labels) {
+    const tr = I18N[currentLang] || I18N.es;
+    arincImportPending = { type: "json", labels };
+    const hint = document.getElementById("arincImportHint");
+    if (hint) hint.textContent = tr.arincImportHintJson || "";
+    const modeRow = document.querySelector(".arinc-import-mode-row");
+    if (modeRow) modeRow.style.display = "none";
+    const mapScroll = document.getElementById("arincImportMappingScroll");
+    if (mapScroll) mapScroll.style.display = "none";
+    const jrow = document.getElementById("arincJsonMergeRow");
+    if (jrow) jrow.style.display = "";
+    const rw = document.getElementById("arincImportRowPreviewWrap");
+    if (rw) rw.style.display = "none";
+    const prevBody = document.getElementById("arincImportRowPreviewBody");
+    if (prevBody) prevBody.innerHTML = "";
+    updateArincImportPreview();
+    const ov = document.getElementById("arincImportOverlay");
+    if (ov) ov.style.display = "flex";
+}
+
+function confirmArincImport() {
+    if (!arincImportPending) return;
+    try {
+        if (arincImportPending.type === "json") {
+            const mergeMode = document.querySelector('input[name="arincJsonMerge"]:checked');
+            const m = mergeMode && mergeMode.value === "replace" ? "replace" : "merge";
+            let labels = { ...(arincImportPending.labels || {}) };
+            if (m === "merge") labels = applyArincImportDupPolicyToIncoming(labels);
+            arincLabelRegistry = mergeRegistries(arincLabelRegistry, labels, m);
+        } else {
+            const { headers, rows, mapping, rowKinds } = arincImportPending;
+            let built = mergeTabularImportByRowKinds(headers, rows, mapping, rowKinds);
+            built = applyArincImportDupPolicyToIncoming(built);
+            arincLabelRegistry = mergeRegistries(arincLabelRegistry, built, "merge");
+            for (const h of Object.keys(mapping)) {
+                if (mapping[h]) arincImportColumnMap[h] = mapping[h];
+            }
+        }
+        saveConfig();
+        closeArincImportModal();
+        renderArincRegistryTable();
+        rebuildMonitorList();
+        updateMonitorValues();
+    } catch (e) {
+        alert(String(e.message || e));
+    }
+}
+
+function wireArincRegistryUi() {
+    const fCsv = document.getElementById("arincRegistryFileInput");
+    const fJson = document.getElementById("arincRegistryJsonInput");
+    const btnImp = document.getElementById("arincRegistryImportBtn");
+    const btnJ = document.getElementById("arincRegistryImportJsonBtn");
+    const btnEx = document.getElementById("arincRegistryExportBtn");
+    const btnTpl = document.getElementById("arincRegistryTemplateBtn");
+    const btnClr = document.getElementById("arincRegistryClearBtn");
+    const filt = document.getElementById("arincRegistryFilter");
+    const ovClose = document.getElementById("arincImportCloseBtn");
+    const ovCancel = document.getElementById("arincImportCancelBtn");
+    const ovOk = document.getElementById("arincImportConfirmBtn");
+
+    if (btnImp && fCsv) {
+        btnImp.addEventListener("click", () => fCsv.click());
+    }
+    if (btnJ && fJson) {
+        btnJ.addEventListener("click", () => fJson.click());
+    }
+    if (filt) {
+        filt.addEventListener("input", () => renderArincRegistryTable());
+    }
+    if (fCsv) {
+        fCsv.addEventListener("change", async () => {
+            const f = fCsv.files && fCsv.files[0];
+            fCsv.value = "";
+            if (!f) return;
+            const tr = I18N[currentLang] || I18N.es;
+            try {
+                const text = await f.text();
+                const low = f.name.toLowerCase();
+                if (low.endsWith(".xml")) {
+                    const xr = xmlToTabularRows(text);
+                    if (xr.error || !xr.headers) {
+                        alert(tr.arincImportXmlFail || xr.error);
+                        return;
+                    }
+                    openArincImportModalTabular(xr.headers, xr.rows, f.name);
+                    return;
+                }
+                const { headers, rows } = parseDelimitedText(text);
+                openArincImportModalTabular(headers, rows, f.name);
+            } catch (e) {
+                alert((tr.arincImportParseError || "%s").replace("%s", e.message || String(e)));
+            }
+        });
+    }
+    if (fJson) {
+        fJson.addEventListener("change", async () => {
+            const f = fJson.files && fJson.files[0];
+            fJson.value = "";
+            if (!f) return;
+            const tr = I18N[currentLang] || I18N.es;
+            try {
+                const text = await f.text();
+                const labels = parseRegistryJson(text);
+                openArincImportModalJson(labels);
+            } catch (e) {
+                alert((tr.arincImportParseError || "%s").replace("%s", e.message || String(e)));
+            }
+        });
+    }
+    if (btnEx) {
+        btnEx.addEventListener("click", () => {
+            const inc = document.getElementById("arincRegistryExportBuiltins");
+            const json = serializeRegistryJson(arincLabelRegistry, { includeBuiltins: !!(inc && inc.checked) });
+            const blob = new Blob([json], { type: "application/json" });
+            const a = document.createElement("a");
+            const d = new Date();
+            const pad = (n) => String(n).padStart(2, "0");
+            a.download = `arinc_registry_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+            a.href = URL.createObjectURL(blob);
+            a.click();
+            URL.revokeObjectURL(a.href);
+        });
+    }
+    if (btnTpl) {
+        btnTpl.addEventListener("click", () => {
+            const blob = new Blob([ARINC_CSV_TEMPLATE], { type: "text/csv;charset=utf-8" });
+            const a = document.createElement("a");
+            a.download = "arinc_registry_template.csv";
+            a.href = URL.createObjectURL(blob);
+            a.click();
+            URL.revokeObjectURL(a.href);
+        });
+    }
+    if (btnClr) {
+        btnClr.addEventListener("click", () => {
+            const tr = I18N[currentLang] || I18N.es;
+            if (!window.confirm(tr.arincRegistryClearConfirm || "OK?")) return;
+            arincLabelRegistry = {};
+            saveConfig();
+            renderArincRegistryTable();
+            rebuildMonitorList();
+            updateMonitorValues();
+        });
+    }
+    const btnSortOct = document.getElementById("arincRegistrySortOctBtn");
+    const btnSortName = document.getElementById("arincRegistrySortNameBtn");
+    const btnSortEnc = document.getElementById("arincRegistrySortEncBtn");
+    const btnAdd = document.getElementById("arincRegistryAddBtn");
+    const btnSrv = document.getElementById("arincRegistryExportServerBtn");
+    const btnLd = document.getElementById("arincRegistryLoadServerBtn");
+    if (btnSortOct) {
+        btnSortOct.addEventListener("click", () => {
+            arincRegistrySort = "oct";
+            saveConfig();
+            updateArincRegistrySortButtonsUi();
+            renderArincRegistryTable();
+        });
+    }
+    if (btnSortName) {
+        btnSortName.addEventListener("click", () => {
+            arincRegistrySort = "name";
+            saveConfig();
+            updateArincRegistrySortButtonsUi();
+            renderArincRegistryTable();
+        });
+    }
+    if (btnSortEnc) {
+        btnSortEnc.addEventListener("click", () => {
+            arincRegistrySort = "enc";
+            saveConfig();
+            updateArincRegistrySortButtonsUi();
+            renderArincRegistryTable();
+        });
+    }
+    if (btnAdd) {
+        btnAdd.addEventListener("click", () => openArincEntryEditor(null));
+    }
+    if (btnSrv) {
+        btnSrv.addEventListener("click", async () => {
+            const tr = I18N[currentLang] || I18N.es;
+            try {
+                const r = await fetch("/api/avionics_registry", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ version: ARINC_REGISTRY_VERSION, labels: arincLabelRegistry }),
+                });
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(j.error || r.statusText || String(r.status));
+                alert(tr.arincRegistrySaveServerOk || "OK");
+            } catch (e) {
+                alert((tr.arincRegistrySaveServerFail || "%s").replace("%s", e.message || String(e)));
+            }
+        });
+    }
+    if (btnLd) {
+        btnLd.addEventListener("click", async () => {
+            const tr = I18N[currentLang] || I18N.es;
+            if (!window.confirm(tr.arincRegistryLoadServerConfirm || "OK?")) return;
+            try {
+                const r = await fetch("/api/avionics_registry");
+                const data = await r.json();
+                if (!r.ok) throw new Error(data.error || r.statusText || String(r.status));
+                if (data.missing) {
+                    alert(tr.arincRegistryLoadServerMissing || "");
+                    return;
+                }
+                arincLabelRegistry = registryFromLabelsRoot(data);
+                saveConfig();
+                renderArincRegistryTable();
+                rebuildMonitorList();
+                updateMonitorValues();
+            } catch (e) {
+                alert((tr.arincRegistryLoadServerFail || "%s").replace("%s", e.message || String(e)));
+            }
+        });
+    }
+    if (ovClose) ovClose.addEventListener("click", closeArincImportModal);
+    if (ovCancel) ovCancel.addEventListener("click", closeArincImportModal);
+    if (ovOk) ovOk.addEventListener("click", confirmArincImport);
+    document.querySelectorAll('input[name="arincImportMode"]').forEach((r) => {
+        r.addEventListener("change", updateArincImportPreview);
+    });
+    document.querySelectorAll('input[name="arincJsonMerge"]').forEach((r) => {
+        r.addEventListener("change", updateArincImportPreview);
+    });
+    document.querySelectorAll('input[name="arincImportDupPolicy"]').forEach((r) => {
+        r.addEventListener("change", () => refreshArincImportConflictUi());
+    });
+    const arTbl = document.getElementById("arincRegistryTable");
+    if (arTbl && !arTbl._arincRowDelBound) {
+        arTbl._arincRowDelBound = true;
+        arTbl.addEventListener("click", (e) => {
+            const editBtn = e.target.closest(".btn-arinc-row-edit");
+            if (editBtn) {
+                const oct = editBtn.getAttribute("data-oct");
+                if (oct) openArincEntryEditor(oct);
+                return;
+            }
+            const btn = e.target.closest(".btn-arinc-row-del");
+            if (!btn) return;
+            const oct = btn.getAttribute("data-oct");
+            if (!oct || !Object.prototype.hasOwnProperty.call(arincLabelRegistry, oct)) return;
+            const tr = I18N[currentLang] || I18N.es;
+            const tpl = tr.arincRegistryRowDeleteConfirm || "¿Eliminar la etiqueta %s del registro?";
+            if (!window.confirm(tpl.replace("%s", oct))) return;
+            delete arincLabelRegistry[oct];
+            saveConfig();
+            renderArincRegistryTable();
+            rebuildMonitorList();
+            updateMonitorValues();
+        });
+    }
+    const impOv = document.getElementById("arincImportOverlay");
+    if (impOv && !impOv._arincRowKindBound) {
+        impOv._arincRowKindBound = true;
+        impOv.addEventListener("change", (e) => {
+            const sel = e.target.closest(".arinc-import-row-kind");
+            if (!sel) return;
+            const idx = parseInt(sel.getAttribute("data-row-index"), 10);
+            if (!arincImportPending || arincImportPending.type !== "tabular" || !Number.isFinite(idx)) return;
+            if (!arincImportPending.rowKinds || arincImportPending.rowKinds.length !== arincImportPending.rows.length) {
+                arincImportPending.rowKinds = arincImportPending.rows.map((r) => guessArincRowImportKind(r, arincImportPending.mapping));
+            }
+            arincImportPending.rowKinds[idx] = sel.value;
+            updateArincImportPreview();
+        });
+    }
+    const aeOv = document.getElementById("arincEntryEditOverlay");
+    const aeClose = document.getElementById("arincEntryEditCloseBtn");
+    const aeCancel = document.getElementById("arincEntryEditCancelBtn");
+    const aeSave = document.getElementById("arincEntryEditSaveBtn");
+    if (aeClose) aeClose.addEventListener("click", closeArincEntryEditor);
+    if (aeCancel) aeCancel.addEventListener("click", closeArincEntryEditor);
+    if (aeSave) aeSave.addEventListener("click", () => submitArincEntryEditor());
+    if (aeOv && !aeOv._arincEditBackdropBound) {
+        aeOv._arincEditBackdropBound = true;
+        aeOv.addEventListener("click", (e) => {
+            if (e.target === aeOv) closeArincEntryEditor();
+        });
+    }
+    updateArincRegistrySortButtonsUi();
+}
+
 function clampMonitorPaneWidth(px) {
     const mainEl = document.querySelector("main");
     const mainW = mainEl ? mainEl.getBoundingClientRect().width : window.innerWidth;
@@ -1957,6 +2782,9 @@ function saveConfig() {
             impositionValueOffset: { ...impositionValueOffset },
             plotVsRef: !!plotVsRef,
             seriesColors: { ...seriesColorByName },
+            arincLabelRegistry: { ...arincLabelRegistry },
+            arincImportColumnMap: { ...arincImportColumnMap },
+            arincRegistrySort: arincRegistrySort === "name" || arincRegistrySort === "enc" ? arincRegistrySort : "oct",
         }));
         maybePushLayoutHistory();
     } catch (e) { /* quota exceeded or private mode */ }
@@ -2056,8 +2884,17 @@ function loadConfig() {
         }
         if (Array.isArray(cfg.notesByTs)) notesByTs = cfg.notesByTs;
         if (Array.isArray(cfg.offlineSegments)) offlineSegments = cfg.offlineSegments;
-        if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay") {
+        if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay" || cfg.appMode === "arinc_registry") {
             appMode = cfg.appMode;
+        }
+        if (cfg.arincLabelRegistry && typeof cfg.arincLabelRegistry === "object") {
+            arincLabelRegistry = { ...cfg.arincLabelRegistry };
+        }
+        if (cfg.arincImportColumnMap && typeof cfg.arincImportColumnMap === "object") {
+            arincImportColumnMap = { ...cfg.arincImportColumnMap };
+        }
+        if (cfg.arincRegistrySort === "name" || cfg.arincRegistrySort === "enc") {
+            arincRegistrySort = cfg.arincRegistrySort;
         }
         if (typeof cfg.offlineRecordingName === "string") offlineRecordingName = cfg.offlineRecordingName;
         if (offlineSpeedSelect && cfg.offlineSpeed != null) {
@@ -2128,6 +2965,9 @@ function resetConfig() {
     offlineSafePreviewMaxRows = DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_ROWS;
     offlineSafePreviewMaxSpanSec = DEFAULT_OFFLINE_SAFE_PREVIEW_MAX_SPAN_SEC;
     offlineAllowForceFullLoad = false;
+    arincLabelRegistry = {};
+    arincImportColumnMap = {};
+    arincRegistrySort = "oct";
     arincBusHealth = { totalWords: 0, parityErrors: 0, ssmErrors: 0, unknownLabels: 0, labels: {}, parityByLabel: {}, unknownByLabel: {} };
     layoutHistoryPast = [];
     layoutHistoryFuture = [];
@@ -2188,6 +3028,7 @@ function applyInitialConfigFromStorage() {
 
 Promise.resolve().then(() => {
     applyInitialConfigFromStorage();
+    wireArincRegistryUi();
     void checkAuthThenStart();
 });
 
@@ -2217,7 +3058,14 @@ if (sendFileOnFinishCheckbox) {
 if (modeSelect) {
     modeSelect.addEventListener("change", async () => {
         const v = (modeSelect.value || "").trim();
-        const nextMode = v === "offline" ? "offline" : (v === "replay" ? "replay" : "live");
+        const nextMode =
+            v === "offline"
+                ? "offline"
+                : v === "replay"
+                  ? "replay"
+                  : v === "arinc_registry"
+                    ? "arinc_registry"
+                    : "live";
         setAppMode(nextMode);
         if (nextMode === "offline" || nextMode === "replay") {
             await refreshServerRecordings();
@@ -3789,7 +4637,9 @@ async function applyImportedConfig(cfg, opts = {}) {
     if (offlinePreviewRowsInput) offlinePreviewRowsInput.value = String(offlineSafePreviewMaxRows);
     if (offlinePreviewSpanSecInput) offlinePreviewSpanSecInput.value = String(offlineSafePreviewMaxSpanSec);
     if (offlineAllowForceFullLoadCheckbox) offlineAllowForceFullLoadCheckbox.checked = !!offlineAllowForceFullLoad;
-    if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay") setAppMode(cfg.appMode, { keepData: true });
+    if (cfg.appMode === "offline" || cfg.appMode === "live" || cfg.appMode === "replay" || cfg.appMode === "arinc_registry") {
+        setAppMode(cfg.appMode, { keepData: true });
+    }
     const rec = (cfg.offlineRecordingName || "").trim();
     if (opts.autoLoadOffline && cfg.appMode === "offline" && rec) {
         try {
@@ -4349,14 +5199,18 @@ function ensureWsMatchesSelection() {
     if (udsInstances.length === 0) {
         statusEl.textContent = (I18N[currentLang] || I18N.es).statusNoInstances || "No hay instancias VarMonitor (UDS)";
         statusEl.className = "status disconnected";
-        if (!(ws && ws.readyState === WebSocket.OPEN)) {
+        const st = ws ? ws.readyState : WebSocket.CLOSED;
+        if (st !== WebSocket.OPEN && st !== WebSocket.CONNECTING) {
             connect();
         }
         return;
     }
     const wantRaw = effectiveUdsPathForWs();
     const wantParam = wantRaw ? wantRaw : null;
-    if (ws && ws.readyState === WebSocket.OPEN && wantParam === lastConnectUdsParam) return;
+    if (ws && wantParam === lastConnectUdsParam) {
+        if (ws.readyState === WebSocket.OPEN) return;
+        if (ws.readyState === WebSocket.CONNECTING) return;
+    }
     connect();
 }
 
@@ -4600,10 +5454,13 @@ function setAdvInfoEnabled(enabled) {
 function isOfflineMode() { return appMode === "offline"; }
 function isLiveMode() { return appMode === "live"; }
 function isReplayMode() { return appMode === "replay"; }
+function isArincRegistryMode() { return appMode === "arinc_registry"; }
 /** Modo análisis o replay: sin conexión en vivo, se usa grabación y controles de reproducción */
 function isPlaybackMode() { return isOfflineMode() || isReplayMode(); }
 /** Modos que requieren conexión al backend (WS): live y replay híbrido. */
-function hasBackendConnectionMode() { return isLiveMode() || isReplayMode(); }
+function hasBackendConnectionMode() {
+    return isLiveMode() || isReplayMode() || isArincRegistryMode();
+}
 
 function sendWsAction(payload) {
     if (!hasBackendConnectionMode()) return false;
@@ -4763,11 +5620,13 @@ function updateAdvancedPlotPanelVisibility() {
 function setModeUi() {
     const offline = isOfflineMode();
     const replay = isReplayMode();
+    const arReg = isArincRegistryMode();
     const playback = isPlaybackMode(); // offline o replay: controles de carga/reproducción
-    const portControl = settingsPanel ? settingsPanel.querySelector(".port-control") : null;
+    /* mode-live: tinte cabecera/fondo; en ARINC seguimos en “live” de cara al tema (no volver a variables :root oscuras). */
     document.body.classList.toggle("mode-live", !playback);
     document.body.classList.toggle("mode-analysis", offline);
     document.body.classList.toggle("mode-replay", replay);
+    document.body.classList.toggle("mode-arinc-registry", arReg);
     if (offlineControls) offlineControls.style.display = playback ? "flex" : "none";
     if (offlinePlaybackControls) offlinePlaybackControls.style.display = playback ? "flex" : "none";
     if (alarmPanel) alarmPanel.style.display = playback ? "none" : "";
@@ -4800,11 +5659,15 @@ function setModeUi() {
     renderSegmentsUi();
     renderNotesList();
     renderArincBusHealth();
-    rebuildMonitorList();
+    if (!arReg) rebuildMonitorList();
+    if (arReg) renderArincRegistryTable();
 }
 
 function setAppMode(mode, opts = {}) {
-    const desired = mode === "offline" ? "offline" : (mode === "replay" ? "replay" : "live");
+    let desired = "live";
+    if (mode === "offline") desired = "offline";
+    else if (mode === "replay") desired = "replay";
+    else if (mode === "arinc_registry") desired = "arinc_registry";
     const changed = desired !== appMode;
     appMode = desired;
     if (desired === "replay") {
@@ -4830,9 +5693,12 @@ function setAppMode(mode, opts = {}) {
             setOfflineStatus();
             clearDataBuffers();
             checkAuthThenStart();
-        } else {
+        } else if (desired === "live") {
             resetStateForNewTarget();
             checkAuthThenStart();
+        } else if (desired === "arinc_registry") {
+            /* Mismo backend que live: conectar si veníamos de offline; si ya había WS, checkAuthThenStart reusa la selección. */
+            void checkAuthThenStart();
         }
     }
     saveConfig();
@@ -5989,9 +6855,14 @@ function dispatchIncomingWsString(thisId, rawData) {
         return;
     }
     clearConnectionError();
-    if (msg.type === "vars_names") onVarNames(msg.data);
+    if (msg.type === "vars_names") {
+        if (statusEl && ws && ws.readyState === WebSocket.OPEN && !statusEl.classList.contains("connected")) {
+            notifyWsConnected(connectionId);
+        }
+        onVarNames(msg.data);
+    }
     else if (msg.type === "vars_update") {
-        if (isLiveMode()) queueLiveVarsUpdateForFrame(msg.data);
+        if (isLiveMode() || isArincRegistryMode()) queueLiveVarsUpdateForFrame(msg.data);
         else onVarsUpdate(msg.data);
     }
     else if (msg.type === "set_result") onSetResult(msg);
@@ -6040,7 +6911,11 @@ function connect() {
     const pend = globalThis.__varmonWsPendingAdopt;
     if (pend && pend.socket) {
         const pendPath = pend.udsPath != null ? pend.udsPath : null;
-        const pathsMatch = wantNorm === pendPath;
+        let pathsMatch = wantNorm === pendPath;
+        if (!pathsMatch && pendPath == null && wantNorm != null && udsInstances.length > 0) {
+            const u0 = udsInstances[0];
+            if (u0 && u0.uds_path === wantNorm) pathsMatch = true;
+        }
         const st = pend.socket.readyState;
         if (pathsMatch && st !== WebSocket.CLOSING && st !== WebSocket.CLOSED) {
             globalThis.__varmonWsPendingAdopt = undefined;
@@ -6056,7 +6931,8 @@ function connect() {
             }
             buf.length = 0;
             if (pend.socket.readyState === WebSocket.OPEN) {
-                queueMicrotask(() => notifyWsConnected(thisId));
+                /* Síncrono: si connect() se reentra antes de una microtarea, la guardia "ya OPEN" no debe dejar la UI en desconectado. */
+                notifyWsConnected(thisId);
             }
             return;
         }
@@ -6064,6 +6940,21 @@ function connect() {
         globalThis.__varmonWsPendingAdopt = undefined;
     }
 
+    if (ws && wantNorm === lastConnectUdsParam) {
+        if (ws.readyState === WebSocket.OPEN) {
+            if (statusEl && !statusEl.classList.contains("connected")) {
+                notifyWsConnected(connectionId);
+            }
+            return;
+        }
+        if (ws.readyState === WebSocket.CONNECTING) {
+            return;
+        }
+    }
+    if (ws) {
+        try { ws.close(); } catch (e) { /* ignore */ }
+        ws = null;
+    }
     connectionId += 1;
     const thisId = connectionId;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -7036,6 +7927,21 @@ function syncMonitorRowStatusTags(rowEl, name) {
         addTag("arinc-virt", "ARINC", currentLang === "en" ? "Derived ARINC subchannel" : "Subcanal ARINC derivado (virtual)");
     } else if (isArincEnabled(name)) {
         addTag("arinc", "ARINC", currentLang === "en" ? "ARINC 429 word" : "Palabra ARINC 429");
+        const vd = varsByName[name];
+        const cfg = getArincConfig(name);
+        if (vd && typeof vd.value === "number" && Number.isFinite(Number(vd.value)) && !(cfg.encodingOverride || "").trim()) {
+            try {
+                const dec = decodeArinc429(vd.value, cfg);
+                if (dec && dec.userRegistryHit) {
+                    const tr = I18N[currentLang] || I18N.es;
+                    addTag(
+                        "reg-avionica",
+                        "REG",
+                        tr.arincRegMatchTagTitle || "Enc: auto; definición tomada del reg. aviónica importado"
+                    );
+                }
+            } catch (e) { /* ignore */ }
+        }
     }
     box.style.display = box.childElementCount ? "inline-flex" : "none";
 }
@@ -8556,10 +9462,43 @@ function updateStatsPanel(wrap, name) {
             ? `Label ${d.labelOct} (${d.labelName}) | PAR:${d.parityOk ? "OK" : "ERR"} SSM:${d.ssmOk ? "OK" : "WARN"} RNG:${d.rangeOk ? "OK" : "WARN"}`
             : "ARINC: sin dato numérico";
         arincRow.appendChild(info);
+        if (d && d.userRegistryHit && !(cfg.encodingOverride || "").trim()) {
+            const tr = I18N[currentLang] || I18N.es;
+            const eureka = document.createElement("span");
+            eureka.className = "arinc-registry-eureka";
+            eureka.textContent = tr.arincRegMatchEureka || "Cuadra con reg. aviónica (decodificación auto)";
+            arincRow.appendChild(eureka);
+        }
         arincRow.appendChild(lsbLbl);
         arincRow.appendChild(lsbIn);
         arincRow.appendChild(encLbl);
         arincRow.appendChild(encSel);
+
+        let arincDisPanel = panel.querySelector(".arinc-dis-bits-panel");
+        const disEnc = String((d && d.encoding) || "").toLowerCase();
+        if (
+            d
+            && disEnc === "discrete"
+            && Array.isArray(d.discreteBits)
+            && d.discreteBits.length > 0
+            && Number.isFinite(d.valueRaw)
+        ) {
+            if (!arincDisPanel) {
+                arincDisPanel = document.createElement("div");
+                arincDisPanel.className = "arinc-dis-bits-panel";
+                arincRow.insertAdjacentElement("afterend", arincDisPanel);
+            }
+            const raw = Math.floor(Number(d.valueRaw)) >>> 0;
+            const titleT = tr.arincDisBitsTitle || "DIS bits";
+            let html = `<div class="arinc-dis-bits-title">${escapeHtml(titleT)}</div>`;
+            for (const bit of [...d.discreteBits].sort((a, b) => a.index - b.index)) {
+                const v = (raw >> bit.index) & 1;
+                html += `<div class="arinc-dis-bit-row"><span>${escapeHtml(bit.name)}</span><span>${v}</span></div>`;
+            }
+            arincDisPanel.innerHTML = html;
+        } else if (arincDisPanel) {
+            arincDisPanel.remove();
+        }
 
         let arincSubvars = panel.querySelector(".arinc-subvars");
         if (!arincSubvars) {
@@ -8706,6 +9645,8 @@ function updateStatsPanel(wrap, name) {
         arincRow.remove();
         const arincSubvars = panel.querySelector(".arinc-subvars");
         if (arincSubvars) arincSubvars.remove();
+        const arincDisR = panel.querySelector(".arinc-dis-bits-panel");
+        if (arincDisR) arincDisR.remove();
     }
 
     // En modo no-live ocultamos alarmas (solo tienen sentido en vivo). Generadores sí en replay/offline.
@@ -11504,7 +12445,7 @@ async function initialScanAndConnect() {
 function onVarNames(names) {
     if (!Array.isArray(names)) return;
     // Evitar vaciados transitorios: si llega [] pero ya teníamos catálogo, no borrar UI.
-    if (names.length === 0 && baseKnownVarNames.length > 0 && (isLiveMode() || isReplayMode())) {
+    if (names.length === 0 && baseKnownVarNames.length > 0 && (isLiveMode() || isReplayMode() || isArincRegistryMode())) {
         return;
     }
     // En replay con TSV cargado: unir siempre con las del archivo para no perder unas u otras.
@@ -11754,14 +12695,6 @@ async function checkAuthThenStart() {
     } catch (e) { /* ignorar */ }
     try {
         const fetchP = fetchConnectionInfo();
-        const canEarlyWs = hasBackendConnectionMode() && !isOfflineMode() && !!effectiveUdsPathForWs();
-        if (canEarlyWs) {
-            try {
-                connect();
-            } catch (e2) {
-                console.error("[VarMonitor] connect() (early):", e2);
-            }
-        }
         await fetchP;
         await initialScanAndConnect();
     } catch (e) {
