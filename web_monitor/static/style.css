@@ -863,6 +863,23 @@ main {
 }
 .btn-small:hover { border-color: var(--accent); color: var(--text); }
 
+.arinc-db-live-indicator {
+    font-weight: 700;
+    min-width: 44px;
+}
+
+.arinc-db-live-indicator-empty {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.52);
+    background: rgba(245, 158, 11, 0.12);
+}
+
+.arinc-db-live-indicator-loaded {
+    color: #16a34a;
+    border-color: rgba(22, 163, 74, 0.52);
+    background: rgba(22, 163, 74, 0.12);
+}
+
 .btn-pending {
     border-color: var(--g2);
     color: var(--g2);
@@ -2315,6 +2332,177 @@ body.monitor-compact .monitor-item .mon-value.mon-value--editing {
     align-items: stretch;
     gap: 8px;
     padding: 6px;
+}
+
+.plot-arinc-row {
+    flex: 0 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.plot-arinc-row-head {
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.plot-add-slot.plot-add-slot-arinc {
+    min-height: 30px;
+    font-size: 0.72rem;
+    padding: 5px 8px;
+    border-color: #f59e0b;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.25);
+}
+
+.plot-add-slot.plot-add-slot-arinc.plot-add-over {
+    background: rgba(245, 158, 11, 0.2);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.45);
+}
+
+.plot-arinc-cards {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow-x: hidden;
+    overflow-y: auto;
+    max-height: 38vh;
+    padding-bottom: 2px;
+}
+
+.plot-arinc-hint {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    opacity: 0.9;
+}
+
+.arinc-word-card {
+    min-width: 0;
+    max-width: 100%;
+    border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--surface) 86%, var(--bg));
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.plot-no-graph-drop {
+    flex: 1;
+    min-height: 140px;
+}
+
+.arinc-word-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.arinc-word-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--text);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.btn-arinc-word-remove {
+    flex: 0 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    line-height: 1;
+    font-size: 0.8rem;
+    padding: 0 4px;
+}
+
+.btn-arinc-word-remove:hover {
+    color: var(--red);
+    border-color: var(--red);
+}
+
+.arinc-viz-sections {
+    display: grid;
+    grid-template-columns: 8fr 2fr 19fr 2fr 1fr;
+    gap: 3px;
+}
+
+.arinc-viz-section-label {
+    font-size: 0.56rem;
+    color: var(--text-dim);
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.arinc-viz-sections .arinc-viz-section-label:not(:last-child) {
+    border-right: 2px solid color-mix(in srgb, var(--border) 78%, transparent);
+    padding-right: 4px;
+}
+
+.arinc-bit-grid {
+    display: grid;
+    grid-template-columns: 8fr 2fr 19fr 2fr 1fr;
+    gap: 3px;
+}
+
+.arinc-bit-section {
+    display: grid;
+    gap: 2px;
+    padding-right: 4px;
+}
+
+.arinc-bit-section:not(:last-child) {
+    border-right: 2px solid color-mix(in srgb, var(--border) 78%, transparent);
+    margin-right: 2px;
+}
+
+.arinc-bit-section-label { grid-template-columns: repeat(8, 1fr); }
+.arinc-bit-section-sdi { grid-template-columns: repeat(2, 1fr); }
+.arinc-bit-section-data { grid-template-columns: repeat(19, 1fr); }
+.arinc-bit-section-ssm { grid-template-columns: repeat(2, 1fr); }
+.arinc-bit-section-parity { grid-template-columns: repeat(1, 1fr); }
+
+.arinc-bit-cell {
+    min-width: 10px;
+    height: 16px;
+    border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.58rem;
+    font-family: var(--font-mono);
+    color: var(--text);
+    line-height: 1;
+}
+
+.arinc-word-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+}
+
+.arinc-meta-item {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
 }
 
 .plot-grid-main {

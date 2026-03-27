@@ -72,6 +72,8 @@ let lastLiveHistoryNeed = undefined;
 let graphList = [];
 let graphColumns = [];
 let plotInstances = {};
+let arincVizItems = [];
+let arincVizDropActive = false;
 
 let arrayElemAssignment = {};
 let arrayElemHistory = {};
@@ -1670,12 +1672,12 @@ function applyLanguage(lang) {
         modeSelect.options[0].textContent = tr.modeLive || "Live";
         modeSelect.options[1].textContent = tr.modeOffline || "Análisis";
         modeSelect.options[2].textContent = tr.modeReplay || "Replay";
-        if (modeSelect.options[3]) modeSelect.options[3].textContent = tr.modeArincRegistry || "Reg aviónica";
+        if (modeSelect.options[3]) modeSelect.options[3].textContent = tr.modeArincRegistry || "BD aviónica";
     }
     const arF = document.getElementById("arincRegistryFilter");
     if (arF) arF.placeholder = tr.arincRegistryFilterPh || "";
     const arT = document.getElementById("arincRegistryTitle");
-    if (arT) arT.textContent = tr.arincRegistryTitle || "Reg aviónica";
+    if (arT) arT.textContent = tr.arincRegistryTitle || "BD aviónica";
     const b1 = document.getElementById("arincRegistryImportBtn");
     if (b1) b1.textContent = tr.arincRegistryImport || "";
     const b4 = document.getElementById("arincRegistryTemplateBtn");
@@ -1733,6 +1735,8 @@ function applyLanguage(lang) {
     const dbBadge = document.getElementById("arincDbStatusBadge");
     if (dbBadge && !arincDbStatus.loaded) dbBadge.textContent = tr.arincDbNoLoaded || "";
     updateArincDbStatusUi();
+    const dbLive = document.getElementById("arincDbLiveIndicator");
+    if (dbLive) dbLive.textContent = tr.arincDbLiveIndicator || "ARINC BD";
     const dsk = document.getElementById("arincImportDupSkipLabel");
     if (dsk) dsk.textContent = tr.arincImportDupSkip || "";
     const dov = document.getElementById("arincImportDupOverwriteLabel");
@@ -2161,6 +2165,21 @@ function setArincDbDirty(on) {
     if (btn) btn.classList.toggle("arinc-registry-save-dirty", arincDbDirty);
 }
 
+function updateArincDbLiveIndicatorUi() {
+    const tr = I18N[currentLang] || I18N.es;
+    const btn = document.getElementById("arincDbLiveIndicator");
+    if (!btn) return;
+    const loaded = !!(arincDbStatus && arincDbStatus.loaded && arincDbStatus.active);
+    btn.classList.toggle("arinc-db-live-indicator-loaded", loaded);
+    btn.classList.toggle("arinc-db-live-indicator-empty", !loaded);
+    btn.textContent = loaded
+        ? (tr.arincDbLiveLoaded || "BD")
+        : (tr.arincDbLiveNoLoaded || "BD");
+    btn.title = loaded
+        ? (tr.arincDbLiveTitleLoaded || "Base de datos ARINC cargada (clic para abrir BD aviónica)")
+        : (tr.arincDbLiveTitleNoLoaded || "No hay base de datos ARINC cargada (clic para abrir BD aviónica)");
+}
+
 function updateArincDbStatusUi() {
     const tr = I18N[currentLang] || I18N.es;
     const badge = document.getElementById("arincDbStatusBadge");
@@ -2182,6 +2201,7 @@ function updateArincDbStatusUi() {
     if (importMenu && loaded) importMenu.style.display = "none";
     const unloadBtn = document.getElementById("arincDbUnloadBtn");
     if (unloadBtn) unloadBtn.style.display = loaded ? "" : "none";
+    updateArincDbLiveIndicatorUi();
 }
 
 function formatArincDisBitsReadCell(def) {
@@ -3236,6 +3256,7 @@ function saveConfig() {
             graphs: varGraphAssignment,
             graphList: graphList,
             graphColumns: graphColumns.map((col) => col.slice()),
+            arincVizItems: arincVizItems.slice(),
             timeWindow: timeWindowSelect.value,
             smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
             instance: portSelect ? portSelect.value : "",
@@ -3302,6 +3323,11 @@ function loadConfig() {
         }
         if (Array.isArray(cfg.graphColumns)) {
             graphColumns = cfg.graphColumns.map((col) => Array.isArray(col) ? col.slice() : []);
+        }
+        if (Array.isArray(cfg.arincVizItems)) {
+            arincVizItems = cfg.arincVizItems
+                .map((n) => String(n || "").trim())
+                .filter((n, i, arr) => n && arr.indexOf(n) === i);
         }
         normalizeGraphLayout();
         if (cfg.timeWindow) {
@@ -4184,6 +4210,7 @@ document.getElementById("helpBtn").addEventListener("click", () => {
     helpOverlay.style.display = "flex";
 });
 const docsBtn = document.getElementById("docsBtn");
+const arincDbLiveIndicatorBtn = document.getElementById("arincDbLiveIndicator");
 const docsLangOverlay = document.getElementById("docsLangOverlay");
 const docsLangCloseBtn = document.getElementById("docsLangCloseBtn");
 const docsOpenEsBtn = document.getElementById("docsOpenEsBtn");
@@ -4227,6 +4254,11 @@ if (docsBtn && docsLangOverlay) {
     docsBtn.addEventListener("click", async () => {
         docsLangOverlay.style.display = "flex";
         await refreshDocsLangAvailability();
+    });
+}
+if (arincDbLiveIndicatorBtn) {
+    arincDbLiveIndicatorBtn.addEventListener("click", () => {
+        setAppMode("arinc_registry");
     });
 }
 if (docsLangCloseBtn) {
@@ -5000,11 +5032,14 @@ if (themeSelect) {
 // --- Export / Import config to file ---
 
 function buildFullConfig() {
+    const graphColumnsSnapshot = graphColumns.map((col) => col.slice());
+    const graphListSnapshot = flattenGraphColumns();
     return {
         monitored: monitoredOrder.slice(),
         graphs: varGraphAssignment,
-        graphList: graphList,
-        graphColumns: graphColumns.map((col) => col.slice()),
+        graphList: graphListSnapshot,
+        graphColumns: graphColumnsSnapshot,
+        arincVizItems: arincVizItems.slice(),
         seriesColors: { ...seriesColorByName },
         timeWindow: timeWindowSelect.value,
         smoothPlots: document.getElementById("smoothPlotsSelect")?.value || "5",
@@ -5053,6 +5088,13 @@ async function applyImportedConfig(cfg, opts = {}) {
     if (cfg.graphs && typeof cfg.graphs === "object") varGraphAssignment = cfg.graphs;
     if (Array.isArray(cfg.graphList)) graphList = cfg.graphList;
     if (Array.isArray(cfg.graphColumns)) graphColumns = cfg.graphColumns.map((col) => Array.isArray(col) ? col.slice() : []);
+    if (Array.isArray(cfg.arincVizItems)) {
+        arincVizItems = cfg.arincVizItems
+            .map((n) => String(n || "").trim())
+            .filter((n, i, arr) => n && arr.indexOf(n) === i);
+    } else {
+        arincVizItems = [];
+    }
     if (cfg.seriesColors && typeof cfg.seriesColors === "object") {
         seriesColorByName = { ...cfg.seriesColors };
         seriesHueByName = {};
@@ -5637,19 +5679,19 @@ updatePauseBtn();
 // --- Reset graficos (equivalente al antiguo "Quitar sel.") ---
 
 function resetPlots() {
-    // Quitar asignaciones de grafico pero mantener variables monitorizadas
-    for (const name of monitoredNames) {
-        varGraphAssignment[name] = "";
-    }
+    // Limpiar por completo el área de gráficos (asignaciones, layout y representaciones ARINC)
+    varGraphAssignment = {};
+    graphList = [];
+    graphColumns = [];
     for (const key of Object.keys(arrayElemAssignment)) {
         delete arrayElemAssignment[key];
         delete arrayElemHistory[key];
     }
+    arincVizItems = [];
+    arincVizDropActive = false;
     saveConfig();
-    const pruned = pruneEmptyGraphs();
-    if (!pruned) {
-        rebuildMonitorList();
-    }
+    rebuildPlotArea();
+    rebuildMonitorList();
     renderPlots();
 }
 
@@ -6106,6 +6148,7 @@ function clearUserLayout() {
     varGraphAssignment = {};
     graphList = [];
     graphColumns = [];
+    arincVizItems = [];
     arrayElemAssignment = {};
     alarms = {};
     activeAlarms.clear();
@@ -6184,6 +6227,7 @@ function setModeUi() {
 }
 
 function setAppMode(mode, opts = {}) {
+    const prevMode = appMode;
     let desired = "live";
     if (mode === "offline") desired = "offline";
     else if (mode === "replay") desired = "replay";
@@ -6214,7 +6258,10 @@ function setAppMode(mode, opts = {}) {
             clearDataBuffers();
             checkAuthThenStart();
         } else if (desired === "live") {
-            resetStateForNewTarget();
+            // Al volver desde "Reg avionica", conservar el estado de Live (monitor, graficas, fichas ARINC, etc.).
+            if (prevMode !== "arinc_registry") {
+                resetStateForNewTarget();
+            }
             checkAuthThenStart();
         } else if (desired === "arinc_registry") {
             /* Mismo backend que live: conectar si veníamos de offline; si ya había WS, checkAuthThenStart reusa la selección. */
@@ -8466,7 +8513,7 @@ function syncMonitorRowStatusTags(rowEl, name) {
                     const tr = I18N[currentLang] || I18N.es;
                     addTag(
                         "reg-avionica",
-                        "REG",
+                        "BD",
                         tr.arincRegMatchTagTitle || "Enc: auto; definición tomada del reg. aviónica importado"
                     );
                 }
@@ -10033,20 +10080,11 @@ function updateStatsPanel(wrap, name) {
         if (autoDbDecode) {
             const autoBd = document.createElement("span");
             autoBd.className = "arinc-auto-badge";
-            autoBd.textContent = "AUTO BD";
+            autoBd.textContent = "BD";
             autoBd.title = currentLang === "en"
                 ? "Automatic decoding from active database"
                 : "Decodificación automática desde la base de datos activa";
             arincRow.appendChild(autoBd);
-        }
-        if (autoDbDecode) {
-            const eureka = document.createElement("span");
-            eureka.className = "arinc-registry-eureka";
-            eureka.textContent = "dec";
-            eureka.title = currentLang === "en"
-                ? "Matched with avionics registry (automatic decoding)"
-                : "Cuadra con reg. aviónica (decodificación auto)";
-            arincRow.appendChild(eureka);
         }
         if (!autoMode) {
             arincRow.appendChild(lsbLbl);
@@ -10987,6 +11025,7 @@ function updateMonitorValues() {
             updateStatsPanel(wrap, name);
         }
     }
+    refreshArincVizValues();
     sendAlarmsToBackend();
     refreshAllStats();
 }
@@ -11856,6 +11895,183 @@ function addGraph() {
     renderPlots();
 }
 
+function isArincVizCandidate(name) {
+    if (!name || typeof name !== "string") return false;
+    if (isArincDerivedName(name) || isComputed(name) || isArrayElem(name) || isArrayVar(name)) return false;
+    return isArincEnabled(name);
+}
+
+function addArincVizItem(name) {
+    const n = String(name || "").trim();
+    if (!isArincVizCandidate(n)) return false;
+    if (arincVizItems.includes(n)) return true;
+    arincVizItems.push(n);
+    saveConfig();
+    rebuildPlotArea();
+    refreshArincVizValues();
+    return true;
+}
+
+function removeArincVizItem(name) {
+    const n = String(name || "").trim();
+    const before = arincVizItems.length;
+    arincVizItems = arincVizItems.filter((x) => x !== n);
+    if (arincVizItems.length === before) return;
+    if (arincVizItems.length === 0) {
+        arincVizDropActive = false;
+    }
+    saveConfig();
+    rebuildPlotArea();
+}
+
+function buildArincVizCard(name, tr) {
+    const card = document.createElement("div");
+    card.className = "arinc-word-card";
+    card.dataset.name = name;
+
+    const header = document.createElement("div");
+    header.className = "arinc-word-card-header";
+    const title = document.createElement("span");
+    title.className = "arinc-word-title";
+    title.textContent = name;
+    title.title = name;
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "btn-arinc-word-remove";
+    closeBtn.textContent = "×";
+    closeBtn.title = tr.arincVizRemoveTitle || "Quitar representación ARINC";
+    closeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeArincVizItem(name);
+    });
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    card.appendChild(header);
+
+    const sections = [
+        { key: "label", bits: 8, label: "LABEL" },
+        { key: "sdi", bits: 2, label: "SDI" },
+        { key: "data", bits: 19, label: "DATA" },
+        { key: "ssm", bits: 2, label: "SSM" },
+        { key: "parity", bits: 1, label: "PAR" },
+    ];
+    const sectionsRow = document.createElement("div");
+    sectionsRow.className = "arinc-viz-sections";
+    for (const sec of sections) {
+        const s = document.createElement("span");
+        s.className = "arinc-viz-section-label";
+        s.textContent = sec.label;
+        sectionsRow.appendChild(s);
+    }
+    card.appendChild(sectionsRow);
+
+    const bitGrid = document.createElement("div");
+    bitGrid.className = "arinc-bit-grid";
+    for (const sec of sections) {
+        const secEl = document.createElement("div");
+        secEl.className = `arinc-bit-section arinc-bit-section-${sec.key}`;
+        for (let i = 0; i < sec.bits; i++) {
+            const cell = document.createElement("span");
+            cell.className = "arinc-bit-cell";
+            cell.dataset.section = sec.key;
+            cell.dataset.index = String(i);
+            cell.textContent = "0";
+            secEl.appendChild(cell);
+        }
+        bitGrid.appendChild(secEl);
+    }
+    card.appendChild(bitGrid);
+
+    const meta = document.createElement("div");
+    meta.className = "arinc-word-meta";
+    const metaKeys = ["label", "sdi", "ssm", "parity", "value"];
+    for (const k of metaKeys) {
+        const item = document.createElement("span");
+        item.className = "arinc-meta-item";
+        item.dataset.meta = k;
+        item.textContent = `${k}: --`;
+        meta.appendChild(item);
+    }
+    card.appendChild(meta);
+
+    return card;
+}
+
+function refreshArincVizValues() {
+    if (!plotArea) return;
+    const cards = plotArea.querySelectorAll(".arinc-word-card[data-name]");
+    const sectionSlices = {
+        parity: [0, 1],
+        ssm: [1, 3],
+        data: [3, 22],
+        sdi: [22, 24],
+        label: [24, 32],
+    };
+    cards.forEach((card) => {
+        const name = card.dataset.name;
+        const vd = varsByName[name];
+        const wordNum = vd && !Array.isArray(vd.value) ? Number(vd.value) : Number.NaN;
+        if (!Number.isFinite(wordNum)) {
+            card.querySelectorAll(".arinc-bit-cell").forEach((cell) => { cell.textContent = "-"; });
+            card.querySelectorAll(".arinc-meta-item").forEach((item) => {
+                const k = item.dataset.meta || "";
+                item.textContent = `${k}: --`;
+            });
+            return;
+        }
+
+        const word = (Math.round(wordNum) >>> 0);
+        const bits = word.toString(2).padStart(32, "0");
+        for (const [sec, [a, b]] of Object.entries(sectionSlices)) {
+            const secBits = bits.slice(a, b);
+            const cells = card.querySelectorAll(`.arinc-bit-cell[data-section="${sec}"]`);
+            cells.forEach((cell, idx) => {
+                cell.textContent = secBits[idx] || "0";
+            });
+        }
+
+        const cfg = getArincConfig(name);
+        const d = decodeArinc429(word, cfg);
+        const units = d && d.units ? ` ${d.units}` : "";
+        const metaVals = {
+            label: d ? d.labelOct : "--",
+            sdi: d && Number.isFinite(d.sdi) ? String(Math.trunc(d.sdi)) : "--",
+            ssm: d && Number.isFinite(d.ssm) ? String(Math.trunc(d.ssm)) : "--",
+            parity: d && Number.isFinite(d.parity) ? String(Math.trunc(d.parity)) : "--",
+            value: d && Number.isFinite(d.value) ? `${d.value.toFixed(4)}${units}` : "--",
+        };
+        card.querySelectorAll(".arinc-meta-item").forEach((item) => {
+            const k = item.dataset.meta || "";
+            item.textContent = `${k}: ${metaVals[k] ?? "--"}`;
+        });
+    });
+}
+
+function syncArincVizRowVisibility() {
+    const row = document.getElementById("plotArincRow");
+    if (!row) return;
+    const drop = document.getElementById("plotArincDrop");
+    const cards = document.getElementById("plotArincCards");
+    const hasItems = arincVizItems.length > 0;
+    const showRow = hasItems || arincVizDropActive;
+    row.style.display = showRow ? "flex" : "none";
+    if (drop) drop.style.display = arincVizDropActive ? "flex" : "none";
+    if (cards) cards.style.display = hasItems ? "grid" : "none";
+}
+
+function setArincVizDropActive(on) {
+    arincVizDropActive = !!on;
+    if (arincVizDropActive && !document.getElementById("plotArincRow")) {
+        rebuildPlotArea();
+        return;
+    }
+    if (!arincVizDropActive && graphList.length === 0 && arincVizItems.length === 0) {
+        rebuildPlotArea();
+        return;
+    }
+    syncArincVizRowVisibility();
+}
+
 /** Lote al soltar en gráfico: capado para no asignar miles de series (y sus historiales) de golpe. */
 function namesToAssignForGraphDrop(draggedName) {
     if (!draggedName) return [];
@@ -11915,12 +12131,24 @@ function handleNewGraphDrop(name, opts = {}) {
 }
 
 function ensureNewGraphDropTarget() {
+    setArincVizDropActive(true);
     plotArea.querySelectorAll(".plot-add-slot").forEach((slot) => {
-        slot.style.display = slot.dataset.addEnabled === "1" ? "flex" : "none";
+        if (slot.id === "plotArincDrop") {
+            slot.style.display = arincVizDropActive ? "flex" : "none";
+        } else {
+            slot.style.display = slot.dataset.addEnabled === "1" ? "flex" : "none";
+        }
     });
+    if (!plotArea._arincVizDropHooksBound) {
+        plotArea._arincVizDropHooksBound = true;
+        const hide = () => setArincVizDropActive(false);
+        window.addEventListener("dragend", hide);
+        window.addEventListener("drop", hide);
+    }
     if (!plotEmpty._dropZoneAttached) {
         plotEmpty._dropZoneAttached = true;
         plotEmpty.ondragover = (e) => {
+            if (document.getElementById("plotNoGraphDrop")) return;
             if (!e.dataTransfer) return;
             e.preventDefault();
             e.dataTransfer.dropEffect = "copy";
@@ -11929,16 +12157,19 @@ function ensureNewGraphDropTarget() {
             plotEmpty.textContent = (I18N[currentLang] || I18N.es).newGraphDropText;
         };
         plotEmpty.ondragleave = () => {
+            if (document.getElementById("plotNoGraphDrop")) return;
             plotEmpty.classList.remove("plot-add-over");
             if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
         };
         plotEmpty.ondrop = (e) => {
+            if (document.getElementById("plotNoGraphDrop")) return;
             if (!e.dataTransfer) return;
             e.preventDefault();
             plotEmpty.classList.remove("plot-add-over");
             if (plotEmpty.dataset.defaultText) plotEmpty.textContent = plotEmpty.dataset.defaultText;
             const name = e.dataTransfer.getData("text/plain");
             handleNewGraphDrop(name, { mode: "bottom", columnIndex: 0 });
+            setArincVizDropActive(false);
         };
     }
 }
@@ -11984,9 +12215,10 @@ function rebuildPlotArea() {
     const tr = I18N[currentLang] || I18N.es;
     const totalGraphs = graphList.length;
     const canAddMore = totalGraphs < MAX_GRAPHS;
+    const hasArincVizItems = arincVizItems.length > 0;
 
     // Sin gráficos: no insertar grid vacío (ocuparía flex:1 y dejaría plotEmpty a media altura).
-    if (totalGraphs === 0) {
+    if (totalGraphs === 0 && !hasArincVizItems && !arincVizDropActive) {
         if (toggleAdvancedPlotBtn && toggleAdvancedPlotBtn.parentElement !== plotArea) {
             plotArea.appendChild(toggleAdvancedPlotBtn);
         }
@@ -11997,6 +12229,79 @@ function rebuildPlotArea() {
     const grid = document.createElement("div");
     grid.id = "plotGrid";
     grid.className = "plot-grid";
+    const arincRow = document.createElement("div");
+    arincRow.id = "plotArincRow";
+    arincRow.className = "plot-arinc-row";
+    const arincHead = document.createElement("div");
+    arincHead.className = "plot-arinc-row-head";
+    arincHead.textContent = tr.arincVizRowTitle || "Representación ARINC";
+    arincRow.appendChild(arincHead);
+    const arincDrop = document.createElement("div");
+    arincDrop.id = "plotArincDrop";
+    arincDrop.className = "plot-add-slot plot-add-slot-arinc";
+    arincDrop.dataset.addEnabled = "1";
+    arincDrop.textContent = tr.arincVizDropText || "Representación ARINC: suelta una palabra aquí";
+    arincDrop.addEventListener("dragover", (e) => {
+        if (!e.dataTransfer) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        arincDrop.classList.add("plot-add-over");
+    });
+    arincDrop.addEventListener("dragleave", () => arincDrop.classList.remove("plot-add-over"));
+    arincDrop.addEventListener("drop", (e) => {
+        if (!e.dataTransfer) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        arincDrop.classList.remove("plot-add-over");
+        const dragged = e.dataTransfer.getData("text/plain");
+        addArincVizItem(dragged);
+        setArincVizDropActive(false);
+    });
+    arincRow.appendChild(arincDrop);
+    const arincCards = document.createElement("div");
+    arincCards.id = "plotArincCards";
+    arincCards.className = "plot-arinc-cards";
+    if (arincVizItems.length > 0) {
+        for (const n of arincVizItems) {
+            arincCards.appendChild(buildArincVizCard(n, tr));
+        }
+    }
+    arincRow.appendChild(arincCards);
+    grid.appendChild(arincRow);
+    syncArincVizRowVisibility();
+
+    if (totalGraphs === 0) {
+        const emptyDrop = document.createElement("div");
+        emptyDrop.id = "plotNoGraphDrop";
+        emptyDrop.className = "plot-add-slot plot-no-graph-drop";
+        emptyDrop.dataset.addEnabled = "1";
+        emptyDrop.textContent = tr.newGraphDropText || "Nuevo gráfico: suelta aquí para crear uno";
+        emptyDrop.addEventListener("dragover", (e) => {
+            if (!e.dataTransfer) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            emptyDrop.classList.add("plot-add-over");
+        });
+        emptyDrop.addEventListener("dragleave", () => emptyDrop.classList.remove("plot-add-over"));
+        emptyDrop.addEventListener("drop", (e) => {
+            if (!e.dataTransfer) return;
+            e.preventDefault();
+            emptyDrop.classList.remove("plot-add-over");
+            const name = e.dataTransfer.getData("text/plain");
+            handleNewGraphDrop(name, { mode: "bottom", columnIndex: 0 });
+            setArincVizDropActive(false);
+        });
+        grid.appendChild(emptyDrop);
+        plotArea.insertBefore(grid, plotEmpty);
+        refreshArincVizValues();
+        if (toggleAdvancedPlotBtn && toggleAdvancedPlotBtn.parentElement !== plotArea) {
+            plotArea.appendChild(toggleAdvancedPlotBtn);
+        }
+        if (plotEmpty) plotEmpty.style.display = "none";
+        return;
+    }
+
     const mainRow = document.createElement("div");
     mainRow.className = "plot-grid-main";
 
@@ -12160,6 +12465,7 @@ function rebuildPlotArea() {
     }
 
     plotArea.insertBefore(grid, plotEmpty);
+    refreshArincVizValues();
     if (toggleAdvancedPlotBtn && toggleAdvancedPlotBtn.parentElement !== plotArea) {
         plotArea.appendChild(toggleAdvancedPlotBtn);
     }
@@ -12653,7 +12959,8 @@ function renderPlots() {
         }
     }
 
-    plotEmpty.style.display = graphList.length > 0 ? "none" : "flex";
+    const hasNoGraphDrop = !!document.getElementById("plotNoGraphDrop");
+    plotEmpty.style.display = (graphList.length > 0 || hasNoGraphDrop) ? "none" : "flex";
     const elapsed = performance.now() - tRender0;
     const tracesCount = graphList.reduce((acc, gid) => acc + getVarsForGraph(gid).length, 0);
     let points = 0;
@@ -13005,6 +13312,12 @@ function onVarNames(names) {
         names = [...new Set([...names, ...offlineDataset.names])].sort();
     }
     const sorted = names.slice().sort();
+    const prunedArincViz = arincVizItems.filter((n) => sorted.includes(n));
+    if (prunedArincViz.length !== arincVizItems.length) {
+        arincVizItems = prunedArincViz;
+        saveConfig();
+        rebuildPlotArea();
+    }
     const key = sorted.join(",");
     const oldKey = baseKnownVarNames.join(",");
 

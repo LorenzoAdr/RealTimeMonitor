@@ -28,7 +28,7 @@
                         <option value="live">Live</option>
                         <option value="offline">Análisis</option>
                         <option value="replay">Replay</option>
-                        <option value="arinc_registry">Reg aviónica</option>
+                        <option value="arinc_registry">BD aviónica</option>
                     </select>
                 </label>
             </div>
@@ -65,6 +65,7 @@
             </div>
         </div>
         <div class="header-right">
+            <button id="arincDbLiveIndicator" class="btn-small arinc-db-live-indicator" type="button" title="BD ARINC">ARINC BD</button>
             <button id="docsBtn" class="btn-small" type="button" title="Documentación">Docs</button>
             <button id="logBtn" class="btn-small" type="button" title="Registro del servidor (Python y opcionalmente C++)">Log</button>
             <button id="perfBtn" class="btn-small" type="button" title="Rendimiento por fases (activa medición al abrir; también con estadísticas avanzadas)">Perf</button>
@@ -361,7 +362,7 @@
     </div>
 
     <main>
-        <section id="arincRegistryWorkspace" class="arinc-registry-workspace" aria-label="Reg aviónica">
+        <section id="arincRegistryWorkspace" class="arinc-registry-workspace" aria-label="BD aviónica">
             <div class="arinc-registry-inner">
                 <div id="arincDbStatusRow" class="arinc-db-status-row">
                     <span id="arincDbStatusBadge" class="arinc-db-status-badge arinc-db-status-badge-empty">No hay base de datos cargada</span>
@@ -377,7 +378,7 @@
                 <input type="file" id="arincDbLocalInput" accept=".sqlite,.db,application/vnd.sqlite3,application/octet-stream" style="display:none">
                 <div id="arincRegistryLoadedArea" class="arinc-registry-loaded-area" style="display:none">
                 <div class="arinc-registry-toolbar">
-                    <h2 id="arincRegistryTitle" class="arinc-registry-title">Reg aviónica</h2>
+                    <h2 id="arincRegistryTitle" class="arinc-registry-title">BD aviónica</h2>
                     <input type="search" id="arincRegistryFilter" class="arinc-registry-filter" placeholder="Filtrar por octal o nombre…">
                     <span id="arincRegistryCount" class="arinc-registry-count"></span>
                     <button type="button" id="arincRegistryImportBtn" class="btn-small">Importar CSV/XML…</button>
