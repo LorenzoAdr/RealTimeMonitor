@@ -11,8 +11,10 @@ import resource
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import math
@@ -40,12 +42,25 @@ from varmon_web.settings import (
     html_main_script_tag,
 )
 from varmon_web.paths import (
+    ARINC_DATA_DIR,
+    ARINC_SQLITE_PATH,
     AVIONICS_REGISTRY_PATH,
     BROWSER_ROOT,
     RECORDINGS_DIR,
     SESSIONS_DIR,
     STATE_ROOT_DIR,
     TEMPLATES_DIR,
+)
+from varmon_web.arinc_sqlite import (
+    activate_registry as sqlite_activate_registry,
+    create_registry as sqlite_create_registry,
+    ensure_db_schema as sqlite_ensure_db_schema,
+    get_active_registry as sqlite_get_active_registry,
+    import_database_file as sqlite_import_database_file,
+    list_registries as sqlite_list_registries,
+    load_active_labels as sqlite_load_active_labels,
+    save_active_labels as sqlite_save_active_labels,
+    unload_active_registry as sqlite_unload_active_registry,
 )
 from varmon_web.log_buffer import (
     _LOG_BUFFER,
@@ -611,6 +626,68 @@ _TIME_INDEX_LOCK = threading.Lock()
 
 def _ensure_recordings_dir():
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+def _ensure_arinc_data_dir():
+    os.makedirs(ARINC_DATA_DIR, exist_ok=True)
+
+
+def _ensure_arinc_sqlite():
+    _ensure_arinc_data_dir()
+    sqlite_ensure_db_schema(ARINC_SQLITE_PATH)
+
+
+def _arinc_db_status() -> dict:
+    _ensure_arinc_sqlite()
+    regs = sqlite_list_registries(ARINC_SQLITE_PATH)
+    active = sqlite_get_active_registry(ARINC_SQLITE_PATH)
+    return {
+        "loaded": bool(active),
+        "db_path": os.path.abspath(ARINC_SQLITE_PATH),
+        "registries": regs,
+        "active": active,
+    }
+
+
+def _safe_arinc_registry_filename(name: str) -> str | None:
+    base = os.path.basename(str(name or "").strip())
+    if not base.lower().endswith(".json"):
+        return None
+    if base in (".", "..") or ".." in base or "/" in base or "\\" in base:
+        return None
+    return base
+
+
+def _arinc_registry_path(name: str) -> str | None:
+    safe = _safe_arinc_registry_filename(name)
+    if not safe:
+        return None
+    return os.path.abspath(os.path.join(ARINC_DATA_DIR, safe))
+
+
+def _list_arinc_registry_files() -> list[dict]:
+    _ensure_arinc_data_dir()
+    out: list[dict] = []
+    try:
+        names = sorted(
+            f for f in os.listdir(ARINC_DATA_DIR) if f.lower().endswith(".json") and not f.startswith(".")
+        )
+    except OSError:
+        return out
+    for fn in names:
+        path = os.path.join(ARINC_DATA_DIR, fn)
+        try:
+            st = os.stat(path)
+            out.append(
+                {
+                    "filename": fn,
+                    "size": int(st.st_size),
+                    "mtime": int(st.st_mtime),
+                }
+            )
+        except OSError:
+            continue
+    return out
 
 
 # Ruta absoluta al JSON de perf del sidecar (una línea). HTTP /api/perf no comparte memoria con el WebSocket
@@ -2506,6 +2583,7 @@ async def api_admin_storage():
             "config_file": CONFIG_ABS_PATH,
             "recordings_dir": os.path.abspath(RECORDINGS_DIR),
             "server_state_dir": os.path.abspath(STATE_ROOT_DIR),
+            "arinc_data_dir": os.path.abspath(ARINC_DATA_DIR),
             "templates_dir": os.path.abspath(TEMPLATES_DIR),
             "sessions_dir": os.path.abspath(SESSIONS_DIR),
             "avionics_registry_path": os.path.abspath(AVIONICS_REGISTRY_PATH),
@@ -2618,12 +2696,157 @@ def _write_avionics_registry_file(payload: dict) -> str:
     return AVIONICS_REGISTRY_PATH
 
 
+@app.get("/api/arinc_db/status")
+async def api_arinc_db_status():
+    try:
+        data = await asyncio.to_thread(_arinc_db_status)
+        return data
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/arinc_db/create")
+async def api_arinc_db_create(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Body JSON inválido"}, status_code=400)
+    name = str((body or {}).get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "Nombre requerido"}, status_code=400)
+    try:
+        _ensure_arinc_sqlite()
+        created = await asyncio.to_thread(sqlite_create_registry, ARINC_SQLITE_PATH, name, True)
+        return {"ok": True, "registry": created, "status": await asyncio.to_thread(_arinc_db_status)}
+    except sqlite3.IntegrityError:
+        return JSONResponse({"error": "Ya existe una base con ese nombre"}, status_code=409)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/arinc_db/activate")
+async def api_arinc_db_activate(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Body JSON inválido"}, status_code=400)
+    rid = (body or {}).get("registry_id")
+    name = (body or {}).get("name")
+    try:
+        _ensure_arinc_sqlite()
+        reg = await asyncio.to_thread(sqlite_activate_registry, ARINC_SQLITE_PATH, rid, name)
+        return {"ok": True, "active": reg}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/arinc_db/unload")
+async def api_arinc_db_unload():
+    try:
+        _ensure_arinc_sqlite()
+        await asyncio.to_thread(sqlite_unload_active_registry, ARINC_SQLITE_PATH)
+        return {"ok": True, "status": await asyncio.to_thread(_arinc_db_status)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/arinc_db/import_server")
+async def api_arinc_db_import_server(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Body JSON inválido"}, status_code=400)
+    rel = str((body or {}).get("path") or "").strip()
+    if not rel:
+        return JSONResponse({"error": "Ruta requerida"}, status_code=400)
+    src = _resolve_browse_path(rel)
+    if src is None or not src.is_file():
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    low = src.name.lower()
+    if not (low.endswith(".sqlite") or low.endswith(".db")):
+        return JSONResponse({"error": "Extensión no válida (use .sqlite o .db)"}, status_code=400)
+    try:
+        _ensure_arinc_sqlite()
+        await asyncio.to_thread(sqlite_import_database_file, str(src), ARINC_SQLITE_PATH)
+        return {"ok": True, "status": await asyncio.to_thread(_arinc_db_status)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/arinc_db/import_local")
+async def api_arinc_db_import_local(file: UploadFile = File(...)):
+    filename = str(file.filename or "").strip()
+    low = filename.lower()
+    if not (low.endswith(".sqlite") or low.endswith(".db")):
+        return JSONResponse({"error": "Extensión no válida (use .sqlite o .db)"}, status_code=400)
+    tmp_path = None
+    try:
+        _ensure_arinc_sqlite()
+        with tempfile.NamedTemporaryFile(prefix="arinc_import_", suffix=".sqlite", delete=False) as tmp:
+            tmp_path = tmp.name
+            raw = await file.read()
+            tmp.write(raw)
+        await asyncio.to_thread(sqlite_import_database_file, tmp_path, ARINC_SQLITE_PATH)
+        return {"ok": True, "status": await asyncio.to_thread(_arinc_db_status)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+@app.get("/api/arinc_registry/active")
+async def api_arinc_registry_active_get():
+    try:
+        _ensure_arinc_sqlite()
+        active = await asyncio.to_thread(sqlite_get_active_registry, ARINC_SQLITE_PATH)
+        if not active:
+            return JSONResponse({"error": "No hay base activa"}, status_code=404)
+        labels = await asyncio.to_thread(sqlite_load_active_labels, ARINC_SQLITE_PATH)
+        return {"version": 1, "registry": active, "labels": labels}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/arinc_registry/active")
+async def api_arinc_registry_active_put(request: Request):
+    try:
+        body = await request.json()
+        labels = (body or {}).get("labels")
+        if not isinstance(labels, dict):
+            return JSONResponse({"error": "Se requiere objeto labels"}, status_code=400)
+        _ensure_arinc_sqlite()
+        result = await asyncio.to_thread(sqlite_save_active_labels, ARINC_SQLITE_PATH, labels)
+        active = await asyncio.to_thread(sqlite_get_active_registry, ARINC_SQLITE_PATH)
+        return {"ok": True, "saved": result, "registry": active}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/avionics_registry")
 async def api_avionics_registry_get():
-    """JSON del registro aviónica en server_state (si existe)."""
+    """JSON del registro por defecto: arinc_data/default.json, o legado server_state/avionics_registry.json."""
     _ensure_state_dirs()
+    _ensure_arinc_data_dir()
+
+    def _read_default():
+        p = os.path.join(ARINC_DATA_DIR, "default.json")
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        return _read_avionics_registry_file()
+
     try:
-        data = await asyncio.to_thread(_read_avionics_registry_file)
+        data = await asyncio.to_thread(_read_default)
         if data is None:
             return {"version": 1, "labels": {}, "missing": True}
         if not isinstance(data, dict):
@@ -2635,8 +2858,9 @@ async def api_avionics_registry_get():
 
 @app.put("/api/avionics_registry")
 async def api_avionics_registry_put(request: Request):
-    """Guarda registro en disco (mismo esquema que exporta el cliente: version + labels)."""
+    """Guarda el registro en arinc_data/default.json (compat.: antes server_state/avionics_registry.json)."""
     _ensure_state_dirs()
+    _ensure_arinc_data_dir()
     try:
         body = await request.json()
         labels = body.get("labels")
@@ -2652,8 +2876,101 @@ async def api_avionics_registry_put(request: Request):
             "labels": labels,
             "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        path = await asyncio.to_thread(_write_avionics_registry_file, out)
+        path = os.path.join(ARINC_DATA_DIR, "default.json")
+
+        def _write():
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, indent=2)
+
+        await asyncio.to_thread(_write)
         return {"ok": True, "path": os.path.abspath(path)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/arinc_registries")
+async def api_arinc_registries_list():
+    """Lista ficheros JSON en arinc_data/ (registros nombrados)."""
+    try:
+        rows = await asyncio.to_thread(_list_arinc_registry_files)
+        return {"files": rows}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/arinc_registries/{filename}")
+async def api_arinc_registry_get_one(filename: str):
+    """Lee un registro por nombre de fichero (solo .json bajo arinc_data/)."""
+    path = _arinc_registry_path(filename)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    root = os.path.abspath(ARINC_DATA_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "No existe"}, status_code=404)
+    try:
+
+        def _read():
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+
+        data = await asyncio.to_thread(_read)
+        if not isinstance(data, dict):
+            return JSONResponse({"error": "JSON inválido"}, status_code=500)
+        return data
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/arinc_registries/{filename}")
+async def api_arinc_registry_put_one(filename: str, request: Request):
+    """Guarda labels en arinc_data/{filename}."""
+    path = _arinc_registry_path(filename)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    root = os.path.abspath(ARINC_DATA_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    _ensure_arinc_data_dir()
+    try:
+        body = await request.json()
+        labels = body.get("labels")
+        if not isinstance(labels, dict):
+            return JSONResponse({"error": "Se requiere objeto labels"}, status_code=400)
+        ver = body.get("version", 1)
+        try:
+            version = int(ver)
+        except (TypeError, ValueError):
+            version = 1
+        out = {
+            "version": version,
+            "labels": labels,
+            "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        def _write():
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, indent=2)
+
+        await asyncio.to_thread(_write)
+        return {"ok": True, "path": os.path.abspath(path)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/arinc_registries/{filename}")
+async def api_arinc_registry_delete_one(filename: str):
+    path = _arinc_registry_path(filename)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    root = os.path.abspath(ARINC_DATA_DIR)
+    if not path.startswith(root + os.sep):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    try:
+        if os.path.isfile(path):
+            await asyncio.to_thread(os.remove, path)
+        return {"ok": True}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

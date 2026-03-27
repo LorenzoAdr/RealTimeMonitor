@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VarMonitor</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/static/style.css?v=27">
+    <link rel="stylesheet" href="/static/style.css?v=30">
 </head>
 <body class="theme-light">
     <div id="authOverlay" class="auth-overlay" style="display:none">
@@ -363,42 +363,54 @@
     <main>
         <section id="arincRegistryWorkspace" class="arinc-registry-workspace" aria-label="Reg aviónica">
             <div class="arinc-registry-inner">
+                <div id="arincDbStatusRow" class="arinc-db-status-row">
+                    <span id="arincDbStatusBadge" class="arinc-db-status-badge arinc-db-status-badge-empty">No hay base de datos cargada</span>
+                    <button type="button" id="arincDbImportBtn" class="btn-small">Importar base de datos</button>
+                    <button type="button" id="arincDbCreateBtn" class="btn-small">Crear nueva</button>
+                    <button type="button" id="arincDbUnloadBtn" class="btn-small btn-danger">Unload BD</button>
+                </div>
+                <div id="arincDbImportMenu" class="arinc-db-import-menu" style="display:none">
+                    <button type="button" id="arincDbImportServerBtn" class="btn-small btn-folder" title="Importar .sqlite/.db desde servidor">&#128193; Servidor</button>
+                    <button type="button" id="arincDbImportLocalBtn" class="btn-small">Local</button>
+                    <button type="button" id="arincDbImportCancelBtn" class="btn-small">Cancelar</button>
+                </div>
+                <input type="file" id="arincDbLocalInput" accept=".sqlite,.db,application/vnd.sqlite3,application/octet-stream" style="display:none">
+                <div id="arincRegistryLoadedArea" class="arinc-registry-loaded-area" style="display:none">
                 <div class="arinc-registry-toolbar">
                     <h2 id="arincRegistryTitle" class="arinc-registry-title">Reg aviónica</h2>
                     <input type="search" id="arincRegistryFilter" class="arinc-registry-filter" placeholder="Filtrar por octal o nombre…">
                     <span id="arincRegistryCount" class="arinc-registry-count"></span>
-                    <span id="arincRegistrySortLabel" class="arinc-registry-sort-label">Orden:</span>
-                    <button type="button" id="arincRegistrySortOctBtn" class="btn-small">Por label (oct)</button>
-                    <button type="button" id="arincRegistrySortNameBtn" class="btn-small">Por nombre</button>
-                    <button type="button" id="arincRegistrySortEncBtn" class="btn-small">Por codificación</button>
-                    <button type="button" id="arincRegistryAddBtn" class="btn-small">Añadir entrada</button>
                     <button type="button" id="arincRegistryImportBtn" class="btn-small">Importar CSV/XML…</button>
-                    <button type="button" id="arincRegistryImportJsonBtn" class="btn-small">Importar JSON…</button>
-                    <button type="button" id="arincRegistryExportBtn" class="btn-small">Descargar JSON (navegador)</button>
-                    <button type="button" id="arincRegistryExportServerBtn" class="btn-small">Guardar en servidor</button>
-                    <button type="button" id="arincRegistryLoadServerBtn" class="btn-small">Cargar del servidor</button>
                     <button type="button" id="arincRegistryTemplateBtn" class="btn-small">Plantilla CSV</button>
-                    <label class="arinc-registry-check"><input type="checkbox" id="arincRegistryExportBuiltins"> <span id="arincRegistryExportBuiltinsLabel">Incluir demos integradas</span></label>
+                    <button type="button" id="arincRegistrySaveDbBtn" class="btn-small">Guardar BD</button>
                     <button type="button" id="arincRegistryClearBtn" class="btn-small btn-danger">Vaciar registro</button>
                 </div>
+                <div class="arinc-registry-server-row" id="arincRegistryServerRow"></div>
                 <input type="file" id="arincRegistryFileInput" accept=".csv,.tsv,.txt,.xml,text/csv,application/xml,text/xml" style="display:none">
                 <input type="file" id="arincRegistryJsonInput" accept=".json,application/json" style="display:none">
                 <div class="arinc-registry-table-wrap">
                     <table class="arinc-registry-table" id="arincRegistryTable">
                         <thead>
                             <tr>
-                                <th>Label (oct)</th>
-                                <th>Nombre</th>
-                                <th>Enc</th>
+                                <th>Grupo</th>
+                                <th>Label <button type="button" id="arincRegistrySortOctBtn" class="arinc-sort-header-btn" title="Ordenar por label">▿</button></th>
+                                <th>Nombre <button type="button" id="arincRegistrySortNameBtn" class="arinc-sort-header-btn" title="Ordenar por nombre">▿</button></th>
+                                <th>Enc <button type="button" id="arincRegistrySortEncBtn" class="arinc-sort-header-btn" title="Ordenar por codificación">▿</button></th>
                                 <th>Bits</th>
                                 <th>LSB</th>
-                                <th>Unidades</th>
+                                <th>Scale</th>
+                                <th>Signed</th>
+                                <th>Units</th>
+                                <th>Min</th>
+                                <th>Max</th>
+                                <th>SSM</th>
                                 <th>DIS bits</th>
                                 <th id="arincRegistryThActions"></th>
                             </tr>
                         </thead>
                         <tbody id="arincRegistryTableBody"></tbody>
                     </table>
+                </div>
                 </div>
             </div>
         </section>
@@ -559,29 +571,43 @@
                     <label><input type="radio" name="arincImportMode" value="labels" checked> <span id="arincImportModeLabels">Una fila por label</span></label>
                     <label><input type="radio" name="arincImportMode" value="dis_bits"> <span id="arincImportModeDis">Filas DIS (bit índice + nombre)</span></label>
                 </div>
-                <div id="arincImportMappingScroll" class="arinc-import-mapping-scroll"></div>
-                <div id="arincImportRowPreviewWrap" class="arinc-import-row-preview-wrap" style="display:none">
-                    <h3 class="arinc-preview-title" id="arincImportRowPreviewTitle">Clasificación por filas</h3>
-                    <p id="arincImportRowPreviewNote" class="arinc-import-row-preview-note" aria-live="polite"></p>
-                    <div class="arinc-import-row-preview-scroll">
-                        <table class="arinc-import-row-preview-table">
-                            <thead>
-                                <tr>
-                                    <th>#</th>
-                                    <th id="arincImportRowPreviewThKind">Tipo de fila</th>
-                                    <th id="arincImportRowPreviewThData">Columnas (recorte)</th>
-                                </tr>
-                            </thead>
-                            <tbody id="arincImportRowPreviewBody"></tbody>
-                        </table>
-                    </div>
+                <div class="arinc-import-group-row" id="arincImportGroupRow">
+                    <label>
+                        <span id="arincImportTargetGroupLabel">Grupo destino</span>
+                        <input type="text" id="arincImportTargetGroupInput" class="arinc-import-target-group-input" placeholder="General">
+                    </label>
                 </div>
-                <div id="arincImportConflictBlock" class="arinc-import-conflict-block" style="display:none" role="status">
-                    <p id="arincImportConflictMsg" class="arinc-import-conflict-msg"></p>
-                    <ul id="arincImportConflictList" class="arinc-import-conflict-list"></ul>
-                    <div class="arinc-import-conflict-opts">
-                        <label class="arinc-import-dup-label"><input type="radio" name="arincImportDupPolicy" value="skip" checked> <span id="arincImportDupSkipLabel"></span></label>
-                        <label class="arinc-import-dup-label"><input type="radio" name="arincImportDupPolicy" value="overwrite"> <span id="arincImportDupOverwriteLabel"></span></label>
+                <div class="arinc-import-split">
+                    <div class="arinc-import-left-col">
+                        <h3 class="arinc-preview-title" id="arincImportMappingTitle">Mapeo de columnas</h3>
+                        <div id="arincImportMappingScroll" class="arinc-import-mapping-scroll"></div>
+                    </div>
+                    <div class="arinc-import-right-col">
+                        <div id="arincImportRowPreviewWrap" class="arinc-import-row-preview-wrap" style="display:none">
+                            <h3 class="arinc-preview-title" id="arincImportRowPreviewTitle">Clasificación por filas</h3>
+                            <p id="arincImportRowPreviewNote" class="arinc-import-row-preview-note" aria-live="polite"></p>
+                            <div class="arinc-import-row-preview-scroll">
+                                <table class="arinc-import-row-preview-table">
+                                    <thead>
+                                        <tr id="arincImportRowPreviewHeadRow">
+                                            <th>#</th>
+                                            <th id="arincImportRowPreviewThKind">Tipo de fila</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="arincImportRowPreviewBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arinc-import-third-col">
+                        <div id="arincImportConflictBlock" class="arinc-import-conflict-block" style="display:none" role="status">
+                            <p id="arincImportConflictMsg" class="arinc-import-conflict-msg"></p>
+                            <ul id="arincImportConflictList" class="arinc-import-conflict-list"></ul>
+                            <div class="arinc-import-conflict-opts">
+                                <label class="arinc-import-dup-label"><input type="radio" name="arincImportDupPolicy" value="skip" checked> <span id="arincImportDupSkipLabel"></span></label>
+                                <label class="arinc-import-dup-label"><input type="radio" name="arincImportDupPolicy" value="overwrite"> <span id="arincImportDupOverwriteLabel"></span></label>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="arinc-json-merge-row" id="arincJsonMergeRow" style="display:none">
@@ -593,67 +619,6 @@
                 <div class="help-actions arinc-import-actions">
                     <button type="button" id="arincImportConfirmBtn" class="btn-primary">Confirmar importación</button>
                     <button type="button" id="arincImportCancelBtn" class="btn-small">Cancelar</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="arincEntryEditOverlay" class="help-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="arincEntryEditTitle">
-        <div class="help-modal arinc-entry-edit-modal">
-            <div class="help-modal-header">
-                <h2 id="arincEntryEditTitle">Editar etiqueta</h2>
-                <button type="button" id="arincEntryEditCloseBtn" class="help-close" aria-label="Cerrar">&times;</button>
-            </div>
-            <div class="arinc-entry-edit-body">
-                <div class="arinc-edit-field">
-                    <label for="arincEditLabelOct"><span id="arincEditLabelOctLabel">Label (octal)</span></label>
-                    <input id="arincEditLabelOct" type="text" autocomplete="off" maxlength="12">
-                </div>
-                <div class="arinc-edit-field">
-                    <label for="arincEditName"><span id="arincEditNameLabel">Nombre señal</span></label>
-                    <input id="arincEditName" type="text" autocomplete="off">
-                </div>
-                <div class="arinc-edit-field">
-                    <label for="arincEditEncoding"><span id="arincEditEncodingLabel">Codificación</span></label>
-                    <select id="arincEditEncoding">
-                        <option value="bnr">bnr</option>
-                        <option value="bcd">bcd</option>
-                        <option value="discrete">discrete</option>
-                    </select>
-                </div>
-                <div class="arinc-edit-field arinc-edit-field-inline">
-                    <label for="arincEditBits"><span id="arincEditBitsLabel">Bits datos</span></label>
-                    <input id="arincEditBits" type="text" inputmode="numeric" class="arinc-edit-input-narrow">
-                    <label for="arincEditLsb"><span id="arincEditLsbLabel">LSB</span></label>
-                    <input id="arincEditLsb" type="text" inputmode="decimal" class="arinc-edit-input-narrow">
-                    <label for="arincEditScale"><span id="arincEditScaleLabel">Escala</span></label>
-                    <input id="arincEditScale" type="text" inputmode="decimal" class="arinc-edit-input-narrow">
-                </div>
-                <div class="arinc-edit-field arinc-edit-field-check">
-                    <label><input type="checkbox" id="arincEditSigned"> <span id="arincEditSignedLabel">Con signo</span></label>
-                </div>
-                <div class="arinc-edit-field">
-                    <label for="arincEditUnits"><span id="arincEditUnitsLabel">Unidades</span></label>
-                    <input id="arincEditUnits" type="text" autocomplete="off">
-                </div>
-                <div class="arinc-edit-field arinc-edit-field-inline">
-                    <label for="arincEditMin"><span id="arincEditMinLabel">Mínimo</span></label>
-                    <input id="arincEditMin" type="text" inputmode="decimal" class="arinc-edit-input-narrow">
-                    <label for="arincEditMax"><span id="arincEditMaxLabel">Máximo</span></label>
-                    <input id="arincEditMax" type="text" inputmode="decimal" class="arinc-edit-input-narrow">
-                </div>
-                <div class="arinc-edit-field">
-                    <label for="arincEditSsm"><span id="arincEditSsmLabel">SSM</span></label>
-                    <input id="arincEditSsm" type="text" autocomplete="off" placeholder="0,3">
-                </div>
-                <div class="arinc-edit-field">
-                    <label for="arincEditDiscreteLines"><span id="arincEditDiscreteLabel">Bits DIS</span></label>
-                    <textarea id="arincEditDiscreteLines" rows="5" spellcheck="false" placeholder="0:WOW"></textarea>
-                    <p id="arincEditDiscreteHint" class="arinc-edit-hint"></p>
-                </div>
-                <div class="help-actions arinc-entry-edit-actions">
-                    <button type="button" id="arincEntryEditSaveBtn" class="btn-primary">Guardar</button>
-                    <button type="button" id="arincEntryEditCancelBtn" class="btn-small">Cancelar</button>
                 </div>
             </div>
         </div>

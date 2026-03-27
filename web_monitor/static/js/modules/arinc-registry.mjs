@@ -7,8 +7,8 @@ export const ARINC_REGISTRY_VERSION = 1;
 
 /** Plantilla mínima para importación (una fila por label). */
 export const ARINC_CSV_TEMPLATE =
-    "label_oct,name,encoding,bits,lsb,scale,signed,units,min,max,ssm\n" +
-    '310,IAS_EXAMPLE,bnr,19,,1,false,kt,0,450,"0,3"\n';
+    "group_name,label_oct,name,encoding,bits,lsb,scale,signed,units,min,max,ssm\n" +
+    'General,310,IAS_EXAMPLE,bnr,19,,1,false,kt,0,450,"0,3"\n';
 
 /** Definiciones demo integradas (mismo contrato que el registro de usuario). */
 export const ARINC_BUILTIN_LABEL_DEFS = {
@@ -24,6 +24,7 @@ export const ARINC_IMPORT_FIELD_IDS = [
     { id: "label_oct", key: "label_oct", labelEs: "Label (octal)", labelEn: "Label (octal)" },
     { id: "label_hex", key: "label_hex", labelEs: "Label (hexadecimal)", labelEn: "Label (hex)" },
     { id: "label_dec", key: "label_dec", labelEs: "Label (decimal)", labelEn: "Label (decimal)" },
+    { id: "group_name", key: "group_name", labelEs: "Grupo", labelEn: "Group" },
     { id: "name", key: "name", labelEs: "Nombre señal", labelEn: "Signal name" },
     { id: "encoding", key: "encoding", labelEs: "Codificación (bnr/bcd/dis)", labelEn: "Encoding" },
     { id: "bits", key: "bits", labelEs: "Bits de datos", labelEn: "Data bits" },
@@ -122,8 +123,12 @@ export function normalizeLabelEntry(raw) {
         .sort((a, b) => a.index - b.index);
 
     const name = String(raw.name || "").trim() || "UNNAMED";
+    const group = String(raw.group || raw.group_name || "").trim() || "General";
+    const labelOct = labelOctFromCell(raw.labelOct ?? raw.label_oct ?? raw.oct ?? "", "oct");
 
     return {
+        group,
+        labelOct: labelOct || null,
         name,
         encoding: enc,
         bits,
@@ -139,7 +144,16 @@ export function normalizeLabelEntry(raw) {
 }
 
 export function getArincLabelDef(userRegistry, labelOct) {
-    const u = userRegistry && typeof userRegistry === "object" ? userRegistry[labelOct] : null;
+    let u = userRegistry && typeof userRegistry === "object" ? userRegistry[labelOct] : null;
+    if (!u && userRegistry && typeof userRegistry === "object") {
+        const suffix = `::${labelOct}`;
+        for (const [k, v] of Object.entries(userRegistry)) {
+            if (k.endsWith(suffix)) {
+                u = v;
+                break;
+            }
+        }
+    }
     const b = ARINC_BUILTIN_LABEL_DEFS[labelOct];
     const base = {
         ...ARINC_BUILTIN_LABEL_DEFS.default,
@@ -150,7 +164,14 @@ export function getArincLabelDef(userRegistry, labelOct) {
 }
 
 export function isArincLabelKnown(userRegistry, labelOct) {
-    return !!((userRegistry && userRegistry[labelOct]) || ARINC_BUILTIN_LABEL_DEFS[labelOct]);
+    if (userRegistry && userRegistry[labelOct]) return true;
+    if (userRegistry && typeof userRegistry === "object") {
+        const suffix = `::${labelOct}`;
+        for (const k of Object.keys(userRegistry)) {
+            if (k.endsWith(suffix)) return true;
+        }
+    }
+    return !!ARINC_BUILTIN_LABEL_DEFS[labelOct];
 }
 
 /** Normaliza el objeto raíz de un JSON de registro (p. ej. respuesta GET /api/avionics_registry). */
@@ -160,15 +181,36 @@ export function registryFromLabelsRoot(data) {
     if (v != null && Number(v) > ARINC_REGISTRY_VERSION) {
         throw new Error(`Versión de registro no soportada: ${v}`);
     }
-    const labels = data.labels && typeof data.labels === "object" ? data.labels : data;
+    const hasLabelsKey = Object.prototype.hasOwnProperty.call(data, "labels");
+    let labels;
+    if (hasLabelsKey) {
+        const raw = data.labels;
+        if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
+            labels = raw;
+        } else {
+            labels = {};
+        }
+    } else if (!("version" in data) && !("savedAt" in data) && !("missing" in data)) {
+        /* JSON antiguo / exportación: raíz = mapa de labels */
+        labels = data;
+    } else {
+        /* Envoltorio API sin labels (p. ej. solo metadatos): no tratar version/savedAt como etiquetas */
+        labels = {};
+    }
     if (typeof labels !== "object" || labels === null) throw new Error("JSON sin objeto labels");
     const out = {};
     for (const [k, raw] of Object.entries(labels)) {
-        if (k === "default") continue;
-        const oct = labelOctFromCell(k, "oct") || (k.length === 3 && /^[0-7]+$/.test(k) ? k : null);
+        if (k === "default" || k === "version" || k === "savedAt" || k === "missing" || k === "registryVersion") continue;
+        const composite = /^(.+)::([0-7]{3})$/.exec(k);
+        const oct = labelOctFromCell(raw && raw.labelOct != null ? raw.labelOct : k, "oct")
+            || (composite ? composite[2] : null)
+            || (k.length === 3 && /^[0-7]+$/.test(k) ? k : null);
         if (!oct) continue;
-        const n = normalizeLabelEntry({ ...raw, name: raw.name || k });
-        if (n) out[oct] = n;
+        const group = String((raw && (raw.group || raw.group_name)) || (composite ? composite[1] : "General")).trim() || "General";
+        const n = normalizeLabelEntry({ ...raw, labelOct: oct, group, name: raw.name || k });
+        if (!n) continue;
+        const outKey = composite ? `${group}::${oct}` : (group === "General" ? oct : `${group}::${oct}`);
+        out[outKey] = n;
     }
     return out;
 }
@@ -353,6 +395,7 @@ export function buildRegistryFromMappedRows(headers, rows, mapping, importMode, 
         const out = {};
         for (const [oct, bits] of Object.entries(bitsByLabel)) {
             out[oct] = normalizeLabelEntry({
+                group: "General",
                 name: `DIS_${oct}`,
                 encoding: "discrete",
                 bits: 19,
@@ -367,6 +410,7 @@ export function buildRegistryFromMappedRows(headers, rows, mapping, importMode, 
         const oct = labelOctFromRow(row);
         if (!oct) continue;
         const partial = {};
+        if (inv.group_name) partial.group = rowGet(row, inv.group_name);
         if (inv.name) partial.name = rowGet(row, inv.name);
         if (inv.encoding) partial.encoding = rowGet(row, inv.encoding);
         if (inv.bits) partial.bits = rowGet(row, inv.bits);
@@ -389,6 +433,7 @@ export function guessMappingFromHeaders(headers, savedMap) {
         { id: "label_oct", keys: ["label_oct", "octal", "oct_label", "label_o", "l_oct", "lbl_oct"] },
         { id: "label_hex", keys: ["label_hex", "label_h"] },
         { id: "label_dec", keys: ["label_dec", "lbl_dec"] },
+        { id: "group_name", keys: ["group", "group_name", "grupo", "grupo_nombre", "category"] },
         { id: "name", keys: ["name", "nombre", "signal", "signal_name", "parametro", "parameter"] },
         { id: "encoding", keys: ["encoding", "codificacion", "codificación", "enc", "type"] },
         { id: "bits", keys: ["bits", "nbits", "n_bits"] },

@@ -25,8 +25,8 @@ def _install_dir() -> str | None:
     return None
 
 
-def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
-    """Grabaciones y server_state: desarrollo → web_monitor/…; frozen → INSTALL_DIR/data/… salvo override."""
+def _resolve_data_layout(cfg: dict) -> tuple[str, str, str]:
+    """Grabaciones, server_state y arinc_data (registros aviónica nombrados, hermano de recordings)."""
     cfg_dir = os.path.dirname(os.path.abspath(CONFIG_ABS_PATH)) if CONFIG_ABS_PATH else _repo_root()
     inst = _install_dir()
     env_data = (os.environ.get("VARMON_DATA_DIR") or "").strip()
@@ -45,8 +45,12 @@ def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
     rec = norm(rec_key, cfg_dir) if rec_key else ""
     st = norm(st_key, cfg_dir) if st_key else ""
 
+    def with_arinc(rec_dir: str, state_dir: str) -> tuple[str, str, str]:
+        arinc = os.path.join(os.path.dirname(os.path.abspath(rec_dir)), "arinc_data")
+        return rec_dir, state_dir, arinc
+
     if rec and st:
-        return rec, st
+        return with_arinc(rec, st)
 
     if env_data:
         root = os.path.abspath(os.path.expanduser(env_data))
@@ -54,7 +58,7 @@ def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
             rec = os.path.join(root, "recordings")
         if not st:
             st = os.path.join(root, "server_state")
-        return rec, st
+        return with_arinc(rec, st)
 
     if data_root_key:
         root = norm(data_root_key, cfg_dir)
@@ -62,7 +66,7 @@ def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
             rec = os.path.join(root, "recordings")
         if not st:
             st = os.path.join(root, "server_state")
-        return rec, st
+        return with_arinc(rec, st)
 
     if inst:
         root = os.path.join(inst, "data")
@@ -70,25 +74,27 @@ def _resolve_data_layout(cfg: dict) -> tuple[str, str]:
             rec = os.path.join(root, "recordings")
         if not st:
             st = os.path.join(root, "server_state")
-        return rec, st
+        return with_arinc(rec, st)
 
     wm = web_monitor_dir()
     if not rec:
         rec = os.path.join(wm, "recordings")
     if not st:
         st = os.path.join(wm, "server_state")
-    return rec, st
+    return with_arinc(rec, st)
 
 
-RECORDINGS_DIR, STATE_ROOT_DIR = _resolve_data_layout(CONFIG)
+RECORDINGS_DIR, STATE_ROOT_DIR, ARINC_DATA_DIR = _resolve_data_layout(CONFIG)
 _inst = _install_dir()
 BROWSER_ROOT = Path(_inst) if _inst else Path(__file__).resolve().parent.parent.parent
 TEMPLATES_DIR = os.path.join(STATE_ROOT_DIR, "templates")
 SESSIONS_DIR = os.path.join(STATE_ROOT_DIR, "sessions")
-# Registro aviónica importado (JSON); el cliente puede guardar/cargar vía API.
+ARINC_SQLITE_PATH = os.path.join(ARINC_DATA_DIR, "arinc_registry.sqlite")
+# Compat: registro único antiguo en server_state (migrar a ARINC_DATA_DIR).
 AVIONICS_REGISTRY_PATH = os.path.join(STATE_ROOT_DIR, "avionics_registry.json")
 
 print(
-    f"[VarMonitor Web] Rutas datos: recordings={os.path.abspath(RECORDINGS_DIR)} | state={os.path.abspath(STATE_ROOT_DIR)}",
+    f"[VarMonitor Web] Rutas datos: recordings={os.path.abspath(RECORDINGS_DIR)} | "
+    f"state={os.path.abspath(STATE_ROOT_DIR)} | arinc_data={os.path.abspath(ARINC_DATA_DIR)}",
     flush=True,
 )

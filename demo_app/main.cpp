@@ -7,10 +7,64 @@
 #include <chrono>
 #include <random>
 #include <mutex>
+#include <cstdint>
 
 static std::atomic<bool> g_running{true};
 
 void signal_handler(int) { g_running = false; }
+
+static uint8_t reverse_bits8(uint8_t x) {
+    uint8_t r = 0;
+    for (int i = 0; i < 8; ++i) {
+        r = static_cast<uint8_t>((r << 1) | (x & 1));
+        x >>= 1;
+    }
+    return r;
+}
+
+static uint32_t apply_odd_parity(uint32_t word_31_bits) {
+    uint32_t v = word_31_bits & 0x7FFFFFFFu; // sin bit de paridad
+    unsigned ones = 0;
+    for (uint32_t x = v; x; x &= (x - 1)) ++ones;
+    // Paridad impar total incluyendo bit 31.
+    if ((ones % 2u) == 0u) {
+        v |= 0x80000000u;
+    }
+    return v;
+}
+
+static uint32_t make_arinc429_word(uint8_t label_dec, uint32_t data19, uint8_t ssm, uint8_t sdi = 0) {
+    uint32_t word = 0;
+    const uint8_t raw_label = reverse_bits8(label_dec);
+    word |= static_cast<uint32_t>(raw_label);
+    word |= (static_cast<uint32_t>(sdi & 0x3u) << 8);
+    word |= ((data19 & 0x7FFFFu) << 10);
+    word |= (static_cast<uint32_t>(ssm & 0x3u) << 29);
+    return apply_odd_parity(word);
+}
+
+static uint32_t encode_bnr_unsigned(double value) {
+    long v = std::lround(value);
+    if (v < 0) v = 0;
+    if (v > 0x7FFFF) v = 0x7FFFF;
+    return static_cast<uint32_t>(v);
+}
+
+static uint32_t encode_bnr_signed(double value) {
+    long v = std::lround(value);
+    if (v < -(1 << 18)) v = -(1 << 18);
+    if (v > ((1 << 18) - 1)) v = (1 << 18) - 1;
+    return static_cast<uint32_t>(v) & 0x7FFFFu;
+}
+
+static uint32_t encode_bcd_4digits(unsigned value) {
+    value %= 10000u;
+    const unsigned d0 = value % 10u;
+    const unsigned d1 = (value / 10u) % 10u;
+    const unsigned d2 = (value / 100u) % 10u;
+    const unsigned d3 = (value / 1000u) % 10u;
+    return static_cast<uint32_t>((d3 << 12) | (d2 << 8) | (d1 << 4) | d0);
+}
 
 int main() {
     std::signal(SIGINT, signal_handler);
@@ -32,6 +86,13 @@ int main() {
     double pos_y = 0.0;
     double vel_x = 0.0;
     double vel_y = 0.0;
+    // Palabras ARINC429 demo para validar decodificación automática con BD importada.
+    uint32_t arinc_word_310_ias = 0u;      // IAS_EXAMPLE (bnr)
+    uint32_t arinc_word_271_alt_bcd = 0u;  // ALT_BCD_EXAMPLE (bcd)
+    uint32_t arinc_word_350_status = 0u;   // STATUS_DIS / GEAR_DISCRETE (discrete)
+    uint32_t arinc_word_204_roll = 0u;     // ROLL_DEG (bnr signed, scale 0.01)
+    uint32_t arinc_word_206_heading = 0u;  // MAG_HEADING (bnr, scale 0.01)
+    uint32_t arinc_word_320_cas = 0u;      // CAS_KT (bnr, scale 0.0625)
 
     // Array estÃ¡tico: lectura Y escritura por indice desde el monitor
     double spectrum[32] = {};
@@ -62,6 +123,12 @@ int main() {
     monitor.register_var("state.position.y", &pos_y);
     monitor.register_var("state.velocity.x", &vel_x);
     monitor.register_var("state.velocity.y", &vel_y);
+    monitor.register_var("arinc.demo.word_310_ias", &arinc_word_310_ias);
+    monitor.register_var("arinc.demo.word_271_alt_bcd", &arinc_word_271_alt_bcd);
+    monitor.register_var("arinc.demo.word_350_status", &arinc_word_350_status);
+    monitor.register_var("arinc.demo.word_204_roll", &arinc_word_204_roll);
+    monitor.register_var("arinc.demo.word_206_heading", &arinc_word_206_heading);
+    monitor.register_var("arinc.demo.word_320_cas", &arinc_word_320_cas);
     monitor.register_var("5waves.sine", &sine_wave);
     monitor.register_var("5waves.cosine", &cosine_wave);
     monitor.register_var("5sensors.temperature", &temperature);
@@ -569,6 +636,31 @@ int main() {
         pos_y = 10.0 * std::cos(t * 0.2);
         vel_x = 2.0 * std::cos(t * 0.2);
         vel_y = -2.0 * std::sin(t * 0.2);
+
+        // Se?ales físicas demo para labels de CSV importables.
+        const double ias_kt = 220.0 + 45.0 * std::sin(t * 0.25);          // label 310 (scale 1)
+        const double alt_bcd_ft = 3200.0 + 400.0 * std::sin(t * 0.06);    // label 271 (BCD)
+        const double roll_deg = 15.0 * std::sin(t * 0.45);                // label 204 (scale 0.01)
+        const double hdg_deg = std::fmod((t * 12.0), 360.0);              // label 206 (scale 0.01)
+        const double cas_kt = 180.0 + 30.0 * std::sin(t * 0.18);          // label 320 (scale 0.0625)
+        uint32_t status_bits = 0u;                                         // label 350 (DIS)
+        const bool on_ground = std::sin(t * 0.03) < -0.5;
+        const bool in_flight = !on_ground;
+        const bool overspeed = cas_kt > 205.0;
+        const bool maint_req = (counter % 400) > 350;
+        if (on_ground) status_bits |= (1u << 0);  // ON_GROUND / GEAR_NOSE_DOWN
+        if (in_flight) status_bits |= (1u << 1);  // IN_FLIGHT / GEAR_LEFT_DOWN
+        if (overspeed) status_bits |= (1u << 2);  // OVERSPEED_WARN / GEAR_RIGHT_DOWN
+        if (maint_req) status_bits |= (1u << 3);  // MAINT_REQ / GEAR_LOCKED
+        if (on_ground) status_bits |= (1u << 4);  // WOW_MAIN (csv discrete bits sample)
+
+        // label_dec: 310(oct)=200, 271(oct)=185, 350(oct)=232, 204(oct)=132, 206(oct)=134, 320(oct)=208
+        arinc_word_310_ias = make_arinc429_word(200u, encode_bnr_unsigned(ias_kt), 3u, 0u);
+        arinc_word_271_alt_bcd = make_arinc429_word(185u, encode_bcd_4digits(static_cast<unsigned>(std::lround(alt_bcd_ft))), 3u, 0u);
+        arinc_word_350_status = make_arinc429_word(232u, status_bits, 0u, 0u);
+        arinc_word_204_roll = make_arinc429_word(132u, encode_bnr_signed(roll_deg / 0.01), 3u, 0u);
+        arinc_word_206_heading = make_arinc429_word(134u, encode_bnr_unsigned(hdg_deg / 0.01), 3u, 0u);
+        arinc_word_320_cas = make_arinc429_word(208u, encode_bnr_unsigned(cas_kt / 0.0625), 3u, 0u);
 
         for (int i = 0; i < 4; i++)
             spectrum[i] = std::sin(t * (i + 1) * 0.3) * (32 - i) / 32.0;
