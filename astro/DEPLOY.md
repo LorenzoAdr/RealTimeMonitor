@@ -91,8 +91,9 @@ Eso solo coincide si el repositorio en GitHub se llama **`RealTimeMonitor`** y e
 
 ### Qué hace el workflow
 
-- Node **22**, `npm ci` y `npm run build` dentro de **`astro/`**.
-- Sube **`astro/dist`** con **`actions/upload-pages-artifact@v5`** y publica con **`actions/deploy-pages@v5`** (la acción de despliegue usa **Node 24** en el runner de GitHub; versiones antiguas de `deploy-pages@v4` mostraban avisos de deprecación de Node 20).
+- **`actions/checkout@v6`** y **`actions/setup-node@v6`** (runtime Node **24** en esas acciones; las series v4 avisaban por Node 20 deprecado).
+- Node **22** para el propio proyecto Astro vía `setup-node`, luego `npm ci` y `npm run build` en **`astro/`**.
+- Sube **`astro/dist`** con **`actions/upload-pages-artifact@v5`** y publica con **`actions/deploy-pages@v5`**.
 
 Si tu rama principal no es `main`, edita `branches:` en el YAML. El `paths:` limita ejecuciones automáticas a cambios bajo `astro/`; para forzar un despliegue sin tocar Astro, usa *workflow_dispatch*.
 
