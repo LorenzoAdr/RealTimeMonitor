@@ -11,12 +11,12 @@ El backend está en [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSoc
 | `GET /api/var/{name}` | `api_get_var()` | Valor actual de una variable. |
 | `POST /api/var/{name}` | `api_set_var()` | Escribir variable (query: value, var_type). |
 | `GET /api/uds_instances` | `api_uds_instances()` | Lista de instancias UDS (opcional `?user=`). |
-| `GET /api/recordings` | `api_recordings()` | Lista de grabaciones TSV. |
-| `GET /api/recordings/{filename}` | `api_recording_download()` | Descarga de un TSV. |
-| `GET /api/recordings/{filename}/history` | `api_recording_var_history()` | Histórico de una variable en un TSV (análisis offline). |
+| `GET /api/recordings` | `api_recordings()` | Lista de grabaciones (TSV y/o **Parquet** si el plugin está instalado). |
+| `GET /api/recordings/{filename}` | `api_recording_download()` | Descarga TSV o Parquet según extensión. |
+| `GET /api/recordings/{filename}/history` | `api_recording_var_history()` | Histórico de una variable (TSV o Parquet vía pyarrow). |
 | `GET /api/recordings/{filename}/window` | `api_recording_var_window()` | Ventana de tiempo para una variable. |
 | `GET /api/recordings/{filename}/window_batch` | `api_recording_var_window_batch()` | Varias variables en una ventana (batch). |
-| `GET /api/recordings/{filename}/bounds` | `api_recording_time_bounds()` | Límites de tiempo de un TSV. |
+| `GET /api/recordings/{filename}/bounds` | `api_recording_time_bounds()` | Límites de tiempo del fichero. |
 | `GET /api/browse` | `api_browse()` | Navegador de archivos remoto (ruta relativa al proyecto). |
 | `GET /api/browse/download` | `api_browse_download()` | Descarga de un archivo del proyecto. |
 | `POST /api/browse/mkdir` | `api_browse_mkdir()` | Crear carpeta en el proyecto. |
@@ -30,6 +30,10 @@ El backend está en [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSoc
 | `GET /api/advanced_stats` | `api_advanced_stats()` | RAM/CPU (HTML, Python, C++). Query `perf=1` renueva el lease de medición de fases (misma sesión que el panel Perf). |
 | `GET /api/perf` | `api_perf()` | JSON: `ts`, `lease_active`, `layers.python\|cpp\|sidecar` con listas `phases[{id,last_us,ema_us,samples}]`. Python = `perf_agg`; C++ = `shm_perf_us` del publicador; sidecar = lectura del JSON de `--perf-file` durante REC `sidecar_cpp`. **Renueva el lease** de medición; sin panel ni `advanced_stats?perf=1`, C++ deja de medir ~1 s. |
 | `WebSocket /ws` | `websocket_endpoint()` | Conexión en vivo (vars_update, alarmas, grabación). |
+
+### Paquete opcional `varmonitor_plugins` (Pro)
+
+Las rutas y la lógica de **registros ARINC / MIL-STD-1553** (SQLite), **Git UI**, **terminal restringida**, **GDB**, **vista previa Parquet por subida** (`POST /api/recordings/parquet_preview_upload`) y la implementación Python de lectura/escritura Parquet asociada al plugin viven en el paquete instalable bajo [`tool_plugins/python/`](../tool_plugins/python/) (p. ej. `pip install -e tool_plugins/python`, opcional `[parquet]` para pyarrow). El núcleo MIT las registra en el arranque vía `plugin_registry` si el paquete está instalado; sin él, el backend sigue sirviendo monitorización, TSV y rutas core anteriores.
 
 ## Configuración
 

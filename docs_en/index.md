@@ -12,7 +12,7 @@ General layout in **light** and **dark** theme (header with Live/Analysis/Replay
 
 ![VarMonitor UI — dark theme](images/general_oscuro2.png){ width="100%" }
 
-- **Analysis mode** (offline TSV): ![Analysis mode](images/analisis.png){ width="100%" }
+- **Analysis mode** (offline TSV or Parquet recordings): ![Analysis mode](images/analisis.png){ width="100%" }
 - **Replay mode** (TSV reference + WebSocket): ![Replay mode](images/replay.png){ width="100%" }
 - **Advanced plot tools** (anomalies, segments, notes, PDF…): ![Advanced options near plots](images/avanzado.png){ width="100%" }
 - **Perf panel** (Python / C++ / sidecar phases): ![Perf overlay](images/perf.png){ width="100%" }
@@ -26,7 +26,7 @@ General layout in **light** and **dark** theme (header with Live/Analysis/Replay
 - **[Launch scripts](launch.md)**: `launch_demo`, `launch_web`, `launch_ui`; local backup under `scripts/_legacy_launch/`.
 - **[Docker](docker.md)**: Web monitor container (bridge or host mode for C++ on the same Linux host).
 - **[Backend (Python)](backend.md)**: `app.py`, instance discovery, WebSocket, UdsBridge, ShmReader, alarms and recording.
-- **[Frontend](frontend.md)**: `app.js` structure, columns, Plotly charts, state and persistence.
+- **[Frontend](frontend.md)**: ES modules (`entry.mjs`, `app-legacy.mjs`), columns, Plotly charts, state and persistence.
 - **[Protocols](protocols.md)**: UDS format (length + JSON), commands, SHM layout, WebSocket messages.
 - **[Performance](performance.md)**: SHM/UDS, Perf panel, `/api/perf`, native recording sidecar optimizations.
 - **[C++ integration](cpp-integration.md)**: Linking `libvarmonitor`, VarMonitor, `write_shm_snapshot`, macros.

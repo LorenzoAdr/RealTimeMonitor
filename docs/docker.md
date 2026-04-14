@@ -40,6 +40,7 @@ Luego abre **http://127.0.0.1:&lt;web_port&gt;** (por defecto `8080` en `varmon.
 ## Limitaciones
 
 - **Sidecar / grabación nativa**: el ejecutable `varmon_sidecar` no está en la imagen por defecto; la grabación suele requerir el stack nativo o una imagen extendida que incluya el binario y dependencias.
+- **Paquete opcional Pro (`varmonitor_plugins`)**: la imagen mínima (`requirements-docker.txt`) no instala el wheel editable; rutas Pro (registros ARINC/MIL-1553, Parquet en servidor, Git UI, terminal, GDB) solo están disponibles si añades `pip install` de `tool_plugins/python` en una imagen derivada (véase [Backend (Python)](backend.md)).
 - **Puerto distinto de 8080**: si el backend elige otro puerto, el `HEALTHCHECK` del `Dockerfile` puede fallar; ajusta o desactiva la capa `HEALTHCHECK` en una imagen derivada.
 
 ## Imagen

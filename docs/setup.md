@@ -77,6 +77,7 @@ monitor/
 │   └── varmon.conf      # Configuración recomendada en el repo
 ├── libvarmonitor/       # C++: VarMonitor, shm_publisher, uds_server
 ├── demo_app/
+├── tool_plugins/        # Paquete opcional Pro: pip install -e tool_plugins/python
 ├── web_monitor/         # Python FastAPI, UdsBridge, ShmReader
 │   ├── recordings/      # TSV de grabaciones y alarmas (generado)
 │   └── static/

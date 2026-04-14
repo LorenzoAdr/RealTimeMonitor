@@ -41,6 +41,7 @@ Then open **http://127.0.0.1:&lt;web_port&gt;** (default `8080` from `varmon.con
 ## Limitations
 
 - **Sidecar / native recording**: `varmon_sidecar` is not in the default image; recording usually needs the native stack or an extended image with the binary and deps.
+- **Optional Pro package (`varmonitor_plugins`)**: the minimal image (`requirements-docker.txt`) does not install the editable wheel; Pro routes (ARINC/MIL-1553 registries, server-side Parquet, Git UI, terminal, GDB) are only available if you add `pip install` of `tool_plugins/python` in a derived image (see [Backend (Python)](backend.md)).
 - **Non-8080 port:** if the backend picks another port, the `Dockerfile` `HEALTHCHECK` may fail; adjust or remove `HEALTHCHECK` in a derived image.
 
 ## Image

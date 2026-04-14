@@ -37,6 +37,10 @@ flowchart TB
 - **Sin TCP** entre C++ y Python: no hay puertos de red; todo es UDS + SHM en la misma máquina.
 - **web_port** en `varmon.conf` es solo el puerto HTTP/WebSocket del servidor web (Python).
 
+## Backend web: núcleo y extensiones
+
+El repositorio público incluye el servidor FastAPI (`web_monitor/app.py`), el registro de plugins (`plugin_registry`) y un stub vacío si no hay paquete adicional. Las APIs de registros de protocolo (ARINC / MIL-STD-1553), Git UI, terminal, GDB y la implementación Parquet del servidor se cargan mediante el paquete Python opcional bajo `tool_plugins/python` (por ejemplo `pip install -e tool_plugins/python`). Sin ese paquete el monitor sigue funcionando con variables, grabaciones TSV, WebSocket y las rutas documentadas en [Backend (Python)](backend.md) como núcleo MIT. Detalle en la sección «Paquete opcional `varmonitor_plugins` (Pro)» de `backend.md`.
+
 ## Descubrimiento de instancias
 
 No se explora la red por IP/puerto. Las instancias C++ se descubren por **sockets Unix** en `/tmp`:

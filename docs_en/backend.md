@@ -11,12 +11,12 @@ The backend lives in [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSo
 | `GET /api/var/{name}` | `api_get_var()` | Current variable value. |
 | `POST /api/var/{name}` | `api_set_var()` | Write variable (query: value, var_type). |
 | `GET /api/uds_instances` | `api_uds_instances()` | UDS instance list (optional `?user=`). |
-| `GET /api/recordings` | `api_recordings()` | TSV recording list. |
-| `GET /api/recordings/{filename}` | `api_recording_download()` | Download a TSV. |
-| `GET /api/recordings/{filename}/history` | `api_recording_var_history()` | Variable history in a TSV (offline analysis). |
+| `GET /api/recordings` | `api_recordings()` | Recording list (TSV and/or **Parquet** when the plugin is installed). |
+| `GET /api/recordings/{filename}` | `api_recording_download()` | Download TSV or Parquet by extension. |
+| `GET /api/recordings/{filename}/history` | `api_recording_var_history()` | Variable history (TSV or Parquet via pyarrow). |
 | `GET /api/recordings/{filename}/window` | `api_recording_var_window()` | Time window for one variable. |
 | `GET /api/recordings/{filename}/window_batch` | `api_recording_var_window_batch()` | Multiple variables in one window (batch). |
-| `GET /api/recordings/{filename}/bounds` | `api_recording_time_bounds()` | Time bounds of a TSV. |
+| `GET /api/recordings/{filename}/bounds` | `api_recording_time_bounds()` | Time bounds of the file. |
 | `GET /api/browse` | `api_browse()` | Remote file browser (path relative to project). |
 | `GET /api/browse/download` | `api_browse_download()` | Download a project file. |
 | `POST /api/browse/mkdir` | `api_browse_mkdir()` | Create folder in project. |
@@ -30,6 +30,10 @@ The backend lives in [web_monitor/app.py](../web_monitor/app.py): FastAPI, WebSo
 | `GET /api/advanced_stats` | `api_advanced_stats()` | RAM/CPU (HTML, Python, C++). Query `perf=1` renews the perf-measurement lease (same session as the Perf panel). |
 | `GET /api/perf` | `api_perf()` | JSON: `ts`, `lease_active`, `layers.python\|cpp\|sidecar` with `phases[{id,last_us,ema_us,samples}]`. Python = `perf_agg`; C++ = publisher `shm_perf_us`; sidecar = JSON from `varmon_sidecar --perf-file` during `sidecar_cpp` REC. **Renews** the measurement lease; without the panel or `advanced_stats?perf=1`, C++ stops reporting after ~1 s. |
 | `WebSocket /ws` | `websocket_endpoint()` | Live connection (vars_update, alarms, recording). |
+
+### Optional `varmonitor_plugins` package (Pro)
+
+**ARINC / MIL-STD-1553** registry APIs (SQLite), **Git UI**, **restricted terminal**, **GDB**, **Parquet upload preview** (`POST /api/recordings/parquet_preview_upload`), and the Python Parquet I/O used with the plugin live in the installable package under [`tool_plugins/python/`](../tool_plugins/python/) (e.g. `pip install -e tool_plugins/python`, optional `[parquet]` for pyarrow). The MIT core registers them at startup through `plugin_registry` when the package is installed; without it, the server still provides monitoring, TSV, and the core routes above.
 
 ## Configuration
 

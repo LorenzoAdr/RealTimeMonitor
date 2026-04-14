@@ -137,7 +137,7 @@ With macros: `var_monitor_macros.hpp`, `VARMON_WATCH`, `VARMON_START`, etc.
 ## Web monitor features
 
 - **Layout**: variable browser, monitored list (drag to plots, virtualized when large), multi-plot workspace (Plotly), advanced tools drawer (segments, notes, PDF, etc.).
-- **Modes**: **Live** (SHM + C++), **Analysis** (offline TSV), **Replay** (TSV timeline with optional per-variable imposition onto live SHM).
+- **Modes**: **Live** (SHM + C++), **Analysis** (offline TSV or Parquet recordings), **Replay** (TSV timeline with optional per-variable imposition onto live SHM).
 - **Formats & ARINC**: per-variable display format (decimal/sci/hex/bin), optional **unit conversion** and ARINC 429 word view where applicable.
 - **Alarms**: Hi/Lo per variable; rolling capture; optional **native** evaluation path via sidecar + rules TSV.
 - **Recording**: Python writer thread or **`varmon_sidecar`** TSV path; progress, path toasts, optional base64 send on finish.
@@ -152,7 +152,7 @@ The same assets live under [`docs/images/`](docs/images/) (MkDocs) and [`picture
 |-------------------|
 | ![VarMonitor UI, dark theme](docs/images/general_oscuro2.png) |
 
-| Analysis mode (offline TSV) | Replay mode (TSV + live SHM) |
+| Analysis mode (offline TSV / Parquet) | Replay mode (TSV + live SHM) |
 |-----------------------------|------------------------------|
 | ![Analysis mode](docs/images/analisis.png) | ![Replay mode](docs/images/replay.png) |
 
@@ -172,6 +172,7 @@ monitor/
 │   └── varmon.conf      # Config (también: VARMON_CONFIG o ./varmon.conf en cwd)
 ├── libvarmonitor/       # C++: VarMonitor, shm_publisher, uds_server
 ├── demo_app/
+├── tool_plugins/        # Optional Pro Python package: pip install -e tool_plugins/python
 ├── web_monitor/         # Python FastAPI, UdsBridge, ShmReader
 │   ├── recordings/      # TSV recordings and alarms (generated)
 │   └── static/

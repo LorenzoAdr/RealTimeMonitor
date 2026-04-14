@@ -12,7 +12,7 @@ Vista general en **tema claro** y **tema oscuro** (cabecera con modo Live/Análi
 
 ![Interfaz VarMonitor — tema oscuro](images/general_oscuro2.png){ width="100%" }
 
-- **Modo análisis** (TSV offline): ![Modo análisis](images/analisis.png){ width="100%" }
+- **Modo análisis** (grabaciones offline TSV o Parquet): ![Modo análisis](images/analisis.png){ width="100%" }
 - **Modo replay** (referencia TSV + WebSocket): ![Modo replay](images/replay.png){ width="100%" }
 - **Opciones avanzadas** (anomalías, segmentos, notas, PDF…): ![Opciones avanzadas junto a los gráficos](images/avanzado.png){ width="100%" }
 - **Panel Perf** (fases Python / C++ / sidecar): ![Panel Perf](images/perf.png){ width="100%" }
@@ -26,7 +26,7 @@ Vista general en **tema claro** y **tema oscuro** (cabecera con modo Live/Análi
 - **[Lanzadores](launch.md)**: `launch_demo`, `launch_web`, `launch_ui`; respaldo local en `scripts/_legacy_launch/`.
 - **[Docker](docker.md)**: Contenedor del monitor web (modo puente o host para C++ en el mismo Linux).
 - **[Backend (Python)](backend.md)**: `app.py`, descubrimiento de instancias, WebSocket, UdsBridge, ShmReader, alarmas y grabación.
-- **[Frontend](frontend.md)**: Estructura de `app.js`, columnas, gráficos Plotly, estado y persistencia.
+- **[Frontend](frontend.md)**: Módulos ES (`entry.mjs`, `app-legacy.mjs`), columnas, gráficos Plotly, estado y persistencia.
 - **[Protocolos](protocols.md)**: Formato UDS (longitud + JSON), comandos, layout SHM, mensajes WebSocket.
 - **[Rendimiento](performance.md)**: SHM/UDS, panel Perf, `/api/perf`, optimizaciones del sidecar de grabación.
 - **[Integración C++](cpp-integration.md)**: Cómo enlazar `libvarmonitor`, VarMonitor, `write_shm_snapshot`, macros.
