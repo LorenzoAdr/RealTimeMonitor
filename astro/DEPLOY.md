@@ -114,3 +114,10 @@ Eso aparece cuando el repositorio **no tiene GitHub Pages configurado para despl
 5. Repos **privados**: GitHub Pages con Actions puede requerir plan de pago según la política actual de GitHub; si el repo es privado y Pages no está disponible, el mismo tipo de error puede mostrarse.
 
 6. **Forks**: en algunos forks hay que habilitar **Actions** en *Settings* → *Actions* → *General* y permitir workflows.
+
+### La URL pública da 404, error o “no carga” aunque el workflow sea verde
+
+- **URL exacta del proyecto**: `https://<usuario>.github.io/<nombre-repo>/` (barra final recomendable). El nombre en la ruta debe coincidir con **`base`** en `astro.config.mjs` (p. ej. `/RealTimeMonitor/`). Si el repo se llama distinto, cambia `base` y vuelve a desplegar.
+- **`site` en minúsculas**: GitHub suele servir la web con el usuario en minúsculas (`https://lorenzoadr.github.io/...`). Deja `site` alineado con esa URL para evitar rarezas en metadatos.
+- **Caché**: tras un despliegue, prueba ventana privada o **recarga forzada** (Ctrl+F5); la CDN de Pages puede cachear un 404 antiguo unos minutos.
+- **Comprueba el estado HTTP**: en tu máquina, `curl -sI https://lorenzoadr.github.io/RealTimeMonitor/` debería devolver **200**. Si ves **404**, el último despliegue no ha publicado aún o `base` no coincide con el nombre del repo.

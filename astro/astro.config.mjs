@@ -5,8 +5,8 @@ import tailwindcss from '@tailwindcss/vite';
 
 // https://astro.build/config
 export default defineConfig({
-  // URL final del sitio (GitHub Pages usuario)
-  site: 'https://LorenzoAdr.github.io',
+  // URL canónica de GitHub Pages (el host suele normalizar el usuario a minúsculas)
+  site: 'https://lorenzoadr.github.io',
   // Repositorio = subruta donde se sirven los assets (barra final obligatoria)
   base: '/RealTimeMonitor/',
   output: 'static',
