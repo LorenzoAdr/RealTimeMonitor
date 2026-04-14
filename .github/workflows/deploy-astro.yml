@@ -7,7 +7,7 @@ name: Deploy Astro to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [feature/astro-site]
     paths:
       - 'astro/**'
       - '.github/workflows/deploy-astro.yml'
