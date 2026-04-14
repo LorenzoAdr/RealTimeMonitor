@@ -1,0 +1,24 @@
+# Dependencias mínimas para ejecutar solo el backend web (FastAPI + uvicorn + WS).
+#
+# Referencia de versiones: si integras el monitor como submódulo y NO quieres COPY de
+# este fichero (clone sin --recurse-submodules), duplica las tres líneas de abajo en
+# el Dockerfile del proyecto padre como RUN pip install "pkg>=..." ...
+#
+# Opcional (solo si web_monitor/ existe en el contexto de build):
+#   COPY web_monitor/requirements-docker.txt ...
+#   RUN pip install --no-cache-dir -r requirements-docker.txt
+#
+# Incluye:
+#   - fastapi, uvicorn[standard], websockets
+#
+# NO incluye (a propósito):
+#   - mkdocs / material (solo hacen falta para construir documentación estática)
+#   - pywebview, PySide6, qtpy (ventana embebida; en contenedor suele fallar y no hace falta)
+#
+# La interfaz se usa con un navegador FUERA del contenedor (host o port-forward).
+# No instales requirements-desktop.txt en la imagen salvo que sepas por qué.
+
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.9
+websockets>=12.0

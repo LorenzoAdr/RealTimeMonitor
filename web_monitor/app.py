@@ -1,0 +1,5435 @@
+"""FastAPI backend for VarMonitor web interface."""
+
+# Antes de FastAPI/Starlette: MIME de .mjs (Linux suele devolver None → octet-stream → Chromium rechaza módulos ES).
+import mimetypes
+
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("application/javascript", ".mjs")
+
+import asyncio
+import collections
+import getpass
+import glob
+import logging
+import json
+import os
+import resource
+import shutil
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import math
+import re
+import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
+
+from queue import Empty, Queue
+
+from uds_client import UdsBridge
+from shm_reader import ShmReader, open_shm_rw, write_shm_import_row
+import perf_agg
+
+from varmon_web.settings import (
+    CONFIG as _config,
+    CONFIG_ABS_PATH,
+    PERF_LEASE_SEC,
+    STATIC_DIR,
+    html_main_script_tag,
+)
+from varmon_web.sensitive_auth import path_requires_sensitive_auth, verify_sensitive_request
+from varmon_web.paths import (
+    ARINC_DATA_DIR,
+    ARINC_SQLITE_PATH,
+    AVIONICS_REGISTRY_PATH,
+    BROWSER_ROOT,
+    M1553_SQLITE_PATH,
+    RECORDINGS_DIR,
+    SESSIONS_DIR,
+    STATE_ROOT_DIR,
+    TEMPLATES_DIR,
+)
+from varmon_web.log_buffer import (
+    _LOG_BUFFER,
+    _LOG_BUFFER_LOCK,
+    _LOG_SEQ,
+    install_stdio_tee,
+)
+from varmon_web.uds_discovery import _first_uds_bridge, _list_uds_instances
+from varmon_web.parquet_dispatch import get_recordings_parquet, is_parquet_path
+from varmon_web.parquet_gate import parquet_recording_enabled
+import plugin_registry
+
+install_stdio_tee()
+
+plugin_registry.discover_plugins()
+
+
+def _rp():
+    """Módulo `varmonitor_plugins.recordings_parquet` si el wheel Pro está instalado."""
+    return get_recordings_parquet()
+
+
+def _recordings_mirror_tsv() -> bool:
+    return bool(_config.get("recordings_write_tsv"))
+
+
+# Numero de conexiones WebSocket activas
+ACTIVE_WS = 0
+
+# Intentos fallidos de contraseña; tras MAX_FAILED_AUTH el proceso se cierra
+MAX_FAILED_AUTH = 3
+FAILED_AUTH_ATTEMPTS = 0
+
+
+# Tiempo sin C++ ni clientes tras el cual se cierra el proceso (segundos)
+WATCHDOG_IDLE_SEC = 300  # 5 minutos
+
+async def _startup_uds_hint():
+    """Tras arrancar: si no hay ningún VarMonitor C++ en /tmp, avisar en consola (launch_web solo levanta Python)."""
+    await asyncio.sleep(0.4)
+    try:
+        inst = await asyncio.to_thread(_list_uds_instances, None)
+        if inst:
+            return
+    except Exception:
+        return
+    try:
+        u = getpass.getuser()
+    except Exception:
+        u = "USUARIO"
+    print(
+        "[VarMonitor Web] AVISO: No se encontró ninguna instancia UDS de VarMonitor en /tmp "
+        f"(patrón varmon-{u}-<pid>.sock). El escritorio/web solo arranca Python; hace falta el **proceso C++** "
+        "en la misma máquina y usuario (monitor.start() o tu binario enlazado a libvarmonitor). "
+        "Sin eso la cabecera muestra “No hay instancias VarMonitor (UDS)”.",
+        flush=True,
+    )
+
+
+async def _watchdog_no_cpp():
+    """Cierra el proceso si durante WATCHDOG_IDLE_SEC no hay C++ (UDS) accesible ni clientes activos."""
+    global ACTIVE_WS
+    last_ok = time.monotonic()
+    while True:
+        await asyncio.sleep(5.0)
+        if ACTIVE_WS > 0:
+            try:
+                inst = await asyncio.to_thread(_list_uds_instances, None)
+                if inst:
+                    b = await asyncio.to_thread(UdsBridge, inst[0]["uds_path"], 0.5)
+                    # get_server_info basta para comprobar C++; list_names alocaría miles de strings cada 5 s (RSS).
+                    _ = await asyncio.to_thread(b.get_server_info)
+                    b.disconnect()
+                    last_ok = time.monotonic()
+            except Exception:
+                pass
+            continue
+        try:
+            inst = await asyncio.to_thread(_list_uds_instances, None)
+            if inst:
+                b = await asyncio.to_thread(UdsBridge, inst[0]["uds_path"], 0.5)
+                _ = await asyncio.to_thread(b.get_server_info)
+                b.disconnect()
+                last_ok = time.monotonic()
+        except Exception:
+            pass
+        if time.monotonic() - last_ok > WATCHDOG_IDLE_SEC and ACTIVE_WS == 0:
+            print(f"[VarMonitor Web] No se detecto ningun servidor C++ (UDS) durante {WATCHDOG_IDLE_SEC}s y no hay clientes activos. Cerrando proceso.")
+            os._exit(0)
+
+
+def _scan_web_ports_max(base_port: int, max_offset: int = 10, timeout: float = 0.2) -> int | None:
+    """Prueba conexión TCP a puertos web en [base_port, base_port+max_offset]; devuelve el mayor en uso."""
+    in_use = _scan_web_ports_list(base_port, max_offset, timeout)
+    return max(in_use) if in_use else None
+
+
+def _scan_web_ports_list(base_port: int, max_offset: int = 10, timeout: float = 0.2) -> list[int]:
+    """Devuelve la lista de puertos web en uso en el rango [base_port, base_port+max_offset]."""
+    in_use: list[int] = []
+    for offset in range(max_offset + 1):
+        port = base_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                s.connect(("127.0.0.1", port))
+            in_use.append(port)
+        except OSError:
+            continue
+    return in_use
+
+
+def _fetch_uptime_from_port(port: int, timeout: float = 1.0) -> float | None:
+    """Obtiene uptime_seconds de otro backend VarMonitor vía GET /api/uptime (ligero, sin escaneos). None si falla."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/uptime")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("uptime_seconds")
+    except Exception:
+        return None
+
+
+def _fetch_instance_info_from_web_port(web_port: int, timeout: float = 0.4) -> dict | None:
+    """Obtiene cpp_port y user de otro backend vía GET /api/instance_info. None si falla."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{web_port}/api/instance_info")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+# Cache para suggested_web_port (puerto con menor uptime): (valor, timestamp)
+_suggested_web_port_cache: tuple[int | None, float] | None = None
+SUGGESTED_WEB_PORT_CACHE_TTL = 20.0  # segundos
+
+
+def _get_suggested_web_port(
+    actual_port: int,
+    base_web: int,
+    own_uptime: float | None,
+) -> int | None:
+    """Devuelve el puerto web que probablemente es del usuario actual: el de menor tiempo de vida (más reciente)."""
+    global _suggested_web_port_cache
+    now = time.monotonic()
+    if _suggested_web_port_cache is not None:
+        cached_val, cached_at = _suggested_web_port_cache
+        if now - cached_at < SUGGESTED_WEB_PORT_CACHE_TTL:
+            return cached_val
+    ports_in_use = _scan_web_ports_list(base_web, int(_config.get("web_port_scan_max", 10)))
+    if not ports_in_use:
+        _suggested_web_port_cache = (actual_port, now)
+        return actual_port
+    # Recoger uptime de cada puerto (el nuestro sin HTTP, el resto vía GET)
+    uptimes: list[tuple[int, float]] = []
+    for port in ports_in_use:
+        if port == actual_port and own_uptime is not None:
+            uptimes.append((port, own_uptime))
+        else:
+            u = _fetch_uptime_from_port(port)
+            if u is not None:
+                uptimes.append((port, u))
+    if not uptimes:
+        _suggested_web_port_cache = (actual_port, now)
+        return actual_port
+    # El de menor uptime (más reciente) es el sugerido; desempate por puerto mayor
+    best = min(uptimes, key=lambda x: (x[1], -x[0]))
+    suggested = best[0]
+    _suggested_web_port_cache = (suggested, now)
+    return suggested
+
+
+async def _memtrace_log_loop():
+    """Si VARMON_MEMTRACE=1: imprime cada 30s las líneas con más RAM propia (tracemalloc)."""
+    import tracemalloc
+    await asyncio.sleep(20.0)
+    while True:
+        await asyncio.sleep(30.0)
+        snap = tracemalloc.take_snapshot()
+        lines = snap.statistics("lineno")[:15]
+        print("[VarMonitor Web] MEMTRACE top asignaciones (tracemalloc):", flush=True)
+        for s in lines:
+            print(f"  {s}", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not hasattr(app.state, "startup_time"):
+        app.state.startup_time = time.monotonic()
+    if not hasattr(app.state, "shm_cycle_ms"):
+        app.state.shm_cycle_ms = None
+    if not hasattr(app.state, "ws_monitored_counts"):
+        # id(WebSocket) -> len(monitored_names); para /api/advanced_stats y varmon.telemetry.*
+        app.state.ws_monitored_counts = {}
+    app.state.perf_lease_until = 0.0
+    app.state._cpp_perf_target = None
+    app.state.sidecar_perf_json_path = None
+    _unregister_sidecar_perf_session()
+
+    async def _perf_cpp_gc_loop() -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                await sync_cpp_perf_collect(app.state)
+            except Exception:
+                pass
+
+    plugin_registry.fire_hook("register_api_routes", app)
+    asyncio.create_task(_perf_cpp_gc_loop())
+    asyncio.create_task(_watchdog_no_cpp())
+    asyncio.create_task(_startup_uds_hint())
+    _mt = (os.environ.get("VARMON_MEMTRACE") or "").strip().lower()
+    if _mt in ("1", "true", "yes", "on"):
+        import tracemalloc
+        tracemalloc.start(25)
+        print("[VarMonitor Web] MEMTRACE activo (VARMON_MEMTRACE=1); tracemalloc cada ~30s en log.", flush=True)
+        asyncio.create_task(_memtrace_log_loop())
+    yield
+
+
+app = FastAPI(title="VarMonitor", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["*"],
+)
+# JS/CSS/HTML grandes: menos bytes en red (el navegador igual descomprime y parsea el JS completo).
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
+
+@app.middleware("http")
+async def sensitive_auth_middleware(request: Request, call_next):
+    """Contraseña de ingeniería (modos editor + BD protocolos) y, si aplica, contraseña global."""
+    path = request.url.path or ""
+    if path_requires_sensitive_auth(path, request.method):
+        err = verify_sensitive_request(request, _config, path)
+        if err is not None:
+            return err
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def log_requests_middleware(request: Request, call_next):
+    """Registra cada petición HTTP en el buffer de log (visible en el visor integrado)."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    path = getattr(request.url, "path", "") or ""
+    # Evita bucle de ruido y picos de RAM: el visor hace polling frecuente a /api/log.
+    if path not in ("/api/log", "/api/perf"):
+        query = getattr(request.url, "query", "") or ""
+        if query:
+            path_display = path + "?" + (query if len(query) <= 100 else query[:100] + "...")
+        else:
+            path_display = path
+        status = getattr(response, "status_code", 0)
+        print(f"[Req] {request.method} {path_display} -> {status} ({elapsed_ms:.0f}ms)")
+    return response
+
+
+# Marcador en index.html para inyectar la etiqueta del cliente (módulo ES o bundle IIFE vía VARMON_WEB_APP_JS).
+_VARMON_APP_SCRIPT_PLACEHOLDER = "<!--VARMON_APP_SCRIPT-->"
+_HEAD_INJECT_PLACEHOLDER = "<!--VARMON_HEAD_INJECT-->"
+_logged_clear_storage_index_once = False
+
+
+def _head_inject_clear_storage_script() -> str:
+    """Script inline: borra localStorage y sessionStorage del origen antes de cargar el cliente."""
+    env = (os.environ.get("VARMON_WEB_CLEAR_BROWSER_STORAGE") or "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        clear = True
+    elif env in ("0", "false", "no", "off"):
+        clear = False
+    else:
+        clear = bool(_config.get("web_clear_browser_storage"))
+    if not clear:
+        return ""
+    return '<script>(function(){try{localStorage.clear();sessionStorage.clear();}catch(e){}})();</script>'
+
+
+def _html_index_apply_injects(html: str) -> str:
+    """Inyecta borrado opcional de almacenamiento y la etiqueta del script principal."""
+    inject = _head_inject_clear_storage_script()
+    global _logged_clear_storage_index_once
+    if inject and not _logged_clear_storage_index_once:
+        _logged_clear_storage_index_once = True
+        print(
+            "[VarMonitor Web] HTML principal: inyectado borrado de localStorage/sessionStorage (web_clear_browser_storage o VARMON_WEB_CLEAR_BROWSER_STORAGE).",
+            flush=True,
+        )
+    if _HEAD_INJECT_PLACEHOLDER in html:
+        html = html.replace(_HEAD_INJECT_PLACEHOLDER, inject, 1)
+    elif inject:
+        html = html.replace("<head>", "<head>" + inject, 1)
+    tag = html_main_script_tag()
+    plugin_script_tags = plugin_registry.fire_hook("html_extra_scripts")
+    extra = "\n".join(t for t in plugin_script_tags if isinstance(t, str))
+    replacement = tag + ("\n" + extra if extra else "")
+    if _VARMON_APP_SCRIPT_PLACEHOLDER in html:
+        html = html.replace(_VARMON_APP_SCRIPT_PLACEHOLDER, replacement, 1)
+    return html
+
+
+@app.get("/")
+async def index():
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            html = f.read()
+    except OSError:
+        return FileResponse(index_path)
+    if _VARMON_APP_SCRIPT_PLACEHOLDER in html or _HEAD_INJECT_PLACEHOLDER in html:
+        html = _html_index_apply_injects(html)
+        return HTMLResponse(content=html, media_type="text/html")
+    # Compatibilidad: HTML antiguo sin marcador
+    import re
+
+    m = re.search(
+        r'<script\s+[^>]*src="/static/(?:app\.js|js/entry\.mjs)(?:\?[^"]*)?"[^>]*>\s*</script>',
+        html,
+    )
+    if m:
+        tag = html_main_script_tag()
+        html = html[: m.start()] + tag + html[m.end() :]
+        html = _html_index_apply_injects(html)
+        return HTMLResponse(content=html, media_type="text/html")
+    return FileResponse(index_path)
+
+
+@app.get("/api/vars")
+async def api_list_vars(request: Request):
+    try:
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        data = await asyncio.to_thread(b.list_vars)
+        b.disconnect()
+        extra = _telemetry_snapshot_rows(set(VARMON_TELEMETRY_NAMES), request.app.state)
+        if isinstance(data, list):
+            return JSONResponse(data + extra)
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/var/{name:path}")
+async def api_get_var(name: str, request: Request):
+    if name in VARMON_TELEMETRY_NAME_SET:
+        rows = _telemetry_snapshot_rows({name}, request.app.state)
+        if rows:
+            return JSONResponse(rows[0])
+        return JSONResponse({"error": "telemetría no disponible"}, status_code=404)
+    try:
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        result = await asyncio.to_thread(b.get_var, name)
+        b.disconnect()
+        if result is None:
+            return JSONResponse({"error": "Variable no encontrada"}, status_code=404)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/var/{name:path}")
+async def api_set_var(name: str, value: float = Query(...), var_type: str = Query("double")):
+    if name in VARMON_TELEMETRY_NAME_SET:
+        return JSONResponse({"success": False})
+    try:
+        b = await asyncio.to_thread(_first_uds_bridge)
+        if b is None:
+            return JSONResponse({"error": "No hay instancias VarMonitor (UDS)"}, status_code=503)
+        ok = await asyncio.to_thread(b.set_var, name, value, var_type)
+        b.disconnect()
+        return JSONResponse({"success": ok})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/history/{name:path}")
+async def api_get_history(name: str):
+    """Ruta legacy eliminada: el historial se construye solo desde SHM/TSV."""
+    return JSONResponse(
+        {"error": "Historial en vivo no disponible; use grabaciones TSV."},
+        status_code=410,
+    )
+
+
+ALARM_BUFFER_SEC = 2.2  # ~1 s previos + ~1 s posteriores al contexto de disparo (TSV con snapshot completo)
+ALARM_UDS_POLL_SEC = 0.2  # Sin monitor pero con alarmas: get_var solo sobre nombres en alarma (evita snapshots SHM masivos)
+# SHM muy rápido puede acumular decenas de miles de filas en la ventana; el TSV síncrono bloquearía el bucle asyncio minutos.
+MAX_ALARM_TSV_ROWS = 8000
+
+# Variables sintéticas (solo backend / UI); no existen en C++. Aparecen en el catálogo y en vars_update si están monitorizadas.
+VARMON_TELEMETRY_NAMES: tuple[str, ...] = (
+    "varmon.telemetry.python_ram_mb",
+    "varmon.telemetry.python_cpu_percent",
+    "varmon.telemetry.cpp_ram_mb",
+    "varmon.telemetry.cpp_cpu_percent",
+    "varmon.telemetry.shm_cycle_ms",
+    "varmon.telemetry.browser_js_heap_mb",
+    "varmon.telemetry.ws_monitored_count",
+)
+VARMON_TELEMETRY_NAME_SET: frozenset[str] = frozenset(VARMON_TELEMETRY_NAMES)
+
+
+def _ws_monitored_count_aggregate(state) -> int:
+    """Máximo de |monitored_names| entre WebSockets activos (una pestaña → número exacto)."""
+    counts = getattr(state, "ws_monitored_counts", None)
+    if not isinstance(counts, dict) or not counts:
+        return 0
+    return int(max(counts.values()))
+
+
+def _merge_names_with_telemetry(names_list: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names_list:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    for n in VARMON_TELEMETRY_NAMES:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _telemetry_float(v) -> float:
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)) and math.isfinite(float(v)):
+        return float(v)
+    return 0.0
+
+
+def _telemetry_snapshot_rows(monitored: set[str], app_state) -> list[dict]:
+    """Filas compatibles con vars_update para nombres varmon.telemetry.*."""
+    need = monitored & VARMON_TELEMETRY_NAME_SET
+    if not need:
+        return []
+    t_snap = time.time()
+    py_r = _get_process_ram_mb()
+    py_c = _get_python_cpu_percent(app_state)
+    now_m = time.monotonic()
+    if now_m - getattr(app_state, "varmon_telemetry_cpp_at", 0.0) >= 1.0:
+        cpp_ram, cpp_cpu, shm_hint, shm_active = _fetch_cpp_stats_sync()
+        app_state.varmon_telemetry_cpp_at = now_m
+        app_state.varmon_telemetry_cpp_ram = cpp_ram
+        app_state.varmon_telemetry_cpp_cpu = cpp_cpu
+        app_state.varmon_telemetry_shm_hint = shm_hint
+        app_state.varmon_telemetry_shm_active = shm_active
+    else:
+        cpp_ram = getattr(app_state, "varmon_telemetry_cpp_ram", None)
+        cpp_cpu = getattr(app_state, "varmon_telemetry_cpp_cpu", None)
+        shm_hint = getattr(app_state, "varmon_telemetry_shm_hint", None)
+        shm_active = bool(getattr(app_state, "varmon_telemetry_shm_active", False))
+
+    shm_ms = getattr(app_state, "shm_cycle_ms", None)
+    if isinstance(shm_ms, (int, float)):
+        shm_ms = float(shm_ms)
+    elif isinstance(shm_hint, (int, float)):
+        shm_ms = float(shm_hint)
+    elif shm_active:
+        try:
+            shm_ms = float(_config.get("cycle_interval_ms", 100))
+        except Exception:
+            shm_ms = 0.0
+    else:
+        shm_ms = 0.0
+
+    def row(name: str, val: float) -> dict:
+        return {"name": name, "type": "double", "value": val, "timestamp": t_snap}
+
+    out: list[dict] = []
+    for n in VARMON_TELEMETRY_NAMES:
+        if n not in need:
+            continue
+        if n == "varmon.telemetry.python_ram_mb":
+            out.append(row(n, _telemetry_float(py_r)))
+        elif n == "varmon.telemetry.python_cpu_percent":
+            out.append(row(n, _telemetry_float(py_c)))
+        elif n == "varmon.telemetry.cpp_ram_mb":
+            out.append(row(n, _telemetry_float(cpp_ram)))
+        elif n == "varmon.telemetry.cpp_cpu_percent":
+            out.append(row(n, _telemetry_float(cpp_cpu)))
+        elif n == "varmon.telemetry.shm_cycle_ms":
+            out.append(row(n, _telemetry_float(shm_ms)))
+        elif n == "varmon.telemetry.ws_monitored_count":
+            out.append(row(n, float(_ws_monitored_count_aggregate(app_state))))
+        else:
+            out.append(row(n, 0.0))
+    return out
+
+
+def _var_update_signature(entry: dict) -> tuple:
+    """Firma (tipo, valor) para comparar snapshots sin serializar JSON completo."""
+    typ = entry.get("type") or "double"
+    val = entry.get("value")
+    if typ == "double":
+        if isinstance(val, bool):
+            return (typ, 1.0 if val else 0.0)
+        if isinstance(val, int):
+            return (typ, float(val))
+        if isinstance(val, float):
+            return (typ, val)
+        try:
+            return (typ, float(val))
+        except (TypeError, ValueError):
+            return (typ, val)
+    return (typ, val)
+
+
+def _var_signature_equal(a: tuple, b: tuple) -> bool:
+    if a[0] != b[0]:
+        return False
+    va, vb = a[1], b[1]
+    if va == vb:
+        return True
+    if isinstance(va, float) and isinstance(vb, float):
+        return math.isclose(va, vb, rel_tol=0.0, abs_tol=1e-9)
+    return False
+
+
+def _prune_vars_update_sig_cache(cache: dict[str, tuple], allowed_shm_names: set[str]) -> None:
+    for k in list(cache.keys()):
+        if k not in allowed_shm_names:
+            del cache[k]
+
+
+def _merge_shm_and_telemetry_vars_updates(
+    latest_snapshot: list[dict] | None,
+    name_set: set[str],
+    app_state,
+    sig_cache: dict[str, tuple],
+    force_full: bool,
+) -> tuple[list[dict], bool]:
+    """
+    vars_update en delta para variables SHM (evita JSON gigante con miles de vars estables).
+    La telemetría (pocas filas) se anexa siempre si está monitorizada.
+    """
+    telemetry_rows = _telemetry_snapshot_rows(name_set, app_state)
+    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+    _prune_vars_update_sig_cache(sig_cache, shm_only)
+    cand = [v for v in (latest_snapshot or []) if (v.get("name") or "") in shm_only]
+
+    if force_full or not sig_cache:
+        for v in cand:
+            n = v.get("name")
+            if n:
+                sig_cache[n] = _var_update_signature(v)
+        out = cand + telemetry_rows
+        return out, len(out) > 0
+
+    shm_out: list[dict] = []
+    for v in cand:
+        n = v.get("name")
+        if not n:
+            continue
+        sig = _var_update_signature(v)
+        old = sig_cache.get(n)
+        if old is None or not _var_signature_equal(old, sig):
+            shm_out.append(v)
+            sig_cache[n] = sig
+    out = shm_out + telemetry_rows
+    return out, len(out) > 0
+
+
+# Índice ligero de tiempos por grabación TSV: path -> [(time_s, byte_offset), ...]
+_TIME_INDEX: dict[str, list[tuple[float, int]]] = {}
+_TIME_INDEX_LOCK = threading.Lock()
+
+
+def _ensure_recordings_dir():
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+def _recording_trace_level() -> int:
+    """0=off, 1=SHM_BATCH/py_rec/REC_*, 2=detalle por muestra en batch (VARMON_RECORDING_TRACE=2 o verbose)."""
+    v = (os.environ.get("VARMON_RECORDING_TRACE") or "").strip().lower()
+    if v in ("2", "verbose", "v", "debug"):
+        return 2
+    if v in ("1", "true", "yes", "on"):
+        return 1
+    return 0
+
+
+def _recording_trace_enabled() -> bool:
+    return _recording_trace_level() >= 1
+
+
+def _recording_trace_item_meta(snapshot_item) -> tuple[int | None, float | None]:
+    if not isinstance(snapshot_item, dict):
+        return None, None
+    seq = snapshot_item.get("seq")
+    ts = snapshot_item.get("timestamp")
+    try:
+        seq_i = int(seq) if seq is not None else None
+    except (TypeError, ValueError):
+        seq_i = None
+    try:
+        ts_f = float(ts) if ts is not None else None
+    except (TypeError, ValueError):
+        ts_f = None
+    return seq_i, ts_f
+
+
+def _safe_recording_basename(name: str) -> bool:
+    s = (name or "").strip()
+    if not s or len(s) > 255:
+        return False
+    return bool(re.match(r"^[a-zA-Z0-9._-]+$", s))
+
+
+def _resolve_recording_path(filename: str) -> str | None:
+    """Ruta absoluta a una grabación bajo RECORDINGS_DIR (fichero plano o unitary_test/<pkg>/...)."""
+    raw = (filename or "").strip().replace("\\", "/")
+    if not raw or ".." in raw:
+        return None
+    parts = [p for p in raw.split("/") if p]
+    if len(parts) == 1:
+        if not _safe_recording_basename(parts[0]):
+            return None
+        sub = parts[0]
+    elif len(parts) == 3 and parts[0] == "unitary_test":
+        if not re.match(r"^[a-zA-Z0-9_-]{1,64}$", parts[1]):
+            return None
+        if not _safe_recording_basename(parts[2]):
+            return None
+        sub = os.path.join("unitary_test", parts[1], parts[2])
+    else:
+        return None
+    path = os.path.abspath(os.path.join(RECORDINGS_DIR, sub))
+    root = os.path.abspath(RECORDINGS_DIR)
+    if not path.startswith(root + os.sep):
+        return None
+    return path
+
+
+_UNITARY_PKG_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _unitary_test_pkg_dir(name: str) -> str | None:
+    s = (name or "").strip()
+    if not _UNITARY_PKG_NAME_RE.match(s):
+        return None
+    return os.path.join(RECORDINGS_DIR, "unitary_test", s)
+
+
+# Ruta absoluta al JSON de perf del sidecar (una línea). HTTP /api/perf no comparte memoria con el WebSocket
+# en multi-worker; este fichero + ref en memoria enlazan ambos.
+_SIDECAR_PERF_ACTIVE_NAME = "sidecar_perf_active.path"
+_SIDECAR_PERF_JSON_PATH_LOCK = threading.Lock()
+_SIDECAR_PERF_JSON_PATH_REF: str | None = None
+# Mismos ids que varmon_sidecar/main.cpp kSidecarPerfIds
+_SIDECAR_PERF_PHASE_IDS: tuple[str, ...] = (
+    "sidecar.sem_wait",
+    "sidecar.preflight",
+    "sidecar.ring_extract",
+    "sidecar.ring_format",
+    "sidecar.ring_fwrite",
+    "sidecar.ring_alarms",
+    "sidecar.parse_snapshot",
+    "sidecar.snap_format",
+    "sidecar.snap_fwrite",
+    "sidecar.snap_alarms_status",
+    "sidecar.post_wake_overhead",
+    "sidecar.preflight_read_shm_seq",
+    "sidecar.preflight_seq_gap_emit",
+    "sidecar.preflight_ring_overflow",
+    "sidecar.snap_ostream_stream",
+    "sidecar.snap_row_str",
+    "sidecar.perf_json_flush",
+    "sidecar.cycle_wall_wake_to_fwrite_done",
+    "sidecar.parse_header_meta",
+    "sidecar.parse_body_rows",
+    "sidecar.ring_col_resolve_scan",
+    "sidecar.ring_replay_build_rows",
+    "sidecar.gap_preflight_to_ring_extract",
+    "sidecar.gap_ring_extract_to_parse",
+)
+
+
+def _sidecar_perf_active_pointer_abspath() -> str:
+    return os.path.join(RECORDINGS_DIR, _SIDECAR_PERF_ACTIVE_NAME)
+
+
+def _write_sidecar_perf_active_pointer(abs_perf_json: str) -> None:
+    _ensure_recordings_dir()
+    p = _sidecar_perf_active_pointer_abspath()
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(abs_perf_json + "\n")
+    os.replace(tmp, p)
+
+
+def _read_sidecar_perf_active_pointer() -> str | None:
+    p = _sidecar_perf_active_pointer_abspath()
+    try:
+        with open(p, encoding="utf-8") as f:
+            line = (f.readline() or "").strip()
+        return line if line else None
+    except OSError:
+        return None
+
+
+def _register_sidecar_perf_session(abs_perf_json: str) -> None:
+    """Registra la ruta del JSON de perf (proceso actual + puntero en disco para otros workers)."""
+    global _SIDECAR_PERF_JSON_PATH_REF
+    ap = os.path.abspath(abs_perf_json)
+    with _SIDECAR_PERF_JSON_PATH_LOCK:
+        _SIDECAR_PERF_JSON_PATH_REF = ap
+    _write_sidecar_perf_active_pointer(ap)
+
+
+_SIDECAR_REC_SESSION_NAME = "sidecar_rec_session.json"
+
+
+def _sidecar_rec_session_abspath() -> str:
+    return os.path.join(RECORDINGS_DIR, _SIDECAR_REC_SESSION_NAME)
+
+
+def _write_sidecar_rec_session_file(
+    *,
+    pid: int,
+    perf_json_abs: str | None,
+    bin_path: str,
+    running: bool,
+    exit_code: int | None,
+) -> None:
+    _ensure_recordings_dir()
+    obj = {
+        "pid": pid,
+        "perf_json": perf_json_abs,
+        "sidecar_bin": bin_path,
+        "running": running,
+        "exit_code": exit_code,
+        "started_ts": time.time(),
+    }
+    p = _sidecar_rec_session_abspath()
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, p)
+
+
+def _clear_sidecar_rec_session_file() -> None:
+    try:
+        os.remove(_sidecar_rec_session_abspath())
+    except OSError:
+        pass
+
+
+def _unregister_sidecar_perf_session() -> None:
+    global _SIDECAR_PERF_JSON_PATH_REF
+    with _SIDECAR_PERF_JSON_PATH_LOCK:
+        _SIDECAR_PERF_JSON_PATH_REF = None
+    try:
+        os.remove(_sidecar_perf_active_pointer_abspath())
+    except OSError:
+        pass
+    _clear_sidecar_rec_session_file()
+
+
+def _write_sidecar_perf_stub_json(path: str) -> None:
+    """Crea JSON válido antes del primer ciclo del sidecar (el panel muestra filas en ceros al instante)."""
+    phases = [{"id": pid, "last_us": 0.0, "ema_us": 0.0, "samples": 0} for pid in _SIDECAR_PERF_PHASE_IDS]
+    tmp = path + ".tmp"
+    _ensure_recordings_dir()
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "phases": phases,
+                "sum_to_fwrite_us": -1.0,
+                "post_fwrite_work_us": -1.0,
+                "cycle_wall_wake_to_fwrite_us": -1.0,
+            },
+            f,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _resolve_sidecar_perf_json_path(state) -> str | None:
+    candidates: list[str | None] = []
+    with _SIDECAR_PERF_JSON_PATH_LOCK:
+        candidates.append(_SIDECAR_PERF_JSON_PATH_REF)
+    try:
+        candidates.append(getattr(state, "sidecar_perf_json_path", None))
+    except Exception:
+        candidates.append(None)
+    candidates.append(_read_sidecar_perf_active_pointer())
+    seen: set[str] = set()
+    for c in candidates:
+        if not c:
+            continue
+        ap = os.path.abspath(os.path.expanduser(str(c).strip()))
+        if ap in seen:
+            continue
+        seen.add(ap)
+        if os.path.isfile(ap):
+            return ap
+    # Último recurso: JSON reciente en recordings (mismo patrón que genera el backend)
+    try:
+        _ensure_recordings_dir()
+        pat = os.path.join(RECORDINGS_DIR, "*.part.sidecar_perf.json")
+        files = glob.glob(pat)
+        now = time.time()
+        best: str | None = None
+        best_m = -1.0
+        for fp in files:
+            try:
+                m = os.path.getmtime(fp)
+            except OSError:
+                continue
+            if now - m > 900.0:
+                continue
+            if m > best_m:
+                best_m = m
+                best = fp
+        if best and os.path.isfile(best):
+            return os.path.abspath(best)
+    except OSError:
+        pass
+    return None
+
+
+def _set_var_uds_and_shm_import(
+    bridge: UdsBridge,
+    name: str,
+    value,
+    var_type: str,
+    shm_write_mmap,
+    shm_subscription_order: list[str] | None,
+    shm_layout_ver: int,
+) -> bool:
+    """UDS set_var inmediato; si SHM v2 y el nombre está en la suscripción, también escribe fila IMPORT (one-shot)."""
+    if (
+        shm_write_mmap is not None
+        and int(shm_layout_ver) >= 2
+        and shm_subscription_order
+        and name in shm_subscription_order
+    ):
+        try:
+            idx = shm_subscription_order.index(name)
+            write_shm_import_row(shm_write_mmap, idx, name, var_type, value)
+        except (OSError, TypeError, ValueError):
+            pass
+    return bridge.set_var(name, value, var_type)
+
+
+def _shm_write_import_rows_batch(
+    rows: list[dict],
+    shm_write_mmap,
+    shm_subscription_order: list[str] | None,
+    shm_layout_ver: int,
+) -> bool:
+    """
+    Solo mmap: marca filas MODE_IMPORT_SNAPSHOT (write_shm_import_row).
+    El C++ aplica el valor en el siguiente ciclo (apply_shm_import_values) y resetea el flag a export.
+    No UDS set_var — la inserción es solo por SHM.
+    """
+    if not isinstance(rows, list) or not rows:
+        return False
+    if shm_write_mmap is None or int(shm_layout_ver) < 2 or not shm_subscription_order:
+        return False
+    ok_any = False
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sn = (r.get("name") or "").strip()
+        if not sn or sn in VARMON_TELEMETRY_NAME_SET:
+            continue
+        if sn not in shm_subscription_order:
+            continue
+        val = r.get("value")
+        vt = r.get("var_type", "double")
+        try:
+            idx = shm_subscription_order.index(sn)
+            if write_shm_import_row(shm_write_mmap, idx, sn, vt, val):
+                ok_any = True
+        except (OSError, TypeError, ValueError):
+            continue
+    return ok_any
+
+
+def _shm_subscription_real_names(monitored_names: set[str], alarms_config: dict) -> list[str]:
+    """Nombres que deben publicarse en SHM: monitorizadas ∪ variables con alarma (excl. telemetría sintética)."""
+    out: set[str] = {n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET}
+    for k, cfg in alarms_config.items():
+        if k not in VARMON_TELEMETRY_NAME_SET:
+            out.add(k)
+        if isinstance(cfg, dict) and cfg.get("compareToRef"):
+            refn = (cfg.get("refName") or "").strip() or _default_ref_shm_name_for_alarm(k)
+            if refn and refn not in VARMON_TELEMETRY_NAME_SET:
+                out.add(refn)
+    return sorted(out)
+
+
+def _bootstrap_monitored_vars_rows(monitored_names: set[str], bridge: UdsBridge, app_state) -> list[dict]:
+    """UDS inmediato para la UI al elegir monitorizadas; SHM puede tardar uno o más ciclos C++ tras set_shm_subscription."""
+    rows: list[dict] = []
+    for n in sorted(monitored_names):
+        if n in VARMON_TELEMETRY_NAME_SET:
+            continue
+        try:
+            v = bridge.get_var(n)
+        except Exception:
+            v = None
+        if v:
+            rows.append(v)
+    rows.extend(_telemetry_snapshot_rows(monitored_names, app_state))
+    return rows
+
+
+def _alarms_sidecar_eligible(alarms_config: dict) -> bool:
+    """El sidecar de alarmas solo cubre reglas sobre variables SHM (no telemetría sintética)."""
+    if not alarms_config:
+        return False
+    for k, cfg in alarms_config.items():
+        if k in VARMON_TELEMETRY_NAME_SET:
+            return False
+        if isinstance(cfg, dict) and cfg.get("compareToRef"):
+            refn = (cfg.get("refName") or "").strip()
+            if refn in VARMON_TELEMETRY_NAME_SET:
+                return False
+    return True
+
+
+def _default_ref_shm_name_for_alarm(live_name: str) -> str:
+    safe = "".join(c if (c.isalnum() or c in "._") else "_" for c in str(live_name))
+    if len(safe) > 100:
+        safe = safe[:100]
+    return f"__vm_ref__{safe}"
+
+
+def _write_sidecar_alarms_tsv(path: str, alarms_config: dict) -> int:
+    """TSV v2 para varmon_sidecar: abs → name abs lo hi hys delay_ms; ref → name ref ref_name tol hys delay_ms."""
+    n = 0
+
+    def cell(v) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "1" if v else "0"
+        return str(v)
+
+    with open(path, "w", encoding="utf-8") as f:
+        for name in sorted(alarms_config.keys()):
+            if name in VARMON_TELEMETRY_NAME_SET:
+                continue
+            cfg = alarms_config.get(name)
+            if not isinstance(cfg, dict):
+                continue
+            if cfg.get("compareToRef"):
+                tol = cfg.get("tol")
+                if tol is None:
+                    continue
+                refn = (cfg.get("refName") or "").strip() or _default_ref_shm_name_for_alarm(name)
+                hys, delay_ms = cfg.get("hys"), cfg.get("delayMs")
+                f.write(f"{name}\tref\t{refn}\t{cell(tol)}\t{cell(hys)}\t{cell(delay_ms)}\n")
+                n += 1
+                continue
+            lo, hi = cfg.get("lo"), cfg.get("hi")
+            if lo is None and hi is None:
+                continue
+            hys, delay_ms = cfg.get("hys"), cfg.get("delayMs")
+            f.write(f"{name}\tabs\t{cell(lo)}\t{cell(hi)}\t{cell(hys)}\t{cell(delay_ms)}\n")
+            n += 1
+    return n
+
+
+def _resolve_recording_sidecar_bin(config: dict) -> str | None:
+    """Ruta al ejecutable varmon_sidecar (Linux).
+
+    Prioridad: VARMON_SIDECAR_BIN → recording_sidecar_bin en conf → **build del repo** → PATH.
+    El PATH al final evita que un `varmon_sidecar` instalado en el sistema gane sobre `make` en build/.
+    """
+    envp = (os.environ.get("VARMON_SIDECAR_BIN") or "").strip()
+    if envp and os.path.isfile(envp) and os.access(envp, os.X_OK):
+        return envp
+    cfgp = (config.get("recording_sidecar_bin") or "").strip()
+    if cfgp and os.path.isfile(cfgp) and os.access(cfgp, os.X_OK):
+        return cfgp
+    base = os.path.dirname(os.path.abspath(__file__))
+    for rel in (
+        os.path.join(base, "..", "build-sidecar", "varmon_sidecar", "varmon_sidecar"),
+        os.path.join(base, "..", "build", "varmon_sidecar", "varmon_sidecar"),
+    ):
+        cand = os.path.abspath(rel)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    which = shutil.which("varmon_sidecar")
+    if which:
+        return which
+    return None
+
+
+def _sidecar_recording_trace_env(config: dict) -> dict:
+    """Entorno del hijo varmon_sidecar: hereda el proceso padre y opcionalmente fuerza trazas desde varmon.conf."""
+    env = os.environ.copy()
+    t = str(config.get("recording_sidecar_trace") or "").strip()
+    if t:
+        env["VARMON_SIDECAR_RECORDING_TRACE"] = t
+    return env
+
+
+def _parse_cpu_affinity_spec(spec: str) -> frozenset[int] | None:
+    """Parsea '2', '2,3', '1-3', '0,4-5' → índices de CPU. Cadena vacía → None."""
+    s = (spec or "").strip()
+    if not s:
+        return None
+    out: set[int] = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                lo, hi = int(a.strip()), int(b.strip())
+            except ValueError:
+                continue
+            if lo > hi:
+                lo, hi = hi, lo
+            for c in range(lo, hi + 1):
+                if c >= 0:
+                    out.add(c)
+        else:
+            try:
+                c = int(part)
+            except ValueError:
+                continue
+            if c >= 0:
+                out.add(c)
+    return frozenset(out) if out else None
+
+
+def _apply_sidecar_cpu_affinity(pid: int, config: dict, label: str) -> None:
+    """Tras Popen de varmon_sidecar: fija CPUs del hijo (Linux) para reducir contienda con el backend Python."""
+    if pid is None or pid <= 0:
+        return
+    if not getattr(os, "sched_setaffinity", None):
+        return
+    spec = (config.get("sidecar_cpu_affinity") or "").strip()
+    cpus = _parse_cpu_affinity_spec(spec)
+    if not cpus:
+        return
+    try:
+        os.sched_setaffinity(pid, cpus)
+        cs = ",".join(str(c) for c in sorted(cpus))
+        print(f"[VarMonitor Web] {label}: afinidad CPU pid={pid} cpus={cs}", flush=True)
+    except OSError as e:
+        print(
+            f"[VarMonitor Web] {label}: no se pudo aplicar sidecar_cpu_affinity={spec!r} a pid {pid}: {e}",
+            flush=True,
+        )
+
+
+def _shm_sem_name_for_sidecar(info: dict | None) -> str | None:
+    """Sem POSIX solo para varmon_sidecar (un post del C++ por consumidor). Monitores antiguos: mismo `sem_name`."""
+    if not info:
+        return None
+    sc = (info.get("sem_sidecar_name") or "").strip()
+    if sc:
+        return sc
+    return (info.get("sem_name") or "").strip() or None
+
+
+def _read_ndjson_lines_from_offset(path: str, start_off: int) -> tuple[list[dict], int]:
+    """Lee líneas NDJSON nuevas desde start_off; devuelve (objetos JSON, nuevo offset)."""
+    out: list[dict] = []
+    if not path or not os.path.isfile(path):
+        return out, start_off
+    off = start_off
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            f.seek(start_off)
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                off = f.tell()
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                    if isinstance(o, dict):
+                        out.append(o)
+                except json.JSONDecodeError:
+                    pass
+    except OSError:
+        return out, start_off
+    return out, off
+
+
+def _log_sidecar_shm_health_line(obj: dict, label: str) -> None:
+    """Escribe en stdout (visor de log) avisos SHM emitidos por varmon_sidecar."""
+    if obj.get("source") != "varmon_sidecar":
+        return
+    kind = obj.get("kind")
+    if kind == "seq_gap":
+        skipped = obj.get("skipped")
+        fr = obj.get("from_seq")
+        to = obj.get("to_seq")
+        print(
+            f"[VarMonitor SHM sidecar{label}] Salto de secuencia: omitidos {skipped} snapshot(s) (seq {fr} → {to})",
+            flush=True,
+        )
+    elif kind == "ring_loss":
+        print(
+            f"[VarMonitor SHM sidecar{label}] Anillo SHM v2: posible pérdida por desbordamiento",
+            flush=True,
+        )
+
+
+def _ensure_state_dirs():
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+
+def _safe_json_name(name: str) -> str | None:
+    safe = os.path.basename((name or "").strip())
+    if not safe:
+        return None
+    safe = safe.replace(".json", "")
+    if not safe:
+        return None
+    return safe
+
+
+def _json_path(base_dir: str, name: str) -> str | None:
+    safe = _safe_json_name(name)
+    if not safe:
+        return None
+    path = os.path.abspath(os.path.join(base_dir, safe + ".json"))
+    root = os.path.abspath(base_dir)
+    if not path.startswith(root + os.sep):
+        return None
+    return path
+
+
+def _save_runtime_config_overrides(updates: dict) -> None:
+    """Persist selected runtime config keys into varmon.conf."""
+    allowed = {"web_port", "web_port_scan_max", "server_state_dir", "recordings_write_tsv"}
+    clean = {k: updates[k] for k in updates.keys() if k in allowed}
+    if not clean:
+        return
+    path = CONFIG_ABS_PATH or os.path.abspath("varmon.conf")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines: list[str] = []
+    existing: dict[str, str] = {}
+    if os.path.isfile(path):
+        with open(path, "r") as f:
+            lines = f.read().splitlines()
+        for ln in lines:
+            s = ln.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            existing[k.strip()] = v.strip()
+    for k, v in clean.items():
+        if k == "recordings_write_tsv":
+            existing[k] = "1" if v else "0"
+        else:
+            existing[k] = str(v)
+    output: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        s = ln.strip()
+        if "=" not in s or s.startswith("#"):
+            output.append(ln)
+            continue
+        k = s.split("=", 1)[0].strip()
+        if k in existing:
+            output.append(f"{k} = {existing[k]}")
+            seen.add(k)
+        else:
+            output.append(ln)
+    for k, v in existing.items():
+        if k not in seen:
+            output.append(f"{k} = {v}")
+    with open(path, "w") as f:
+        f.write("\n".join(output).rstrip() + "\n")
+
+
+def _write_snapshots_tsv(filepath: str, snapshots: list[tuple[float, list[dict]]], var_names: list[str] | None = None) -> None:
+    """Escribe snapshots a TSV (tabuladores). Arrays expandidos en columnas: name_0, name_1, ...
+
+    Antes: por cada nombre de variable se escaneaba cada fila entera → ~O(n_vars × n_filas × n_vars).
+    Ahora: un pase para anchos máximos + el mismo camino rápido que la grabación por fila.
+    """
+    if not snapshots:
+        return
+    t0 = float(snapshots[0][0])
+    if var_names is None:
+        names_set = set()
+        for _, data in snapshots:
+            for e in data:
+                if isinstance(e, dict) and e.get("name") is not None:
+                    names_set.add(e["name"])
+        var_names = sorted(names_set)
+    col_spec = _build_col_spec_max_over_snapshots(snapshots, var_names)
+    row_layout = _record_row_layout(col_spec)
+    with open(filepath, "w", buffering=1024 * 1024) as f:
+        _write_record_header_stream(f, col_spec)
+        for t, data in snapshots:
+            t_rel = max(0.0, float(t) - t0)
+            _write_record_row_stream(f, t_rel, data, col_spec, row_layout)
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except (OSError, AttributeError):
+            pass
+
+
+def _finalize_alarm_recording_sync(
+    buf_snap: list,
+    buf_now: list,
+    recordings_dir: str,
+    send_file_on_finish: bool,
+) -> tuple[str, str, str | None] | None:
+    """Fusiona buffers, recorta filas, escribe TSV y opcionalmente codifica el fichero. Ejecutar vía asyncio.to_thread."""
+    import base64
+    from datetime import datetime
+
+    by_t: dict[float, list] = {}
+    for t, data in buf_snap:
+        try:
+            tf = float(t)
+        except (TypeError, ValueError):
+            continue
+        by_t[tf] = data
+    for t, data in buf_now:
+        try:
+            tf = float(t)
+        except (TypeError, ValueError):
+            continue
+        by_t[tf] = data
+    buf = [(tk, by_t[tk]) for tk in sorted(by_t.keys())]
+    if not buf:
+        return None
+    if len(buf) > MAX_ALARM_TSV_ROWS:
+        dropped = len(buf) - MAX_ALARM_TSV_ROWS
+        buf = buf[-MAX_ALARM_TSV_ROWS:]
+        print(
+            f"[VarMonitor Web] TSV alarma: recortadas {dropped} filas antiguas (máx {MAX_ALARM_TSV_ROWS})",
+            flush=True,
+        )
+    os.makedirs(recordings_dir, exist_ok=True)
+    var_names = sorted(set(e["name"] for _, data in buf for e in data))
+    if not var_names:
+        var_names = ["time_s"]
+    rp = _rp()
+    if parquet_recording_enabled() and rp is not None:
+        fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+        path = os.path.join(recordings_dir, fn)
+        rp.write_snapshots_parquet(path, buf, var_names)
+        if _recordings_mirror_tsv():
+            try:
+                rp.export_parquet_to_tsv(path, rp.sibling_tsv_for_parquet(path))
+            except Exception:
+                pass
+    else:
+        fn = f"alarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+        path = os.path.join(recordings_dir, fn)
+        _write_snapshots_tsv(path, buf, var_names)
+    file_b64: str | None = None
+    if send_file_on_finish:
+        try:
+            with open(path, "rb") as f:
+                file_b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            pass
+    return (path, fn, file_b64)
+
+
+def _file_read_base64_sync(path: str) -> str | None:
+    import base64
+
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return None
+
+
+def _estimate_record_header_bytes(var_names: list[str], snapshot: list[dict] | None = None) -> int:
+    """Estimación de bytes de cabecera TSV para progreso de grabación."""
+    snap_map = {e.get("name"): e.get("value") for e in (snapshot or []) if isinstance(e, dict)}
+    parts = ["time_s"]
+    for name in var_names:
+        v = snap_map.get(name)
+        if isinstance(v, (list, tuple)) and len(v) > 1:
+            parts.extend(f"{name}_{i}" for i in range(len(v)))
+        else:
+            parts.append(name)
+    return len(("\t".join(parts) + "\n").encode("utf-8", errors="ignore"))
+
+
+def _estimate_record_row_bytes(t_snap: float, snapshot: list[dict], var_names: list[str]) -> int:
+    """Estimación de bytes de una fila TSV (aprox) para mostrar tamaño en vivo."""
+    name_to_val = {e.get("name"): e.get("value", "") for e in snapshot if isinstance(e, dict)}
+    row_parts = [f"{t_snap:.6f}"]
+    for name in var_names:
+        v = name_to_val.get(name, "")
+        if isinstance(v, (list, tuple)):
+            if len(v) <= 1:
+                row_parts.append(str(v[0]) if len(v) == 1 else "")
+            else:
+                for item in v:
+                    row_parts.append(str(item))
+        else:
+            row_parts.append(str(v))
+    return len(("\t".join(row_parts) + "\n").encode("utf-8", errors="ignore"))
+
+
+def _flush_record_buffer_to_tsv(
+    record_buffer: list[tuple[float, list[dict]]],
+    recording_var_names: list[str] | None,
+) -> tuple[str, str, int]:
+    """Vuelca el buffer de grabación a Parquet (y TSV opcional) y devuelve (path, filename, size_bytes)."""
+    if not record_buffer:
+        return "", "", 0
+    _ensure_recordings_dir()
+    from datetime import datetime
+    var_names = recording_var_names or sorted(set(e["name"] for _, data in record_buffer for e in data))
+    rp = _rp()
+    if parquet_recording_enabled() and rp is not None:
+        fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+        path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
+        rp.write_snapshots_parquet(path_saved, record_buffer, var_names)
+        if _recordings_mirror_tsv():
+            path_tsv = rp.sibling_tsv_for_parquet(path_saved)
+            try:
+                rp.export_parquet_to_tsv(path_saved, path_tsv)
+            except Exception as e:
+                print(f"[VarMonitor Web] No se pudo escribir TSV espejo: {e}", flush=True)
+    else:
+        fn_saved = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+        path_saved = os.path.join(RECORDINGS_DIR, fn_saved)
+        _write_snapshots_tsv(path_saved, record_buffer, var_names)
+    try:
+        size_bytes = int(os.path.getsize(path_saved))
+    except Exception:
+        size_bytes = 0
+    return path_saved, fn_saved, size_bytes
+
+
+def _record_row_layout(col_spec: list[tuple[str, int]]) -> tuple[dict[str, tuple[int, int]], int]:
+    """Nombre → (offset, celdas) en la fila TSV de valores; evita dict nombre→valor de todo el snapshot por muestra."""
+    layout: dict[str, tuple[int, int]] = {}
+    off = 0
+    for name, size in col_spec:
+        sz = max(1, int(size))
+        layout[name] = (off, sz)
+        off += sz
+    return layout, off
+
+
+def _build_record_col_spec(var_names: list[str], snapshot: list[dict]) -> list[tuple[str, int]]:
+    """Construye especificación de columnas para grabación incremental."""
+    snap_map = {e.get("name"): e.get("value") for e in snapshot if isinstance(e, dict)}
+    spec: list[tuple[str, int]] = []
+    for name in var_names:
+        v = snap_map.get(name)
+        if isinstance(v, (list, tuple)) and len(v) > 1:
+            spec.append((name, len(v)))
+        else:
+            spec.append((name, 1))
+    return spec
+
+
+def _build_col_spec_max_over_snapshots(
+    snapshots: list[tuple[float, list[dict]]],
+    var_names: list[str],
+) -> list[tuple[str, int]]:
+    """Máximo ancho de array por variable: una pasada por todas las celdas (O(n_filas × n_celdas_por_fila))."""
+    max_len: dict[str, int] = dict.fromkeys(var_names, 1)
+    for _, data in snapshots:
+        for e in data:
+            if not isinstance(e, dict):
+                continue
+            n = e.get("name")
+            if n not in max_len:
+                continue
+            v = e.get("value")
+            if isinstance(v, (list, tuple)) and len(v) > max_len[n]:
+                max_len[n] = len(v)
+    return [(name, max_len[name]) for name in var_names]
+
+
+def _write_record_header_stream(f, col_spec: list[tuple[str, int]]) -> int:
+    parts = ["time_s"]
+    for name, size in col_spec:
+        if size <= 1:
+            parts.append(name)
+        else:
+            parts.extend(f"{name}_{i}" for i in range(size))
+    line = "\t".join(parts) + "\n"
+    f.write(line)
+    return len(line.encode("utf-8", errors="ignore"))
+
+
+def _write_record_row_stream(
+    f,
+    t_snap: float,
+    snapshot: list[dict],
+    col_spec: list[tuple[str, int]],
+    row_layout: tuple[dict[str, tuple[int, int]], int] | None = None,
+) -> int:
+    if row_layout is None:
+        row_layout = _record_row_layout(col_spec)
+    layout, nvals = row_layout
+    vals = [""] * nvals
+    for e in snapshot:
+        if not isinstance(e, dict):
+            continue
+        n = e.get("name")
+        if n is None or n not in layout:
+            continue
+        off, size = layout[n]
+        v = e.get("value", "")
+        if size <= 1:
+            if isinstance(v, (list, tuple)):
+                vals[off] = str(v[0]) if len(v) >= 1 else ""
+            else:
+                vals[off] = str(v)
+        else:
+            if isinstance(v, (list, tuple)):
+                for i in range(size):
+                    vals[off + i] = str(v[i]) if i < len(v) else ""
+            else:
+                vals[off] = str(v)
+                for i in range(1, size):
+                    vals[off + i] = ""
+    line = f"{t_snap:.6f}\t" + "\t".join(vals) + "\n"
+    f.write(line)
+    return len(line.encode("utf-8", errors="ignore"))
+
+
+def _recording_writer_thread(
+    queue: Queue,
+    path: str,
+    var_names: list[str] | None,
+    rows_written_ref: list[int],
+) -> None:
+    """Hilo que escribe (t_rel, snapshot) a Parquet incremental; TSV espejo opcional."""
+    _ensure_recordings_dir()
+    rp = _rp()
+    if rp is None:
+        print("[VarMonitor Web] Grabación Parquet: módulo Pro no disponible", flush=True)
+        return
+    RecordingParquetAppender = rp.RecordingParquetAppender
+    appender = None
+    tsv_f = None
+    col_spec: list[tuple[str, int]] | None = None
+    row_layout: tuple[dict[str, tuple[int, int]], int] | None = None
+    mirror = _recordings_mirror_tsv()
+    try:
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+            t_rel, snapshot = item
+            if not snapshot:
+                continue
+            if appender is None:
+                appender = RecordingParquetAppender(path, batch_rows=512)  # type: ignore[misc]
+            if mirror and col_spec is None:
+                names = var_names or sorted(
+                    {e.get("name") for e in snapshot if isinstance(e, dict) and e.get("name") is not None}
+                )
+                col_spec = _build_record_col_spec(names, snapshot)
+                row_layout = _record_row_layout(col_spec)
+                tsv_f = open(path + ".mirror.tsv", "w", buffering=1024 * 1024)
+                _write_record_header_stream(tsv_f, col_spec)
+            if appender is not None:
+                appender.append_row(t_rel, snapshot, var_names)
+            if mirror and tsv_f is not None and col_spec is not None and row_layout is not None:
+                _write_record_row_stream(tsv_f, t_rel, snapshot, col_spec, row_layout)
+            rows_written_ref[0] += 1
+            if _recording_trace_enabled():
+                n = rows_written_ref[0]
+                if n <= 256 or n % 250 == 0:
+                    print(
+                        f"[VarMonitor Web] [recording_trace] writer_thread row={n} t_rel={t_rel:.9f} "
+                        f"queue_item_after_put={n}",
+                        flush=True,
+                    )
+    finally:
+        if appender is not None:
+            try:
+                appender.close()
+            except Exception:
+                pass
+        if tsv_f is not None:
+            try:
+                tsv_f.flush()
+                tsv_f.close()
+            except Exception:
+                pass
+
+
+def _finalize_recording_temp_file(temp_path: str | None, rows_written: int) -> tuple[str, str, int]:
+    """Cierra grabación: temporal .parquet.part o .tsv.part → record_*.parquet (+ TSV espejo opcional)."""
+    if not temp_path:
+        return "", "", 0
+    mirror_path = temp_path + ".mirror.tsv"
+    try:
+        if rows_written <= 0:
+            for p in (temp_path, mirror_path):
+                if p and os.path.isfile(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            return "", "", 0
+        _ensure_recordings_dir()
+        from datetime import datetime
+        low = temp_path.lower()
+        # Entrega sin módulo Parquet: el temporal ya es TSV → solo renombrar a record_*.tsv.
+        rp = _rp()
+        if low.endswith(".tsv.part") and (not parquet_recording_enabled() or rp is None):
+            fn_out = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+            path_saved = os.path.join(RECORDINGS_DIR, fn_out)
+            if os.path.isfile(temp_path):
+                os.replace(temp_path, path_saved)
+            if os.path.isfile(mirror_path):
+                try:
+                    os.remove(mirror_path)
+                except OSError:
+                    pass
+            try:
+                size_saved = int(os.path.getsize(path_saved))
+            except Exception:
+                size_saved = 0
+            return path_saved, fn_out, size_saved
+
+        if rp is None:
+            print(
+                "[VarMonitor Web] No se puede finalizar grabación Parquet: módulo Pro (recordings_parquet) no disponible",
+                flush=True,
+            )
+            return "", "", 0
+
+        fn_pq = f"record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+        path_saved = os.path.join(RECORDINGS_DIR, fn_pq)
+        if low.endswith(".parquet.part") or low.endswith(".parquet"):
+            if os.path.isfile(temp_path):
+                os.replace(temp_path, path_saved)
+        else:
+            if not os.path.isfile(temp_path):
+                return "", "", 0
+            rp.convert_tsv_file_to_parquet(temp_path, path_saved)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        tsv_out = rp.sibling_tsv_for_parquet(path_saved)
+        mirror_ok = False
+        if _recordings_mirror_tsv():
+            # Durante la grabación Parquet ya escribimos el TSV en .mirror.tsv: reutilizarlo
+            # (evita leer Parquet con PyArrow y fallos "binary file expected" en write_csv).
+            if os.path.isfile(mirror_path) and os.path.getsize(mirror_path) > 0:
+                try:
+                    os.replace(mirror_path, tsv_out)
+                    mirror_ok = True
+                except OSError as e:
+                    print(f"[VarMonitor Web] TSV espejo tras grabación (mover mirror): {e}", flush=True)
+                    try:
+                        os.remove(mirror_path)
+                    except OSError:
+                        pass
+            elif os.path.isfile(mirror_path):
+                try:
+                    os.remove(mirror_path)
+                except OSError:
+                    pass
+            if not mirror_ok and os.path.isfile(path_saved) and rp.file_has_parquet_magic(path_saved):
+                try:
+                    rp.export_parquet_to_tsv(path_saved, tsv_out)
+                except Exception as e:
+                    print(f"[VarMonitor Web] TSV espejo tras grabación: {e}", flush=True)
+            elif not mirror_ok and os.path.isfile(path_saved) and not rp.file_has_parquet_magic(path_saved):
+                print(
+                    "[VarMonitor Web] TSV espejo tras grabación: sin mirror útil y el .parquet no tiene magic PAR1; "
+                    "no se generó .tsv",
+                    flush=True,
+                )
+        elif os.path.isfile(mirror_path):
+            try:
+                os.remove(mirror_path)
+            except OSError:
+                pass
+        try:
+            size_saved = int(os.path.getsize(path_saved))
+        except Exception:
+            size_saved = 0
+        return path_saved, fn_pq, size_saved
+    except Exception:
+        return "", "", 0
+
+
+def _evaluate_alarms(
+    snapshot: list[dict],
+    alarms_config: dict,
+    prev_state: dict,
+    pending_since_ms: dict,
+    now_ms: int,
+) -> tuple[dict, dict, list[dict], list[str]]:
+    """Evalúa umbrales en snapshot.
+
+    Devuelve (nuevo_estado, nuevo_pending_since_ms, triggered [{name, reason, value}], cleared [name]).
+    Soporta histéresis y delay de activación por alarma.
+    """
+    new_state = dict(prev_state)
+    new_pending = dict(pending_since_ms)
+    triggered = []
+    cleared = []
+    names_needed = frozenset(alarms_config.keys())
+    var_by_name: dict[str, dict] = {}
+    for e in snapshot:
+        if not isinstance(e, dict):
+            continue
+        n = e.get("name")
+        if n is None or n not in names_needed:
+            continue
+        var_by_name[n] = e
+    for name, cfg in alarms_config.items():
+        if isinstance(cfg, dict) and cfg.get("compareToRef"):
+            continue
+        if name not in var_by_name:
+            continue
+        e = var_by_name[name]
+        val = e.get("value")
+        if not isinstance(val, (int, float)):
+            continue
+        lo = cfg.get("lo")
+        hi = cfg.get("hi")
+        hys = cfg.get("hys")
+        delay_ms = cfg.get("delayMs")
+        hys = max(0.0, float(hys)) if isinstance(hys, (int, float)) else 0.0
+        delay_ms = max(0, int(delay_ms)) if isinstance(delay_ms, (int, float)) else 0
+        alarming = False
+        reason = ""
+        was = bool(prev_state.get(name, False))
+
+        over_hi = (hi is not None and val > hi)
+        under_lo = (lo is not None and val < lo)
+        if was:
+            clear_hi = (hi is None) or (val <= (float(hi) - hys))
+            clear_lo = (lo is None) or (val >= (float(lo) + hys))
+            if clear_hi and clear_lo:
+                alarming = False
+            else:
+                alarming = (hi is not None and val > (float(hi) - hys)) or (lo is not None and val < (float(lo) + hys))
+        else:
+            alarming = over_hi or under_lo
+
+        if not alarming:
+            new_pending.pop(name, None)
+            new_state[name] = False
+        else:
+            if name not in new_pending:
+                new_pending[name] = now_ms
+            if now_ms - int(new_pending[name]) >= delay_ms:
+                new_state[name] = True
+            else:
+                new_state[name] = False
+
+        if new_state[name] and not was:
+            if hi is not None and val > hi:
+                reason = f"{name} = {val:.4f} > Hi:{hi}"
+            elif lo is not None and val < lo:
+                reason = f"{name} = {val:.4f} < Lo:{lo}"
+            else:
+                reason = f"{name} en alarma ({val:.4f})"
+            triggered.append({"name": name, "reason": reason, "value": val})
+        elif was and not new_state[name]:
+            cleared.append(name)
+    return new_state, new_pending, triggered, cleared
+
+
+@app.get("/api/uds_instances")
+async def api_uds_instances(user: str | None = Query(None, description="Filtrar por usuario (solo varmon-<user>-*.sock)")):
+    """Lista instancias VarMonitor accesibles por UDS en /tmp. Sin TCP."""
+    instances = await asyncio.to_thread(_list_uds_instances, user)
+    return {"instances": instances}
+
+
+def _sync_sidecar_alarm_tsv_to_parquet() -> None:
+    """Convierte alarm_*.tsv del sidecar C++ a Parquet; elimina TSV si no se pide espejo."""
+    if not parquet_recording_enabled():
+        return
+    rp = _rp()
+    if rp is None:
+        return
+    mirror = _recordings_mirror_tsv()
+    try:
+        for fn in os.listdir(RECORDINGS_DIR):
+            if not fn.lower().endswith(".tsv"):
+                continue
+            if not fn.lower().startswith("alarm_"):
+                continue
+            tsv_path = os.path.join(RECORDINGS_DIR, fn)
+            if not os.path.isfile(tsv_path):
+                continue
+            pq_path = tsv_path[:-4] + ".parquet"
+            need_conv = True
+            if os.path.isfile(pq_path):
+                try:
+                    if os.path.getmtime(pq_path) >= os.path.getmtime(tsv_path):
+                        need_conv = False
+                except OSError:
+                    pass
+            if not need_conv:
+                continue
+            try:
+                rp.convert_tsv_file_to_parquet(tsv_path, pq_path)
+                if not mirror:
+                    try:
+                        os.remove(tsv_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                print(f"[VarMonitor Web] Aviso: alarm TSV→Parquet ({fn}): {e}", flush=True)
+    except Exception:
+        pass
+
+
+def _list_recordings_rows() -> list[dict]:
+    """Una entrada por stem; prioriza .parquet sobre .tsv legacy."""
+    _sync_sidecar_alarm_tsv_to_parquet()
+    _ensure_recordings_dir()
+    rows: list[dict] = []
+    try:
+        names = [f for f in os.listdir(RECORDINGS_DIR) if not f.startswith(".")]
+        stems = {f.rsplit(".", 1)[0] for f in names if f.lower().endswith((".tsv", ".parquet"))}
+        for stem in stems:
+            fn_pq = stem + ".parquet"
+            fn_tsv = stem + ".tsv"
+            fn = fn_pq if fn_pq in names else (fn_tsv if fn_tsv in names else None)
+            if not fn:
+                continue
+            fl = fn.lower()
+            path = os.path.join(RECORDINGS_DIR, fn)
+            if not os.path.isfile(path):
+                continue
+            st = os.stat(path)
+            kind = "alarm" if fl.startswith("alarm_") else ("record" if fl.startswith("record_") else "other")
+            if fl.startswith("snapshot_"):
+                kind = "snapshot"
+            if fl.startswith("segment_"):
+                kind = "segment"
+            row = {
+                "filename": fn,
+                "format": "parquet" if fl.endswith(".parquet") else "tsv",
+                "size": int(st.st_size),
+                "mtime": float(st.st_mtime),
+                "kind": kind,
+            }
+            if fl.endswith(".parquet"):
+                try:
+                    rp = _rp()
+                    if rp is not None:
+                        row["rows"] = int(rp.parquet_num_rows(path))
+                        row["columns"] = int(rp.parquet_num_columns(path))
+                except Exception:
+                    pass
+            rows.append(row)
+    except Exception:
+        rows = []
+    rows.sort(key=lambda x: -x["mtime"])
+    return rows
+
+
+@app.get("/api/recordings")
+async def api_recordings():
+    """Lista grabaciones Parquet/TSV en recordings/, ordenadas por mtime desc."""
+    rows = await asyncio.to_thread(_list_recordings_rows)
+    return JSONResponse(
+        {"recordings": rows},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
+
+
+@app.get("/api/unitary_test")
+async def api_unitary_test_list():
+    """Lista paquetes bajo recordings/unitary_test/<nombre>/."""
+    _ensure_recordings_dir()
+    base = os.path.join(RECORDINGS_DIR, "unitary_test")
+    out: list[dict] = []
+    if not os.path.isdir(base):
+        return {"packages": out}
+    try:
+        for entry in sorted(os.listdir(base)):
+            if entry.startswith("."):
+                continue
+            pdir = os.path.join(base, entry)
+            if not os.path.isdir(pdir):
+                continue
+            man_path = os.path.join(pdir, "monitor_template.json")
+            ref_file = None
+            mtime = 0.0
+            if os.path.isfile(man_path):
+                try:
+                    with open(man_path, "r", encoding="utf-8") as f:
+                        manifest = json.load(f)
+                    if isinstance(manifest, dict):
+                        r = manifest.get("reference_file")
+                        if isinstance(r, str) and _safe_recording_basename(r):
+                            ref_file = r
+                except Exception:
+                    pass
+            if not ref_file:
+                for fn in sorted(os.listdir(pdir)):
+                    fl = fn.lower()
+                    if fl.endswith((".parquet", ".tsv")) and _safe_recording_basename(fn):
+                        ref_file = fn
+                        break
+            if ref_file:
+                try:
+                    st = os.stat(os.path.join(pdir, ref_file))
+                    mtime = float(st.st_mtime)
+                except OSError:
+                    mtime = 0.0
+            out.append({"name": entry, "reference_file": ref_file, "mtime": mtime})
+    except OSError:
+        pass
+    return {"packages": out}
+
+
+@app.post("/api/unitary_test/export")
+async def api_unitary_test_export(request: Request):
+    """Crea recordings/unitary_test/<nombre>/ con copia de referencia + monitor_template.json."""
+    _ensure_recordings_dir()
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON inválido"}, status_code=400)
+    name = str(payload.get("name") or "").strip()
+    ref_src = str(payload.get("reference_filename") or "").strip()
+    cfg = payload.get("config")
+    if not _UNITARY_PKG_NAME_RE.match(name):
+        return JSONResponse({"error": "Nombre de paquete inválido"}, status_code=400)
+    path_src = _resolve_recording_path(ref_src)
+    if path_src is None or not os.path.isfile(path_src):
+        return JSONResponse({"error": "Grabación de referencia no encontrada"}, status_code=404)
+    base_fn = os.path.basename(path_src)
+    dest_dir = os.path.join(RECORDINGS_DIR, "unitary_test", name)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_file = os.path.join(dest_dir, base_fn)
+        shutil.copy2(path_src, dest_file)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    manifest = {
+        "reference_file": base_fn,
+        "monitor_template": cfg if isinstance(cfg, dict) else {},
+    }
+    try:
+        with open(os.path.join(dest_dir, "monitor_template.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel = f"unitary_test/{name}/{base_fn}"
+    return {"ok": True, "relative_path": rel, "reference_file": base_fn}
+
+
+@app.get("/api/unitary_test/{name}")
+async def api_unitary_test_get(name: str):
+    """Devuelve plantilla de monitor y ruta relativa de la referencia para cargar en el cliente."""
+    d = _unitary_test_pkg_dir(name)
+    if not d or not os.path.isdir(d):
+        return JSONResponse({"error": "Paquete no encontrado"}, status_code=404)
+    man_path = os.path.join(d, "monitor_template.json")
+    manifest: dict = {}
+    if os.path.isfile(man_path):
+        try:
+            with open(man_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception:
+            manifest = {}
+    ref = manifest.get("reference_file") if isinstance(manifest, dict) else None
+    if not isinstance(ref, str) or not _safe_recording_basename(ref):
+        ref = None
+    if not ref:
+        for fn in sorted(os.listdir(d)):
+            if fn.lower().endswith((".parquet", ".tsv")) and _safe_recording_basename(fn):
+                ref = fn
+                break
+    if not ref:
+        return JSONResponse({"error": "Sin fichero de referencia"}, status_code=404)
+    cfg = manifest.get("monitor_template") if isinstance(manifest, dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    rel_path = f"unitary_test/{name}/{ref}"
+    path = _resolve_recording_path(rel_path)
+    if path is None or not os.path.isfile(path):
+        return JSONResponse({"error": "Referencia no encontrada"}, status_code=404)
+    return {"name": name, "reference_path": rel_path, "config": cfg}
+
+
+def _resolve_browse_path(relative_path: str) -> Path | None:
+    """Resuelve una ruta relativa bajo BROWSER_ROOT. Devuelve Path o None si es inválida."""
+    root = BROWSER_ROOT.resolve()
+    path = (root / (relative_path or "").strip().lstrip("/")).resolve()
+    try:
+        path = path.resolve()
+        if not path.is_relative_to(root):
+            return None
+        return path
+    except (ValueError, OSError):
+        return None
+
+
+def _safe_upload_basename(raw: str | None) -> str | None:
+    """Nombre de fichero local sin componentes de ruta ni caracteres peligrosos."""
+    name = os.path.basename((raw or "").strip())
+    if not name or name in (".", ".."):
+        return None
+    if "/" in name or "\\" in name or "\x00" in name:
+        return None
+    return name
+
+
+_BROWSE_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
+@app.get("/api/browse")
+async def api_browse(path: str = Query("", description="Ruta relativa al root del proyecto")):
+    """Lista el contenido de un directorio dentro de la raíz del proyecto."""
+    resolved = _resolve_browse_path(path)
+    if resolved is None:
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not resolved.is_dir():
+        return JSONResponse({"error": "No es un directorio"}, status_code=400)
+    entries: list[dict] = []
+    try:
+        for entry in sorted(resolved.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            name = entry.name
+            if name.startswith(".") and name not in (".", ".."):
+                continue
+            is_dir = entry.is_dir()
+            st = entry.stat()
+            row = {"name": name, "is_dir": is_dir}
+            if not is_dir:
+                row["size"] = st.st_size
+            row["mtime"] = st.st_mtime
+            entries.append(row)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel_path = str(resolved.relative_to(BROWSER_ROOT)) if resolved != BROWSER_ROOT else ""
+    return {"path": rel_path, "root": str(BROWSER_ROOT), "entries": entries}
+
+
+@app.post("/api/browse/upload")
+async def api_browse_upload(
+    path: str = Form("", description="Directorio relativo al root (vacío = raíz del proyecto)"),
+    file: UploadFile = File(...),
+):
+    """Sube un fichero a un directorio bajo BROWSER_ROOT (modo edición / explorador)."""
+    parent = _resolve_browse_path(path)
+    if parent is None:
+        return JSONResponse({"error": "Ruta de carpeta inválida"}, status_code=400)
+    if not parent.is_dir():
+        return JSONResponse({"error": "La ruta no es un directorio"}, status_code=400)
+    basename = _safe_upload_basename(file.filename)
+    if not basename:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    try:
+        dest = (parent / basename).resolve()
+        if not dest.is_relative_to(BROWSER_ROOT.resolve()):
+            return JSONResponse({"error": "Ruta fuera del proyecto"}, status_code=400)
+    except (ValueError, OSError):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if dest.exists():
+        return JSONResponse({"error": "Ya existe un archivo con ese nombre"}, status_code=409)
+    total = 0
+    chunk_size = 1024 * 1024
+    try:
+        with dest.open("wb") as out_f:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _BROWSE_MAX_UPLOAD_BYTES:
+                    try:
+                        dest.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return JSONResponse({"error": "Archivo demasiado grande (máx. 64 MiB)"}, status_code=413)
+                out_f.write(chunk)
+    except OSError as e:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel_out = str(dest.relative_to(BROWSER_ROOT.resolve()))
+    return JSONResponse({"path": rel_out}, status_code=201)
+
+
+@app.get("/api/browse/download")
+async def api_browse_download(path: str = Query(..., description="Ruta relativa al root del proyecto")):
+    """Descarga un archivo dentro de la raíz del proyecto."""
+    resolved = _resolve_browse_path(path)
+    if resolved is None:
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not resolved.is_file():
+        return JSONResponse({"error": "No es un archivo"}, status_code=404)
+    return FileResponse(
+        str(resolved),
+        filename=resolved.name,
+        media_type="application/octet-stream",
+    )
+
+
+@app.post("/api/browse/mkdir")
+async def api_browse_mkdir(request: Request):
+    """Crea un directorio dentro de la raíz del proyecto."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Body JSON inválido"}, status_code=400)
+    parent_path = (body.get("path") or "").strip()
+    name = (body.get("name") or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return JSONResponse({"error": "Nombre de carpeta inválido"}, status_code=400)
+    parent = _resolve_browse_path(parent_path)
+    if parent is None:
+        return JSONResponse({"error": "Ruta padre inválida"}, status_code=400)
+    if not parent.is_dir():
+        return JSONResponse({"error": "La ruta padre no es un directorio"}, status_code=400)
+    new_dir = parent / name
+    try:
+        new_dir = new_dir.resolve()
+        if not new_dir.is_relative_to(BROWSER_ROOT):
+            return JSONResponse({"error": "Ruta fuera del proyecto"}, status_code=400)
+    except (ValueError, OSError):
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if new_dir.exists():
+        return JSONResponse({"error": "Ya existe"}, status_code=409)
+    try:
+        new_dir.mkdir(parents=False, exist_ok=False)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel = str(new_dir.relative_to(BROWSER_ROOT))
+    return JSONResponse({"path": rel}, status_code=201)
+
+
+def _api_browse_delete_impl(rel_path: str) -> JSONResponse | dict:
+    """Elimina un fichero (no directorios) bajo BROWSER_ROOT."""
+    path = (rel_path or "").strip()
+    resolved = _resolve_browse_path(path)
+    if resolved is None:
+        return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+    if not resolved.is_file():
+        return JSONResponse({"error": "No es un archivo o no existe"}, status_code=400)
+    try:
+        resolved.unlink()
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    rel_out = str(resolved.relative_to(BROWSER_ROOT))
+    return {"ok": True, "path": rel_out}
+
+
+@app.delete("/api/browse/delete")
+async def api_browse_delete(path: str = Query(..., description="Ruta relativa al archivo bajo el proyecto")):
+    """Elimina un fichero (no directorios) dentro de la raíz del proyecto."""
+    return _api_browse_delete_impl(path)
+
+
+@app.post("/api/browse/delete")
+async def api_browse_delete_post(request: Request):
+    """Igual que DELETE /api/browse/delete; POST evita bloqueos de proxy o CORS con algunos clientes."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Body JSON inválido"}, status_code=400)
+    rel = (body.get("path") or "").strip()
+    if not rel:
+        return JSONResponse({"error": "path requerido"}, status_code=400)
+    return _api_browse_delete_impl(rel)
+
+
+def _read_single_var_history_tsv(path: str, var_name: str, max_points: int = 20000) -> dict:
+    """Lee time_s y una variable concreta de un TSV grande, con downsampling simple."""
+    import math
+
+    ts_list: list[float] = []
+    val_list: list[float] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        header = f.readline()
+        if not header:
+            raise ValueError("TSV vacío")
+        cols = header.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        try:
+            idx_var = cols.index(var_name)
+        except ValueError:
+            raise KeyError(f"Variable '{var_name}' no encontrada en TSV")
+        # Primera pasada: recoger todos los puntos (solo dos columnas)
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) <= idx_var:
+                continue
+            try:
+                t = float(parts[0])
+            except ValueError:
+                continue
+            raw = parts[idx_var].strip()
+            if raw == "":
+                continue
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            ts_list.append(t)
+            val_list.append(v)
+    n = len(ts_list)
+    if n == 0:
+        return {"name": var_name, "timestamps": [], "values": []}
+    if n <= max_points:
+        return {"name": var_name, "timestamps": ts_list, "values": val_list}
+    # Downsampling uniforme: step = ceil(n / max_points)
+    step = max(1, math.ceil(n / max_points))
+    ds_ts = ts_list[0:n:step]
+    ds_vals = val_list[0:n:step]
+    if ds_ts[-1] != ts_list[-1]:
+        ds_ts.append(ts_list[-1])
+        ds_vals.append(val_list[-1])
+    return {"name": var_name, "timestamps": ds_ts, "values": ds_vals}
+
+
+def _read_var_window_tsv(
+    path: str,
+    var_name: str,
+    t_center: float,
+    t_span: float,
+    max_points: int = 5000,
+) -> dict:
+    """Lee una ventana temporal [t_start, t_end] de time_s + variable concreta, con downsampling.
+
+    Usa un índice ligero de tiempo si está disponible para evitar escanear todo el fichero.
+    """
+    import math
+
+    if not math.isfinite(t_center) or t_span <= 0:
+        raise ValueError("Parámetros de tiempo inválidos")
+    half = t_span / 2.0
+    t_start = t_center - half
+    t_end = t_center + half
+    if t_end < t_start:
+        t_start, t_end = t_end, t_start
+
+    ts_list: list[float] = []
+    val_list: list[float] = []
+
+    # Intentar usar índice de tiempos si existe.
+    with _TIME_INDEX_LOCK:
+        idx = _TIME_INDEX.get(path)
+
+    start_offset: int | None = None
+    if idx:
+        # Buscar el primer punto del índice con tiempo >= t_start
+        lo, hi = 0, len(idx) - 1
+        pos = len(idx) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            tm, off = idx[mid]
+            if tm >= t_start:
+                pos = mid
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        start_offset = idx[pos][1]
+
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        header = f.readline()
+        if not header:
+            raise ValueError("TSV vacío")
+        cols = header.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        try:
+            idx_var = cols.index(var_name)
+        except ValueError:
+            raise KeyError(f"Variable '{var_name}' no encontrada en TSV")
+
+        # Si tenemos offset, saltar directamente allí; si no, escanear completo.
+        if start_offset is not None:
+            f.seek(start_offset)
+
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) <= idx_var:
+                continue
+            try:
+                t = float(parts[0])
+            except ValueError:
+                continue
+            if t < t_start:
+                continue
+            if t > t_end:
+                break
+            raw = parts[idx_var].strip()
+            if raw == "":
+                continue
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            ts_list.append(t)
+            val_list.append(v)
+    n = len(ts_list)
+    if n == 0:
+        return {"name": var_name, "timestamps": [], "values": []}
+    if n <= max_points:
+        return {"name": var_name, "timestamps": ts_list, "values": val_list}
+    step = max(1, math.ceil(n / max_points))
+    ds_ts = ts_list[0:n:step]
+    ds_vals = val_list[0:n:step]
+    if ds_ts[-1] != ts_list[-1]:
+        ds_ts.append(ts_list[-1])
+        ds_vals.append(val_list[-1])
+    return {"name": var_name, "timestamps": ds_ts, "values": ds_vals}
+
+
+def _build_time_index_and_bounds(path: str, min_step_sec: float = 1.0) -> dict:
+    """Construye un índice ligero de tiempos (time_s -> offset) y devuelve bounds."""
+    min_ts: float | None = None
+    max_ts: float | None = None
+    index: list[tuple[float, int]] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        header = f.readline()
+        if not header:
+            raise ValueError("TSV vacío")
+        cols = header.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        while True:
+            offset = f.tell()
+            line = f.readline()
+            if not line:
+                break
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if not parts:
+                continue
+            try:
+                t = float(parts[0])
+            except ValueError:
+                continue
+            if not math.isfinite(t):
+                continue
+            if min_ts is None or t < min_ts:
+                min_ts = t
+            if max_ts is None or t > max_ts:
+                max_ts = t
+            # Guardar un punto de índice cada min_step_sec aprox.
+            if not index or (t - index[-1][0]) >= min_step_sec:
+                index.append((t, offset))
+    if min_ts is None or max_ts is None:
+        raise ValueError("No se encontraron tiempos válidos en el TSV")
+    with _TIME_INDEX_LOCK:
+        _TIME_INDEX[path] = index
+    return {"minTs": float(min_ts), "maxTs": float(max_ts)}
+
+
+def _read_time_bounds_tsv(path: str) -> dict:
+    """Devuelve bounds de tiempo, construyendo el índice si es necesario."""
+    with _TIME_INDEX_LOCK:
+        idx = _TIME_INDEX.get(path)
+    if idx:
+        # Si ya hay índice, usar sus extremos como bounds aproximados.
+        return {"minTs": float(idx[0][0]), "maxTs": float(idx[-1][0])}
+    return _build_time_index_and_bounds(path)
+
+
+def _read_time_bounds_any(path: str) -> dict:
+    if is_parquet_path(path):
+        rp = _rp()
+        if rp is None:
+            raise ValueError("Lectura Parquet no disponible (instale el paquete varmonitor_plugins)")
+        return rp.read_time_bounds_parquet(path)
+    return _read_time_bounds_tsv(path)
+
+
+@app.get("/api/recordings/{filename:path}/history")
+async def api_recording_var_history(filename: str, var: str = Query(...), max_points: int = Query(20000)):
+    """Histórico completo de una variable concreta desde el TSV (modo análisis offline).
+
+    - Lee solo time_s y la columna de la variable.
+    - Aplica downsampling uniforme si el número de puntos supera max_points.
+    """
+    _ensure_recordings_dir()
+    path = _resolve_recording_path(filename)
+    if path is None:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    var_name = (var or "").strip()
+    if not var_name:
+        return JSONResponse({"error": "Nombre de variable vacío"}, status_code=400)
+    try:
+        mp = max(1000, min(int(max_points or 0), 100000))
+    except Exception:
+        mp = 20000
+    def _read_hist() -> dict:
+        if is_parquet_path(path):
+            rp = _rp()
+            if rp is None:
+                raise ValueError("Lectura Parquet no disponible (instale el paquete varmonitor_plugins)")
+            return rp.read_single_var_history_parquet(path, var_name, mp)
+        return _read_single_var_history_tsv(path, var_name, mp)
+
+    try:
+        data = await asyncio.to_thread(_read_hist)
+        return JSONResponse(data)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudo leer historial: {e}"}, status_code=500)
+
+
+@app.get("/api/recordings/{filename:path}/window")
+async def api_recording_var_window(
+    filename: str,
+    var: str = Query(...),
+    t_center: float = Query(...),
+    t_span: float = Query(20.0),
+    max_points: int = Query(5000),
+):
+    """Ventana corta de una variable concreta desde el TSV (modo análisis offline).
+
+    - Filtra por rango temporal [t_center - t_span/2, t_center + t_span/2].
+    - Aplica downsampling uniforme si el número de puntos supera max_points.
+    """
+    _ensure_recordings_dir()
+    path = _resolve_recording_path(filename)
+    if path is None:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    var_name = (var or "").strip()
+    if not var_name:
+        return JSONResponse({"error": "Nombre de variable vacío"}, status_code=400)
+    try:
+        mp = max(500, min(int(max_points or 0), 50000))
+    except Exception:
+        mp = 5000
+    def _read_win() -> dict:
+        if is_parquet_path(path):
+            rp = _rp()
+            if rp is None:
+                raise ValueError("Lectura Parquet no disponible (instale el paquete varmonitor_plugins)")
+            return rp.read_var_window_parquet(path, var_name, float(t_center), float(t_span), mp)
+        return _read_var_window_tsv(path, var_name, float(t_center), float(t_span), mp)
+
+    try:
+        data = await asyncio.to_thread(_read_win)
+        return JSONResponse(data)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudo leer ventana: {e}"}, status_code=500)
+
+
+@app.get("/api/recordings/{filename:path}/window_batch")
+async def api_recording_var_window_batch(
+    filename: str,
+    vars: str = Query(..., description="Lista separada por comas de nombres de variables"),
+    t_center: float = Query(...),
+    t_span: float = Query(20.0),
+    max_points: int = Query(5000),
+):
+    """Ventanas cortas para varias variables en una sola pasada (modo análisis offline).
+
+    Devuelve un array de series [{name, timestamps, values}, ...].
+    """
+    _ensure_recordings_dir()
+    path = _resolve_recording_path(filename)
+    if path is None:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    raw_vars = (vars or "").split(",")
+    names = [v.strip() for v in raw_vars if v and v.strip()]
+    if not names:
+        return JSONResponse({"error": "Sin variables válidas en 'vars'"}, status_code=400)
+    try:
+        mp = max(500, min(int(max_points or 0), 50000))
+    except Exception:
+        mp = 5000
+
+    def _window_batch_sync() -> list[dict]:
+        if is_parquet_path(path):
+            rp = _rp()
+            if rp is None:
+                raise ValueError("Lectura Parquet no disponible (instale el paquete varmonitor_plugins)")
+            return rp.read_var_window_batch_parquet(path, names, float(t_center), float(t_span), mp)
+        out: list[dict] = []
+        for name in names:
+            try:
+                out.append(_read_var_window_tsv(path, name, float(t_center), float(t_span), mp))
+            except KeyError:
+                continue
+            except Exception:
+                continue
+        return out
+
+    try:
+        series = await asyncio.to_thread(_window_batch_sync)
+    except Exception:
+        series = []
+    return JSONResponse({
+        "t_center": float(t_center),
+        "span": float(t_span),
+        "series": series,
+    })
+
+
+@app.get("/api/recordings/{filename:path}/bounds")
+async def api_recording_time_bounds(filename: str):
+    """Devuelve minTs y maxTs (en segundos) de toda la grabación TSV."""
+    _ensure_recordings_dir()
+    path = _resolve_recording_path(filename)
+    if path is None:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    try:
+        data = await asyncio.to_thread(_read_time_bounds_any, path)
+        return JSONResponse(data)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudieron leer bounds: {e}"}, status_code=500)
+
+
+def _read_recording_table_slice_sync(path: str, row_start: int, row_limit: int) -> dict:
+    """Filas tabulares para modal virtualizado (solo texto por celda; sin cargar todo el fichero en el cliente)."""
+    row_start = max(0, int(row_start))
+    row_limit = max(1, min(int(row_limit), 2000))
+    if is_parquet_path(path):
+        rp = _rp()
+        if rp is None:
+            raise ValueError("Lectura Parquet no disponible (instale el paquete varmonitor_plugins)")
+        table, total_rows, _taken = rp.read_parquet_row_range(path, row_start, row_limit)
+        cols = table.column_names
+        rows: list[list[str]] = []
+        for r in range(table.num_rows):
+            row: list[str] = []
+            for c in range(table.num_columns):
+                v = table.column(c)[r].as_py()
+                if v is None:
+                    row.append("")
+                elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    row.append("")
+                else:
+                    row.append(str(v))
+            rows.append(row)
+        return {
+            "format": "parquet",
+            "columns": cols,
+            "rows": rows,
+            "row_start": row_start,
+            "row_count": len(rows),
+            "total_rows": int(total_rows),
+        }
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        hdr = f.readline()
+        if not hdr:
+            raise ValueError("TSV vacío")
+        cols = hdr.rstrip("\n").split("\t")
+        if not cols or cols[0] != "time_s":
+            raise ValueError("Cabecera inválida: primera columna debe ser time_s")
+        for _ in range(row_start):
+            if not f.readline():
+                return {
+                    "format": "tsv",
+                    "columns": cols,
+                    "rows": [],
+                    "row_start": row_start,
+                    "row_count": 0,
+                    "total_rows": None,
+                }
+        rows = []
+        for _ in range(row_limit):
+            line = f.readline()
+            if not line:
+                break
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < len(cols):
+                parts.extend([""] * (len(cols) - len(parts)))
+            elif len(parts) > len(cols):
+                parts = parts[: len(cols)]
+            rows.append(parts)
+    return {
+        "format": "tsv",
+        "columns": cols,
+        "rows": rows,
+        "row_start": row_start,
+        "row_count": len(rows),
+        "total_rows": None,
+    }
+
+
+@app.get("/api/recordings/{filename:path}/table_slice")
+async def api_recording_table_slice(
+    filename: str,
+    row_start: int = Query(0, ge=0),
+    row_limit: int = Query(200, ge=1, le=2000),
+):
+    """Tramo de filas para tabla virtualizada (modal ref / grabación); no sustituye la carga offline completa."""
+    _ensure_recordings_dir()
+    path = _resolve_recording_path(filename)
+    if path is None:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    try:
+        data = await asyncio.to_thread(_read_recording_table_slice_sync, path, row_start, row_limit)
+        return JSONResponse(data)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"No se pudo leer el tramo: {e}"}, status_code=500)
+
+
+# Registrado después de /history, /window, /window_batch y /bounds: si esta ruta catch-all
+# va antes, Starlette captura "demo.tsv/bounds" como filename y devuelve 400.
+@app.get("/api/recordings/{filename:path}")
+async def api_recording_download(
+    filename: str,
+    preview_bytes: int = Query(0),
+    offset: int = Query(0),
+    row_start: int = Query(0, description="Parquet: primera fila del tramo (con preview_bytes>0)"),
+    row_count: int = Query(0, description="Parquet: filas a leer; 0 = defecto 10000"),
+):
+    """Descarga segura de una grabación dentro de recordings/.
+
+    TSV + preview_bytes: preview textual por offset en bytes (modo seguro).
+    Parquet + preview_bytes: tramo por filas (row_start/row_count); respuesta incluye `offline`.
+    """
+    _ensure_recordings_dir()
+    path = _resolve_recording_path(filename)
+    if path is None:
+        return JSONResponse({"error": "Nombre de archivo inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    display_name = (filename or "").strip().replace("\\", "/")
+    dl_name = os.path.basename(path)
+    if int(preview_bytes or 0) > 0:
+        if is_parquet_path(path):
+            try:
+                rp = _rp()
+                if rp is None:
+                    return JSONResponse(
+                        {"error": "Descarga Parquet no disponible (instale el paquete varmonitor_plugins)"},
+                        status_code=503,
+                    )
+                rc = int(row_count or 0)
+                if rc <= 0:
+                    rc = 10_000
+                rc = max(100, min(rc, 100_000))
+                rc = rp.cap_parquet_preview_rows(path, rc)
+                rs = max(0, int(row_start or 0))
+
+                def _pq_preview() -> dict:
+                    return rp.parquet_slice_to_offline_payload(path, rs, rc, is_preview=True, source_name=dl_name)
+
+                offline = await asyncio.to_thread(_pq_preview)
+                st = os.stat(path)
+                next_row = offline["row_start"] + offline["row_count"]
+                total_r = int(offline["total_rows"])
+                return {
+                    "filename": display_name,
+                    "format": "parquet",
+                    "size": int(st.st_size),
+                    "total_rows": total_r,
+                    "row_start": offline["row_start"],
+                    "row_count": offline["row_count"],
+                    "segment_start": next_row,
+                    "offset": int(offset or 0),
+                    "preview_bytes": 0,
+                    "truncated": next_row < total_r,
+                    "preview": "",
+                    "offline": offline,
+                }
+            except Exception as e:
+                return JSONResponse({"error": f"No se pudo leer preview Parquet: {e}"}, status_code=500)
+        try:
+            max_bytes = max(1024, min(int(preview_bytes), 8 * 1024 * 1024))
+            seek_offset = max(0, int(offset or 0))
+            segment_start = 0
+            header_raw: bytes
+            body_raw: bytes
+            with open(path, "rb") as f:
+                header_raw = f.readline()
+                header_text = header_raw.decode("utf-8", errors="ignore")
+                header_len = len(header_raw)
+                if seek_offset > 0:
+                    f.seek(seek_offset)
+                    back = min(seek_offset, 8192)
+                    f.seek(max(0, seek_offset - back))
+                    chunk = f.read(back)
+                    last_nl = chunk.rfind(b"\n")
+                    segment_start = seek_offset - back + last_nl + 1 if last_nl >= 0 else seek_offset
+                    f.seek(segment_start)
+                else:
+                    segment_start = header_len
+                    f.seek(segment_start)
+                body_raw = f.read(max_bytes)
+            body_text = body_raw.decode("utf-8", errors="ignore")
+            text = header_text + body_text
+            st = os.stat(path)
+            return {
+                "filename": display_name,
+                "format": "tsv",
+                "size": int(st.st_size),
+                "offset": seek_offset,
+                "segment_start": segment_start,
+                "preview_bytes": len(body_raw),
+                "truncated": int(st.st_size) > (segment_start + len(body_raw)),
+                "preview": text,
+            }
+        except Exception as e:
+            return JSONResponse({"error": f"No se pudo leer preview: {e}"}, status_code=500)
+    if is_parquet_path(path):
+        return FileResponse(
+            path,
+            media_type="application/vnd.apache.parquet",
+            filename=dl_name,
+        )
+    return FileResponse(path, media_type="text/tab-separated-values", filename=dl_name)
+
+
+@app.post("/api/save_tsv")
+@app.post("/api/recordings/save_tsv")
+async def api_recording_save_tsv(request: Request, download: int = Query(0), kind: str = Query("snapshot")):
+    """Body JSON {content, filename?}: texto TSV; con módulo Parquet guarda .parquet (+ espejo TSV opcional); si no, solo .tsv."""
+    _ensure_recordings_dir()
+    import tempfile
+
+    try:
+        payload = await request.json()
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return JSONResponse({"error": "Contenido TSV vacío"}, status_code=400)
+        now = time.strftime("%Y%m%d_%H%M%S")
+        safe_kind = "segment" if str(kind).strip().lower().startswith("seg") else "snapshot"
+        base_name = payload.get("filename")
+        stem = None
+        if isinstance(base_name, str) and base_name.strip():
+            raw = os.path.basename(base_name.strip())
+            stem = raw
+            for ext in (".tsv", ".parquet"):
+                if stem.lower().endswith(ext):
+                    stem = stem[: -len(ext)]
+        if not parquet_recording_enabled() or _rp() is None:
+            safe_out = (stem + ".tsv") if stem else f"{safe_kind}_{now}.tsv"
+            path_out = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_out))
+            root = os.path.abspath(RECORDINGS_DIR)
+            if not path_out.startswith(root + os.sep):
+                return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+            text = content if content.endswith("\n") else (content + "\n")
+
+            def _write_tsv() -> None:
+                with open(path_out, "w", encoding="utf-8") as wf:
+                    wf.write(text)
+
+            await asyncio.to_thread(_write_tsv)
+            if int(download or 0) == 1:
+                return FileResponse(
+                    path_out,
+                    media_type="text/tab-separated-values",
+                    filename=safe_out,
+                )
+            return {"ok": True, "filename": safe_out, "path": path_out}
+
+        rp = _rp()
+        safe_pq = (stem + ".parquet") if stem else f"{safe_kind}_{now}.parquet"
+        path_pq = os.path.abspath(os.path.join(RECORDINGS_DIR, safe_pq))
+        root = os.path.abspath(RECORDINGS_DIR)
+        if not path_pq.startswith(root + os.sep):
+            return JSONResponse({"error": "Ruta inválida"}, status_code=400)
+        text = content if content.endswith("\n") else (content + "\n")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False, encoding="utf-8") as tf:
+            tf.write(text)
+            ttmp = tf.name
+        try:
+
+            def _conv() -> None:
+                rp.convert_tsv_file_to_parquet(ttmp, path_pq)
+
+            await asyncio.to_thread(_conv)
+        finally:
+            try:
+                os.unlink(ttmp)
+            except OSError:
+                pass
+        if _recordings_mirror_tsv():
+            try:
+                rp.export_parquet_to_tsv(path_pq, rp.sibling_tsv_for_parquet(path_pq))
+            except Exception as e:
+                print(f"[VarMonitor Web] TSV espejo save_tsv: {e}", flush=True)
+        if int(download or 0) == 1:
+            return FileResponse(
+                path_pq,
+                media_type="application/vnd.apache.parquet",
+                filename=safe_pq,
+            )
+        return {"ok": True, "filename": safe_pq, "path": path_pq}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/templates")
+async def api_templates():
+    _ensure_state_dirs()
+    rows: list[str] = []
+    try:
+        for fn in os.listdir(TEMPLATES_DIR):
+            if fn.lower().endswith(".json"):
+                rows.append(fn[:-5])
+    except Exception:
+        rows = []
+    rows.sort()
+    return {"templates": rows}
+
+
+@app.get("/api/templates/{name}")
+async def api_template_get(name: str):
+    _ensure_state_dirs()
+    path = _json_path(TEMPLATES_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Plantilla no encontrada"}, status_code=404)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return {"name": _safe_json_name(name), "data": data}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/templates/{name}")
+async def api_template_put(name: str, request: Request, download: int = Query(0)):
+    _ensure_state_dirs()
+    path = _json_path(TEMPLATES_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        payload = await request.json()
+        data = payload.get("data")
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        if int(download or 0) == 1:
+            return FileResponse(path, media_type="application/json", filename=os.path.basename(path))
+        return {"ok": True, "name": _safe_json_name(name)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/templates/{name}")
+async def api_template_delete(name: str):
+    _ensure_state_dirs()
+    path = _json_path(TEMPLATES_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/sessions")
+async def api_sessions():
+    _ensure_state_dirs()
+    rows: list[str] = []
+    try:
+        for fn in os.listdir(SESSIONS_DIR):
+            if fn.lower().endswith(".json"):
+                rows.append(fn[:-5])
+    except Exception:
+        rows = []
+    rows.sort()
+    return {"sessions": rows}
+
+
+@app.get("/api/sessions/{name}")
+async def api_session_get(name: str):
+    _ensure_state_dirs()
+    path = _json_path(SESSIONS_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "Estado no encontrado"}, status_code=404)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return {"name": _safe_json_name(name), "data": data}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.put("/api/sessions/{name}")
+async def api_session_put(name: str, request: Request, download: int = Query(0)):
+    _ensure_state_dirs()
+    path = _json_path(SESSIONS_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        payload = await request.json()
+        data = payload.get("data")
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        if int(download or 0) == 1:
+            return FileResponse(path, media_type="application/json", filename=os.path.basename(path))
+        return {"ok": True, "name": _safe_json_name(name)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/sessions/{name}")
+async def api_session_delete(name: str):
+    _ensure_state_dirs()
+    path = _json_path(SESSIONS_DIR, name)
+    if not path:
+        return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _read_cpp_log_tail(path: str, max_lines: int) -> list[dict]:
+    """Lee las últimas max_lines líneas del archivo de log C++ (si existe)."""
+    out: list[dict] = []
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        for line in lines[-max_lines:]:
+            line = line.rstrip("\n\r")
+            if line:
+                out.append({"ts": "", "level": "info", "msg": f"[C++] {line}"})
+    except Exception:
+        out.append({"ts": "", "level": "warning", "msg": f"[C++] No se pudo leer {path}"})
+    return out
+
+
+@app.get("/api/log")
+async def api_log(
+    request: Request,
+    tail: int = Query(2000, ge=1, le=20000),
+    since_seq: int = Query(0, ge=0, description="Solo source=python: líneas con seq > since_seq"),
+    limit: int = Query(500, ge=1, le=2000, description="Máx. líneas en modo incremental"),
+    source: str = Query("python", description="python | cpp | all"),
+):
+    """Devuelve el log del backend (Python) y opcionalmente del proceso C++ (archivo configurado)."""
+    source = (source or "python").strip().lower()
+    if source not in ("python", "cpp", "all"):
+        source = "python"
+    want_plain = request.headers.get("accept", "").strip().startswith("text/plain")
+    lines: list[dict] = []
+    max_seq = 0
+    if source in ("python", "all"):
+        with _LOG_BUFFER_LOCK:
+            max_seq = _LOG_SEQ
+            use_incr = (not want_plain) and source == "python" and since_seq > 0
+            if use_incr:
+                acc: list[dict] = []
+                for x in _LOG_BUFFER:
+                    if x.get("seq", 0) > since_seq:
+                        acc.append(x)
+                lines = acc[-limit:]
+            else:
+                snap = list(_LOG_BUFFER)[-tail:]
+                if source == "all":
+                    lines = [
+                        {"ts": x["ts"], "level": x["level"], "msg": f"[Py] {x['msg']}", "seq": x.get("seq", 0)}
+                        for x in snap
+                    ]
+                else:
+                    lines = snap
+    if source in ("cpp", "all"):
+        cpp_path = (_config.get("log_file_cpp") or "").strip()
+        cpp_lines = _read_cpp_log_tail(cpp_path, tail)
+        if source == "all":
+            lines = list(lines) + cpp_lines
+            lines.sort(key=lambda x: (x["ts"], x["msg"]))
+        elif source == "cpp":
+            lines = cpp_lines
+            max_seq = 0
+    if want_plain:
+        text = "\n".join(
+            (f"{x['ts']} {x['msg']}" if x.get("ts") else x["msg"]) for x in lines
+        )
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(text)
+    out: dict = {"lines": lines, "source": source}
+    if source in ("python", "all"):
+        out["max_seq"] = max_seq
+    return out
+
+
+@app.get("/api/admin/storage")
+async def api_admin_storage():
+    _ensure_recordings_dir()
+    _ensure_state_dirs()
+    try:
+        rows = await asyncio.to_thread(_list_recordings_rows)
+        recs = [
+            {
+                "name": r["filename"],
+                "kind": r["kind"],
+                "size": r["size"],
+                "mtime": r["mtime"],
+                "format": r.get("format", "parquet"),
+            }
+            for r in rows
+        ]
+    except Exception:
+        recs = []
+    templates = sorted([fn[:-5] for fn in os.listdir(TEMPLATES_DIR) if fn.lower().endswith(".json")]) if os.path.isdir(TEMPLATES_DIR) else []
+    sessions = sorted([fn[:-5] for fn in os.listdir(SESSIONS_DIR) if fn.lower().endswith(".json")]) if os.path.isdir(SESSIONS_DIR) else []
+    return {
+        "paths": {
+            "config_file": CONFIG_ABS_PATH,
+            "recordings_dir": os.path.abspath(RECORDINGS_DIR),
+            "server_state_dir": os.path.abspath(STATE_ROOT_DIR),
+            "arinc_data_dir": os.path.abspath(ARINC_DATA_DIR),
+            "templates_dir": os.path.abspath(TEMPLATES_DIR),
+            "sessions_dir": os.path.abspath(SESSIONS_DIR),
+            "avionics_registry_path": os.path.abspath(AVIONICS_REGISTRY_PATH),
+        },
+        "runtime": {
+            "web_port": int(_config.get("web_port", 8080)),
+            "web_port_scan_max": int(_config.get("web_port_scan_max", 10)),
+            "recordings_write_tsv": bool(_config.get("recordings_write_tsv")),
+        },
+        "recordings": recs,
+        "templates": templates,
+        "sessions": sessions,
+    }
+
+
+@app.post("/api/admin/storage/delete")
+async def api_admin_storage_delete(request: Request):
+    _ensure_recordings_dir()
+    _ensure_state_dirs()
+    try:
+        payload = await request.json()
+        kind = str(payload.get("kind") or "").strip().lower()
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return JSONResponse({"error": "Nombre vacío"}, status_code=400)
+        if kind == "recording":
+            path = _resolve_recording_path(name)
+            if path is None:
+                return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+            safe_name = os.path.basename(path)
+            stem = safe_name.rsplit(".", 1)[0]
+            parent = os.path.dirname(path)
+            companion_tsv = os.path.join(parent, stem + ".tsv")
+            companion_pq = os.path.join(parent, stem + ".parquet")
+        elif kind == "template":
+            path = _json_path(TEMPLATES_DIR, name)
+            if not path:
+                return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+        elif kind == "session":
+            path = _json_path(SESSIONS_DIR, name)
+            if not path:
+                return JSONResponse({"error": "Nombre inválido"}, status_code=400)
+        else:
+            return JSONResponse({"error": "Tipo inválido"}, status_code=400)
+        if os.path.exists(path):
+            os.remove(path)
+        if kind == "recording":
+            for alt in (companion_tsv, companion_pq):
+                if alt != path and os.path.isfile(alt):
+                    try:
+                        os.remove(alt)
+                    except OSError:
+                        pass
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/runtime_config")
+async def api_admin_runtime_config(request: Request):
+    global _config
+    try:
+        payload = await request.json()
+        updates: dict = {}
+        if "web_port" in payload:
+            v = int(payload.get("web_port"))
+            if v < 1 or v > 65535:
+                return JSONResponse({"error": "web_port inválido"}, status_code=400)
+            _config["web_port"] = v
+            updates["web_port"] = v
+        if "web_port_scan_max" in payload:
+            v = int(payload.get("web_port_scan_max"))
+            if v < 0 or v > 100:
+                return JSONResponse({"error": "web_port_scan_max inválido"}, status_code=400)
+            _config["web_port_scan_max"] = v
+            updates["web_port_scan_max"] = v
+        if "recordings_write_tsv" in payload:
+            _config["recordings_write_tsv"] = bool(payload.get("recordings_write_tsv"))
+            updates["recordings_write_tsv"] = bool(_config["recordings_write_tsv"])
+        if hasattr(request.app.state, "max_web_port_in_range"):
+            request.app.state.max_web_port_in_range = None
+        _save_runtime_config_overrides(updates)
+        return {
+            "ok": True,
+            "runtime": {
+                "web_port": int(_config.get("web_port", 8080)),
+                "web_port_scan_max": int(_config.get("web_port_scan_max", 10)),
+                "recordings_write_tsv": bool(_config.get("recordings_write_tsv")),
+            },
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/auth_required")
+async def api_auth_required():
+    """Indica si el WebSocket exige contraseña (para mostrar login antes de conectar)."""
+    return {"auth_required": bool(_config.get("auth_password", "").strip())}
+
+
+@app.get("/api/auth_status")
+async def api_auth_status():
+    """Estado de autenticación: global (WS) y modos sensibles (editor + BD protocolos)."""
+    return {
+        "auth_required": bool((_config.get("auth_password") or "").strip()),
+        "sensitive_modes_required": bool((_config.get("sensitive_modes_password") or "").strip()),
+    }
+
+
+def _get_process_ram_mb() -> float | None:
+    """RAM del proceso actual en MB. Linux: /proc/self/status VmRSS; otro Unix: resource.getrusage."""
+    try:
+        if os.path.exists("/proc/self/status"):
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return int(parts[1]) / 1024.0  # kB -> MB
+                        return None
+        if hasattr(resource, "getrusage"):
+            # ru_maxrss: Linux en KB, macOS en bytes
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if rss > 0:
+                return (rss / 1024.0) if rss < 2**20 else (rss / (1024.0 * 1024.0))
+    except Exception:
+        pass
+    return None
+
+
+def _get_python_cpu_percent(state) -> float | None:
+    """CPU % del proceso Python (promedio desde la última llamada). Solo Unix, requiere dos muestras."""
+    try:
+        if not hasattr(resource, "getrusage"):
+            return None
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        now_wall = time.monotonic()
+        now_cpu = r.ru_utime + r.ru_stime
+        last_wall = getattr(state, "adv_stats_last_wall", None)
+        last_cpu = getattr(state, "adv_stats_last_cpu", None)
+        state.adv_stats_last_wall = now_wall
+        state.adv_stats_last_cpu = now_cpu
+        if last_wall is not None and last_cpu is not None:
+            delta_wall = now_wall - last_wall
+            if delta_wall >= 0.1:  # al menos 100 ms para no dar picos
+                delta_cpu = now_cpu - last_cpu
+                return min(100.0, max(0.0, (delta_cpu / delta_wall) * 100.0))
+    except Exception:
+        pass
+    return None
+
+
+def renew_perf_lease(state) -> None:
+    state.perf_lease_until = time.monotonic() + PERF_LEASE_SEC
+
+
+def perf_lease_active(state) -> bool:
+    return time.monotonic() < float(getattr(state, "perf_lease_until", 0.0) or 0.0)
+
+
+def _uds_set_perf_collect(want: bool) -> None:
+    b = _first_uds_bridge()
+    if b is None:
+        return
+    try:
+        b.set_perf_collect(want)
+    finally:
+        b.disconnect()
+
+
+async def sync_cpp_perf_collect(state) -> None:
+    want = perf_lease_active(state)
+    if want == getattr(state, "_cpp_perf_target", None):
+        return
+    state._cpp_perf_target = want
+    await asyncio.to_thread(_uds_set_perf_collect, want)
+
+
+def _fetch_server_info_raw_sync() -> dict | None:
+    try:
+        b = _first_uds_bridge()
+        if b is None:
+            return None
+        try:
+            return b.get_server_info()
+        finally:
+            b.disconnect()
+    except Exception:
+        return None
+
+
+def _sidecar_perf_phases_from_state_sync(state) -> list[dict]:
+    """Lee JSON escrito por varmon_sidecar (--perf-file) durante grabación sidecar_cpp."""
+    path = _resolve_sidecar_perf_json_path(state)
+    if not path:
+        return []
+    last_err: Exception | None = None
+    for attempt in range(5):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+            if not raw.strip():
+                raise ValueError("empty perf json")
+            data = json.loads(raw)
+            phases = data.get("phases")
+            if not isinstance(phases, list):
+                return []
+            out: list[dict] = []
+            for item in phases:
+                if not isinstance(item, dict):
+                    continue
+                pid = item.get("id")
+                if not pid:
+                    continue
+                out.append(
+                    {
+                        "id": str(pid),
+                        "last_us": round(float(item.get("last_us", 0)), 3),
+                        "ema_us": round(float(item.get("ema_us", 0)), 3),
+                        "samples": int(float(item.get("samples", 0))),
+                    }
+                )
+            return out
+        except Exception as e:
+            last_err = e
+            time.sleep(0.001 * (attempt + 1))
+    if last_err is not None:
+        print(f"[VarMonitor Web] sidecar perf: no se pudo leer {path!r}: {last_err}", flush=True)
+    return []
+
+
+def _cpp_phases_from_server_info(state, info: dict | None) -> list[dict]:
+    if not info:
+        return []
+    raw = info.get("shm_perf_us")
+    if not isinstance(raw, list):
+        return []
+    ema_store = getattr(state, "perf_cpp_phase_ema", None)
+    if not isinstance(ema_store, dict):
+        ema_store = {}
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("id")
+        if not pid:
+            continue
+        last = float(item.get("last_us", 0))
+        prev = float(ema_store.get(pid, last))
+        ema = prev * 0.85 + last * 0.15
+        ema_store[pid] = ema
+        out.append({"id": str(pid), "last_us": round(last, 2), "ema_us": round(ema, 2), "samples": 1})
+    state.perf_cpp_phase_ema = ema_store
+    return out
+
+
+def _fetch_cpp_stats_sync(timeout: float = 1.0) -> tuple[float | None, float | None, float | None, bool]:
+    """Conecta al C++ por UDS y devuelve (ram_mb, cpu_percent, shm_cycle_hint_ms, shm_active)."""
+    try:
+        b = _first_uds_bridge()
+        if b is None:
+            return (None, None, None, False)
+        info = b.get_server_info()
+        b.disconnect()
+        if info is None:
+            return (None, None, None, False)
+        ram_mb = None
+        rss_kb = info.get("memory_rss_kb")
+        if rss_kb is not None and rss_kb >= 0:
+            ram_mb = rss_kb / 1024.0
+        cpu_percent = info.get("cpu_percent")
+        if cpu_percent is not None and isinstance(cpu_percent, (int, float)):
+            cpu_percent = float(cpu_percent)
+        else:
+            cpu_percent = None
+        shm_active = bool(info.get("shm_name") and info.get("sem_name"))
+        shm_hint = info.get("sample_interval_ms")
+        if isinstance(shm_hint, (int, float)):
+            shm_hint = float(shm_hint)
+        else:
+            shm_hint = None
+        return (ram_mb, cpu_percent, shm_hint, shm_active)
+    except Exception:
+        pass
+    return (None, None, None, False)
+
+
+@app.get("/api/advanced_stats")
+async def api_advanced_stats(request: Request, perf: int = Query(0)):
+    """RAM y CPU % del proceso Python; RAM del C++ (si se puede conectar por UDS). perf=1 renueva el lease de medición de fases."""
+    state = request.app.state
+    if perf:
+        renew_perf_lease(state)
+    await sync_cpp_perf_collect(state)
+    python_ram_mb = _get_process_ram_mb()
+    python_cpu_percent = _get_python_cpu_percent(state)
+    cpp_ram_mb, cpp_cpu_percent, shm_cycle_hint_ms, shm_active = await asyncio.to_thread(_fetch_cpp_stats_sync)
+    shm_cycle_ms = getattr(state, "shm_cycle_ms", None)
+    if shm_cycle_ms is None and isinstance(shm_cycle_hint_ms, (int, float)):
+        shm_cycle_ms = float(shm_cycle_hint_ms)
+    # Fallback: si SHM está activo pero aún no tenemos medida EMA, mostrar ciclo configurado.
+    if shm_cycle_ms is None and shm_active:
+        try:
+            shm_cycle_ms = float(_config.get("cycle_interval_ms", 100))
+        except Exception:
+            shm_cycle_ms = None
+    return {
+        "python_ram_mb": python_ram_mb,
+        "python_cpu_percent": python_cpu_percent,
+        "cpp_ram_mb": cpp_ram_mb,
+        "cpp_cpu_percent": cpp_cpu_percent,
+        "shm_cycle_ms": shm_cycle_ms,
+        "monitored_var_count": _ws_monitored_count_aggregate(state),
+    }
+
+
+@app.get("/api/perf")
+async def api_perf(request: Request):
+    """Fases de tiempo C++/Python; esta ruta renueva el lease (panel abierto)."""
+    state = request.app.state
+    renew_perf_lease(state)
+    await sync_cpp_perf_collect(state)
+    ts = time.time()
+    py_phases = perf_agg.snapshot_phases()
+    info = await asyncio.to_thread(_fetch_server_info_raw_sync)
+    cpp_phases = _cpp_phases_from_server_info(state, info)
+    sidecar_phases = await asyncio.to_thread(_sidecar_perf_phases_from_state_sync, state)
+    return JSONResponse(
+        {
+            "ts": ts,
+            "lease_active": perf_lease_active(state),
+            "layers": {
+                "python": {"phases": py_phases},
+                "cpp": {"phases": cpp_phases},
+                "sidecar": {"phases": sidecar_phases},
+            },
+        }
+    )
+
+
+@app.get("/api/uptime")
+async def api_uptime(request: Request):
+    """Solo uptime y puerto actual; sin escaneos. Para que otros backends pidan nuestro uptime sin provocar ping-pong."""
+    state = request.app.state
+    actual = getattr(state, "actual_web_port", None)
+    if actual is None:
+        actual = _config["web_port"]
+    uptime = None
+    if hasattr(state, "startup_time"):
+        uptime = time.monotonic() - state.startup_time
+    return {"uptime_seconds": uptime, "actual_web_port": actual}
+
+
+@app.get("/api/connection_info")
+async def api_connection_info(request: Request):
+    """Devuelve puertos web y usuario para el frontend."""
+    state = request.app.state
+    actual = getattr(state, "actual_web_port", None) or _config["web_port"]
+    base_web = _config["web_port"]
+    scan_max = int(_config.get("web_port_scan_max", 10))
+    max_web = getattr(state, "max_web_port_in_range", None)
+    if max_web is None:
+        max_web = await asyncio.to_thread(_scan_web_ports_max, base_web, scan_max)
+        if max_web is not None:
+            state.max_web_port_in_range = max_web
+    uptime = time.monotonic() - state.startup_time if hasattr(state, "startup_time") else None
+    suggested_web_port = max_web if max_web is not None else actual
+    out = {
+        "base_web_port": base_web,
+        "web_port_scan_max": scan_max,
+        "actual_web_port": actual,
+        "max_web_port_in_range": max_web,
+        "suggested_web_port": suggested_web_port,
+        "uptime_seconds": uptime,
+        "cycle_interval_ms": _config.get("cycle_interval_ms", 100),
+        "update_ratio_max": _config.get("update_ratio_max", 512),
+        "visual_buffer_sec": max(1, min(7200, int(_config.get("visual_buffer_sec", 10)))),
+    }
+    try:
+        out["current_user"] = getpass.getuser()
+    except Exception:
+        out["current_user"] = None
+    out["plugin_features"] = plugin_registry.get_registered_plugin_ids()
+    out = plugin_registry.fire_hook_chain("extend_connection_info", out, request)
+    return out
+
+
+def _api_plugins_features_payload():
+    return {
+        "features": plugin_registry.get_registered_plugin_ids(),
+        "hooks": plugin_registry.get_hooks(),
+    }
+
+
+@app.get("/api/plugins/features")
+async def api_plugins_features():
+    """Lista de módulos/plugins opcionales registrados en el backend."""
+    return _api_plugins_features_payload()
+
+
+@app.get("/api/instance_info")
+async def api_instance_info(request: Request):
+    """Info ligera de esta instancia (puerto web, usuario)."""
+    state = request.app.state
+    actual = getattr(state, "actual_web_port", None) or _config["web_port"]
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = None
+    return {"actual_web_port": actual, "user": user}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    global ACTIVE_WS
+    ACTIVE_WS += 1
+    peer_s = "?"
+    scope = getattr(ws, "scope", None)
+    if isinstance(scope, dict):
+        c = scope.get("client")
+        if isinstance(c, (list, tuple)) and len(c) >= 2:
+            peer_s = f"{c[0]}:{c[1]}"
+    print(f"[VarMonitor Web] WebSocket /ws aceptado (cliente {peer_s})", flush=True)
+
+    # Autenticación por contraseña (query param password)
+    global FAILED_AUTH_ATTEMPTS
+    auth_password = (_config.get("auth_password") or "").strip()
+    if auth_password:
+        given = (ws.query_params.get("password") or "").strip()
+        if given != auth_password:
+            FAILED_AUTH_ATTEMPTS += 1
+            # Contador global: no se reinicia hasta que acierten (evita ataques por fuerza bruta)
+            attempts_left = max(0, MAX_FAILED_AUTH - FAILED_AUTH_ATTEMPTS)
+            await ws.send_json({
+                "type": "error",
+                "message": "auth_required",
+                "attempts_left": attempts_left,
+                "attempt": FAILED_AUTH_ATTEMPTS,
+            })
+            await ws.close()
+            ACTIVE_WS -= 1
+            print(f"[VarMonitor Web] Contraseña incorrecta. Intentos fallidos: {FAILED_AUTH_ATTEMPTS}/{MAX_FAILED_AUTH}")
+            if FAILED_AUTH_ATTEMPTS >= MAX_FAILED_AUTH:
+                print("[VarMonitor Web] Cierre por seguridad tras 3 intentos fallidos.")
+                os._exit(1)
+            return
+        FAILED_AUTH_ATTEMPTS = 0  # Contraseña correcta: reiniciar contador
+
+    cycle_interval_sec = _config.get("cycle_interval_ms", 100) / 1000.0
+    update_ratio = 5  # enviar vars_update cada N ciclos de tiempo (5 por defecto; 1 = tasa máxima)
+    last_vars_update_at = 0.0  # tiempo (monotonic) del último vars_update
+    names_refresh_interval = 30.0
+    names_refresh_interval_idle = 600.0  # idle: catálogo raro que cambie; evita list_names/list_vars gigantes
+    monitored_names: set[str] = set()
+    # None = aún no hubo envío exitoso de catálogo desde el bucle; evita martillar list_names/list_vars.
+    last_names_send: float | None = None
+    # Alarmas y grabación (plan dos tasas)
+    alarms_config: dict = {}  # { name: { lo, hi } }
+    prev_alarm_state: dict = {}
+    alarm_pending_since_ms: dict = {}
+    # Replay: solo evaluar alarmas SHM (Python/sidecar) mientras Play inyecta valores.
+    replay_alarm_engaged = True
+    recording = False
+    record_buffer: list[tuple[float, list[dict]]] = []  # fallback (legacy)
+    alarm_buffer: collections.deque = collections.deque()  # ventana rodante ALARM_BUFFER_SEC
+    latest_snapshot: list[dict] | None = None
+    # Delta vars_update: evita reenviar miles de variables sin cambio (RSS Python + ancho de banda).
+    vars_update_sig_cache: dict[str, tuple] = {}
+    force_full_vars_update = False
+    send_file_on_finish = False  # por defecto no enviar fichero al navegador
+    recording_var_names: list[str] | None = None  # columnas para CSV (monitored al start)
+    recording_format = "tsv"  # "tsv" (MIT) o "parquet" (Pro plugin)
+    recording_size_est_bytes = 0
+    recording_header_estimated = False
+    last_record_progress_send_at = 0.0
+    recording_tmp_path: str | None = None
+    recording_tmp_fp = None
+    recording_col_spec: list[tuple[str, int]] | None = None
+    recording_row_layout: tuple[dict[str, tuple[int, int]], int] | None = None
+    recording_rows_written = 0
+    recording_t0: float | None = None
+    # Una fila de grabación por publicación SHM (seq en cabecera); evita duplicados si el mismo ciclo se encola dos veces.
+    recording_last_shm_seq: int | None = None
+    shm_last_snap_ts: float | None = None
+    shm_cycle_ema_ms: float | None = None
+    ws.app.state.shm_cycle_ms = None
+    recording_write_queue: Queue | None = None
+    recording_writer_thread: threading.Thread | None = None
+    recording_rows_written_ref: list[int] | None = None
+    recording_sidecar_proc: subprocess.Popen | None = None
+    recording_sidecar_names_path: str | None = None
+    recording_sidecar_status_path: str | None = None
+    recording_sidecar_alarms_path: str | None = None
+    recording_sidecar_alarm_exit_path: str | None = None
+    recording_sidecar_alarm_delegate: bool = False
+    alarm_sidecar_proc: subprocess.Popen | None = None
+    alarm_sidecar_events_path: str | None = None
+    alarm_sidecar_names_path: str | None = None
+    alarm_sidecar_alarms_path: str | None = None
+    alarm_sidecar_events_off: int = 0
+    alarm_sidecar_shm_health_path: str | None = None
+    alarm_sidecar_shm_health_off: int = 0
+    recording_sidecar_shm_health_path: str | None = None
+    recording_sidecar_shm_health_off: int = 0
+
+    # Conexión solo por UDS
+    query_uds = ws.query_params.get("uds_path")
+    if not query_uds:
+        inst = await asyncio.to_thread(_list_uds_instances, None)
+        if inst:
+            query_uds = inst[0]["uds_path"]
+    if not query_uds:
+        print("[VarMonitor Web] WebSocket /ws: sin UDS disponible; cerrando.", flush=True)
+        await ws.send_json({"type": "error", "message": "No hay instancias VarMonitor (UDS). Arranca la aplicación C++."})
+        await ws.close()
+        ACTIVE_WS -= 1
+        return
+    try:
+        bridge = await asyncio.to_thread(UdsBridge, query_uds, 5.0)
+        info = await asyncio.to_thread(bridge.get_server_info)
+    except Exception as e:
+        print(f"[VarMonitor Web] No se pudo conectar por UDS {query_uds}: {e}", flush=True)
+        await ws.send_json({"type": "error", "message": f"No se pudo conectar a {query_uds}: {e}"})
+        await ws.close()
+        ACTIVE_WS -= 1
+        return
+    connection_label = query_uds
+
+    async def _refresh_server_info() -> None:
+        """Actualiza shm/sem desde el C++ (p. ej. `sem_sidecar_name` tras reinicio del monitor)."""
+        nonlocal info
+        try:
+            fresh = await asyncio.to_thread(bridge.get_server_info)
+            if isinstance(fresh, dict) and fresh.get("shm_name") and fresh.get("sem_name"):
+                info = fresh
+        except Exception:
+            pass
+
+    shm_reader: ShmReader | None = None
+    shm_queue: Queue | None = None
+    shm_write_mmap = None
+    shm_write_fd = None
+    shm_layout_ver = int((info or {}).get("shm_layout_version") or 1)
+    shm_subscription_order: list[str] = []
+    if info and info.get("shm_name") and info.get("sem_name"):
+        qmax = int(_config.get("shm_queue_max_size", 512))
+        shm_queue = Queue(0 if qmax <= 0 else qmax)
+        shm_max_vars = int(_config.get("shm_max_vars", 2048))
+        shm_hz = float(_config.get("shm_parse_max_hz", 0) or 0)
+        shm_parse_cap = None if shm_hz <= 0 else shm_hz
+        sample_ms = int(info.get("sample_interval_ms") or 100)
+        if sample_ms < 1:
+            sample_ms = 1
+        shm_reader = ShmReader(
+            info["shm_name"],
+            info["sem_name"],
+            shm_queue,
+            poll_interval=0.5,
+            max_vars=shm_max_vars,
+            parse_max_hz=shm_parse_cap,
+            sample_interval_ms=sample_ms,
+        )
+        if shm_reader.start():
+            # Hasta update_shm_read_pause() puede pasar mucho tiempo (list_names/list_vars enormes). Si _reads_paused
+            # queda False, el hilo parsea SHM a ritmo C++ y dispara RSS; arrancar conservador y luego sincronizar.
+            shm_reader.set_reads_paused(True)
+            if getattr(shm_reader, "_polling_only", False):
+                print(f"[VarMonitor Web] SHM activo (modo polling): {info['shm_name']} — {shm_reader._last_error or ''}", flush=True)
+            else:
+                qnote = "ilimitada" if qmax <= 0 else f"{qmax} snapshots (FIFO; llena → lector espera)"
+                if shm_parse_cap is not None:
+                    print(
+                        f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote}; solo monitorización ≤{shm_parse_cap:.0f} parseos/s "
+                        f"(REC/alarmas sin tope; `shm_parse_max_hz=0` = ritmo nativo del C++/sem)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[VarMonitor Web] SHM activo: {info['shm_name']} — cola {qnote} "
+                        f"(parseo al ritmo del monitor: sem + ciclo ~{sample_ms} ms del C++; polling SHM alineado a ese intervalo)",
+                        flush=True,
+                    )
+            if shm_layout_ver >= 2:
+                fd_w, mmap_w = open_shm_rw(info["shm_name"])
+                if mmap_w is not None:
+                    shm_write_mmap = mmap_w
+                    shm_write_fd = fd_w
+        else:
+            reason = getattr(shm_reader, "_last_error", None) or "desconocido"
+            print(f"[VarMonitor Web] SHM no disponible: {reason}", flush=True)
+            shm_reader = None
+            shm_queue = None
+    elif info:
+        print("[VarMonitor Web] SHM no disponible: el proceso C++ no envió shm_name/sem_name (¿SHM inicializado con monitor.start()?)", flush=True)
+
+    print(f"[VarMonitor Web] WebSocket conectado a C++ {connection_label}", flush=True)
+    # Enviar lista real de variables al conectar. Si falla, no enviar [] (evita vaciar la UI);
+    # el bucle principal reintentará en breve.
+    try:
+        names_list = await asyncio.to_thread(bridge.list_names)
+        if not names_list:
+            names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+        names_list = _merge_names_with_telemetry(names_list)
+        await ws.send_json({"type": "vars_names", "data": names_list})
+        last_names_send = time.monotonic()
+    except Exception as e:
+        print(f"[VarMonitor Web] Aviso: no se pudo obtener vars_names al conectar: {e}", flush=True)
+
+    shm_drain_task: asyncio.Task | None = None
+    last_alarm_uds_poll_at = 0.0
+
+    def _schedule_alarm_recording_post_trigger(buf_snap: list) -> None:
+        """Parquet/TSV de ventana alrededor del disparo (Python y sidecar C++)."""
+
+        async def _send_alarm_file_later():
+            await asyncio.sleep(1.0)
+            buf_now = list(alarm_buffer)
+            try:
+                result = await asyncio.to_thread(
+                    _finalize_alarm_recording_sync,
+                    buf_snap,
+                    buf_now,
+                    RECORDINGS_DIR,
+                    send_file_on_finish,
+                )
+            except Exception as e:
+                print(f"[VarMonitor Web] Error escribiendo TSV de alarma: {e}", flush=True)
+                return
+            if not result:
+                print(
+                    "[VarMonitor Web] Aviso: no se escribe TSV de alarma (sin muestras tras fusionar disparo + ventana 1 s)",
+                    flush=True,
+                )
+                return
+            path, fn, file_b64 = result
+            msg: dict = {"type": "alarm_recording_ready", "path": path, "filename": fn}
+            if file_b64 is not None:
+                msg["file_base64"] = file_b64
+            try:
+                await ws.send_json(msg)
+            except Exception as e:
+                print(f"[VarMonitor Web] No se pudo enviar alarm_recording_ready al cliente: {e}", flush=True)
+
+        asyncio.create_task(_send_alarm_file_later())
+
+    async def _notify_alarm_events(cleared: list[str], triggered: list[dict]) -> None:
+        # Copia al entrar (antes de cualquier await): tras alarm_cleared el bucle puede drenar SHM
+        # y vaciar el deque antes de alarm_triggered / tarea diferida.
+        buf_snap = list(alarm_buffer)
+        if cleared:
+            try:
+                await ws.send_json({"type": "alarm_cleared", "names": cleared})
+            except Exception:
+                pass
+        if not triggered:
+            return
+        await ws.send_json({
+            "type": "alarm_triggered",
+            "triggered": [{"name": t["name"], "reason": t["reason"], "value": t["value"]} for t in triggered],
+        })
+        _schedule_alarm_recording_post_trigger(buf_snap)
+
+    async def _shm_drain_loop():
+        """Task que drena la cola SHM a la frecuencia real (no ligada a receive_text)."""
+        nonlocal latest_snapshot, shm_last_snap_ts, shm_cycle_ema_ms
+        nonlocal alarm_buffer, prev_alarm_state, alarm_pending_since_ms
+        nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_row_layout, recording_t0
+        nonlocal recording_header_estimated, recording_rows_written, recording_size_est_bytes, last_record_progress_send_at
+
+        async def _handle_snapshot_item(
+            snapshot_item,
+            *,
+            recording_sample_tail: bool = True,
+            shm_batch_i: int = 0,
+            shm_batch_n: int = 1,
+        ):
+            nonlocal latest_snapshot, shm_last_snap_ts, shm_cycle_ema_ms
+            nonlocal alarm_buffer, prev_alarm_state, alarm_pending_since_ms
+            nonlocal recording_tmp_fp, recording_tmp_path, recording_col_spec, recording_row_layout, recording_t0
+            nonlocal recording_header_estimated, recording_rows_written, recording_size_est_bytes, last_record_progress_send_at
+            nonlocal recording_last_shm_seq
+            _perf_snap_t0 = time.perf_counter()
+            try:
+                if isinstance(snapshot_item, dict):
+                    snapshot = snapshot_item.get("data")
+                    t_snap = float(snapshot_item.get("timestamp") or time.time())
+                else:
+                    snapshot = snapshot_item
+                    t_snap = time.time()
+                shm_seq_val: int | None = None
+                if isinstance(snapshot_item, dict):
+                    _raw_sq = snapshot_item.get("seq")
+                    if _raw_sq is not None:
+                        try:
+                            shm_seq_val = int(_raw_sq)
+                        except (TypeError, ValueError):
+                            shm_seq_val = None
+                if not snapshot:
+                    return
+                if shm_reader is not None and shm_reader.reads_paused():
+                    return
+                # Periodo entre publicaciones: preferir double en cabecera SHM (+52) escrito por C++; evita que el ritmo de Python altere la medida.
+                dt_ms = None
+                if isinstance(snapshot_item, dict):
+                    pp = snapshot_item.get("publish_period_sec")
+                    if isinstance(pp, (int, float)) and float(pp) > 0.0:
+                        dt_ms = float(pp) * 1000.0
+                if dt_ms is None and shm_last_snap_ts is not None:
+                    dt_ms = max(0.0, (t_snap - shm_last_snap_ts) * 1000.0)
+                if dt_ms is not None:
+                    shm_cycle_ema_ms = dt_ms if shm_cycle_ema_ms is None else (shm_cycle_ema_ms * 0.85 + dt_ms * 0.15)
+                    ws.app.state.shm_cycle_ms = round(shm_cycle_ema_ms, 3)
+                shm_last_snap_ts = t_snap
+                # No es un buffer histórico: solo el último frame. Con alarmas/REC el snapshot debe ser
+                # completo para evaluación y TSV. Si solo monitorizas, recortar a `monitored_names` libera
+                # referencias a dicts de variables SHM que no están en el monitor (p. ej. 2048 vs 2000).
+                if not alarms_config and not recording and monitored_names:
+                    mn = monitored_names
+                    from_shm = [v for v in snapshot if (v.get("name") or "") in mn]
+                    prev_by_name = {v["name"]: v for v in (latest_snapshot or []) if (v.get("name") or "") in mn}
+                    shm_ns = {v["name"] for v in from_shm}
+                    merged = list(from_shm)
+                    for nm, row in prev_by_name.items():
+                        if nm not in shm_ns:
+                            merged.append(row)
+                    latest_snapshot = merged
+                else:
+                    latest_snapshot = snapshot
+                _sidecar_alarm_delegate_active = bool(
+                    recording_sidecar_alarm_delegate and recording and recording_sidecar_proc is not None
+                )
+                alarms_backend_sc = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower() == "sidecar_cpp"
+                alarm_sidecar_live = bool(
+                    alarms_backend_sc
+                    and alarm_sidecar_proc is not None
+                    and alarm_sidecar_proc.poll() is None
+                )
+                delegate_shm_alarms = bool(alarm_sidecar_live and _alarms_sidecar_eligible(alarms_config))
+                alarms_eval_cfg = alarms_config
+                if _sidecar_alarm_delegate_active:
+                    alarms_eval_cfg = {
+                        k: v
+                        for k, v in alarms_config.items()
+                        if k in VARMON_TELEMETRY_NAME_SET
+                    }
+                elif delegate_shm_alarms:
+                    alarms_eval_cfg = {}
+                if not replay_alarm_engaged:
+                    alarms_eval_cfg = {}
+                # Buffer de ventana para alarm_recording_ready también si el sidecar evalúa reglas SHM.
+                if alarms_config and replay_alarm_engaged:
+                    alarm_buffer.append((t_snap, snapshot))
+                    cutoff = t_snap - ALARM_BUFFER_SEC
+                    while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                        alarm_buffer.popleft()
+                if alarms_eval_cfg:
+                    prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                        snapshot, alarms_eval_cfg, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                    )
+                    await _notify_alarm_events(cleared, triggered)
+                if recording:
+                    if recording_sidecar_proc is not None:
+                        if (t_snap - last_record_progress_send_at) >= 0.5:
+                            last_record_progress_send_at = t_snap
+                            try:
+                                est_bytes = 0
+                                samples = 0
+                                if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                                    try:
+                                        est_bytes = int(os.path.getsize(recording_tmp_path))
+                                    except OSError:
+                                        est_bytes = 0
+                                sp = recording_sidecar_status_path
+                                if sp and os.path.isfile(sp):
+                                    try:
+                                        with open(sp, encoding="utf-8") as sf:
+                                            line = (sf.readline() or "").strip()
+                                        if line.isdigit():
+                                            samples = int(line)
+                                    except OSError:
+                                        pass
+                                await ws.send_json({
+                                    "type": "recording_progress",
+                                    "bytes": est_bytes,
+                                    "samples": samples,
+                                })
+                            except Exception:
+                                pass
+                    else:
+                        # Un drenado de cola puede traer N instantáneas (asyncio más lento que el hilo SHM):
+                        # solo la última del batch representa un ciclo coherente para TSV/Parquet (1 fila ≈ 1 sem_wait del lector).
+                        skip_recording_row = False
+                        if not recording_sample_tail:
+                            skip_recording_row = True
+                        elif shm_seq_val is not None:
+                            if recording_last_shm_seq is not None and shm_seq_val == recording_last_shm_seq:
+                                skip_recording_row = True
+                        if _recording_trace_enabled() and recording and recording_sidecar_proc is None:
+                            _lvl = _recording_trace_level()
+                            _extra = ""
+                            if _lvl >= 2:
+                                _nv = len(snapshot) if isinstance(snapshot, list) else "?"
+                                _extra = f" recording_t0={recording_t0!r} n_vars={_nv}"
+                            print(
+                                f"[VarMonitor Web] [recording_trace] py_rec i={shm_batch_i}/{shm_batch_n - 1} "
+                                f"seq={shm_seq_val} t_snap={t_snap:.17g} tail={recording_sample_tail} "
+                                f"skip={skip_recording_row} last_committed_seq={recording_last_shm_seq}{_extra}",
+                                flush=True,
+                            )
+                        if not skip_recording_row:
+                            if shm_seq_val is not None:
+                                recording_last_shm_seq = shm_seq_val
+                            if recording_t0 is None:
+                                recording_t0 = t_snap
+                            t_rel = 0.0 if (recording_rows_written_ref and recording_rows_written_ref[0] == 0) else max(0.0, t_snap - float(recording_t0))
+                            if recording_write_queue is not None:
+                                if _recording_trace_enabled():
+                                    print(
+                                        f"[VarMonitor Web] [recording_trace] REC_PARQUET_PUT t_rel={t_rel:.9f} "
+                                        f"seq={shm_seq_val}",
+                                        flush=True,
+                                    )
+                                recording_write_queue.put((t_rel, snapshot))
+                                if recording_rows_written_ref and (t_snap - last_record_progress_send_at) >= 0.5:
+                                    last_record_progress_send_at = t_snap
+                                    try:
+                                        est_bytes = 0
+                                        if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                                            try:
+                                                est_bytes = int(os.path.getsize(recording_tmp_path))
+                                            except Exception:
+                                                est_bytes = 0
+                                        await ws.send_json({
+                                            "type": "recording_progress",
+                                            "bytes": est_bytes,
+                                            "samples": recording_rows_written_ref[0],
+                                        })
+                                    except Exception:
+                                        pass
+                            else:
+                                if recording_tmp_fp is None:
+                                    _ensure_recordings_dir()
+                                    recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                                    recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
+                                if recording_col_spec is None:
+                                    names = recording_var_names or sorted(set(e["name"] for e in snapshot))
+                                    recording_col_spec = _build_record_col_spec(names, snapshot)
+                                    recording_row_layout = _record_row_layout(recording_col_spec)
+                                if not recording_header_estimated and recording_col_spec:
+                                    recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
+                                    recording_header_estimated = True
+                                if recording_col_spec:
+                                    t_rel_local = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
+                                    if _recording_trace_enabled():
+                                        print(
+                                            f"[VarMonitor Web] [recording_trace] REC_TSV_ROW t_rel={t_rel_local:.9f} "
+                                            f"seq={shm_seq_val} row_n={recording_rows_written + 1}",
+                                            flush=True,
+                                        )
+                                    recording_size_est_bytes += _write_record_row_stream(
+                                        recording_tmp_fp, t_rel_local, snapshot, recording_col_spec, recording_row_layout
+                                    )
+                                    recording_rows_written += 1
+                                if (t_snap - last_record_progress_send_at) >= 0.5:
+                                    last_record_progress_send_at = t_snap
+                                    try:
+                                        await ws.send_json({
+                                            "type": "recording_progress",
+                                            "bytes": int(max(0, recording_size_est_bytes)),
+                                            "samples": recording_rows_written,
+                                        })
+                                    except Exception:
+                                        pass
+
+            finally:
+                if perf_lease_active(ws.app.state):
+                    perf_agg.record_phase_sec("py.shm_handle_snapshot", time.perf_counter() - _perf_snap_t0)
+        while True:
+            batch: list = []
+            try:
+                while True:
+                    batch.append(shm_queue.get_nowait())
+            except Empty:
+                pass
+            if not batch:
+                # Cola vacía + lector pausado: no hace falta drenar a 250 Hz, pero tampoco dormir decenas
+                # de segundos: al reanudar monitorización el primer snapshot puede encolarse mientras este
+                # bucle estaba en sleep largo → UI congelada hasta que expire el sleep.
+                if shm_reader is not None and shm_reader.reads_paused():
+                    await asyncio.sleep(0.1)
+                else:
+                    await asyncio.sleep(0.004)
+                continue
+            # Solo monitorización: el navegador ya recibe vars_update a tasa baja; procesar toda la
+            # cola por frame satura la CPU si C++ publica más rápido que este bucle.
+            if not alarms_config and not recording:
+                batch = batch[-1:]
+            n_batch = len(batch)
+            if _recording_trace_enabled() and batch and recording:
+                s0, t0 = _recording_trace_item_meta(batch[0])
+                s1, t1 = _recording_trace_item_meta(batch[-1])
+                print(
+                    f"[VarMonitor Web] [recording_trace] SHM_BATCH n={n_batch} "
+                    f"sidecar={'yes' if recording_sidecar_proc is not None else 'no'} "
+                    f"seq_first={s0} seq_last={s1} t_first={t0} t_last={t1}",
+                    flush=True,
+                )
+                if _recording_trace_level() >= 2:
+                    uniq_ts = set()
+                    uniq_seq = set()
+                    for _it in batch:
+                        _si, _ti = _recording_trace_item_meta(_it)
+                        if _ti is not None:
+                            uniq_ts.add(round(_ti, 12))
+                        if _si is not None:
+                            uniq_seq.add(_si)
+                    _max_items = 48
+                    _detail = []
+                    for _j, _it in enumerate(batch[:_max_items]):
+                        _sj, _tj = _recording_trace_item_meta(_it)
+                        _detail.append(f"[{_j}]seq={_sj} t={_tj!r}")
+                    _suffix = ""
+                    if n_batch > _max_items:
+                        _suffix = f" ... (+{n_batch - _max_items} más)"
+                    print(
+                        f"[VarMonitor Web] [recording_trace2] SHM_BATCH_DETAIL "
+                        f"uniq_ts≈{len(uniq_ts)} uniq_seq={len(uniq_seq)} "
+                        + " ".join(_detail)
+                        + _suffix,
+                        flush=True,
+                    )
+            for bi, snapshot_item in enumerate(batch):
+                if bi > 0 and (bi & 31) == 0:
+                    await asyncio.sleep(0)
+                # Grabación Python (TSV/Parquet): una fila por drenado de cola — solo la última muestra del batch.
+                rec_tail = (not recording) or (recording_sidecar_proc is not None) or (bi == n_batch - 1)
+                await _handle_snapshot_item(
+                    snapshot_item,
+                    recording_sample_tail=rec_tail,
+                    shm_batch_i=bi,
+                    shm_batch_n=n_batch,
+                )
+
+    def update_shm_read_pause() -> None:
+        """Sin monitor, grabación ni alarmas: no parsear SHM (ahorra CPU/RAM)."""
+        nonlocal latest_snapshot
+        if not shm_reader:
+            return
+        idle = not monitored_names and not recording and not alarms_config
+        shm_reader.set_reads_paused(bool(idle))
+        sidecar_rec_live = (
+            bool(recording)
+            and recording_sidecar_proc is not None
+            and recording_sidecar_proc.poll() is None
+        )
+        # Grabación Python (cola → TSV) o alarmas evaluadas aquí: sin tope Hz. Grabación sidecar: el TSV lo escribe
+        # otro proceso; `shm_parse_hz_sidecar_recording` limita solo el parseo Python para la UI (sem sidecar aparte).
+        need_full_parse = bool(alarms_config or (recording and not sidecar_rec_live))
+        shm_reader.set_full_parse_rate(need_full_parse)
+        if sidecar_rec_live:
+            cap = float(_config.get("shm_parse_hz_sidecar_recording", 0) or 0)
+            drain_iv = float(_config.get("shm_sidecar_sem_drain_interval_sec", 0.2) or 0.2)
+            drain_iv = max(0.05, min(5.0, drain_iv))
+            if cap <= 0:
+                shm_reader.set_sidecar_sem_pump_only(True, drain_iv)
+                shm_reader.set_parse_max_hz(None)
+            else:
+                shm_reader.set_sidecar_sem_pump_only(False)
+                shm_reader.set_parse_max_hz(max(1.0, min(500.0, cap)))
+        else:
+            shm_reader.set_sidecar_sem_pump_only(False)
+            shm_hz = float(_config.get("shm_parse_max_hz", 0) or 0)
+            shm_reader.set_parse_max_hz(None if shm_hz <= 0 else max(0.01, min(5000.0, shm_hz)))
+        if idle:
+            latest_snapshot = None
+
+    async def push_shm_publish_slice() -> None:
+        """Alinea troceo de publicación SHM en C++ con Rel act (idle) vs tasa plena (REC / alarmas)."""
+        try:
+            max_r = int(_config.get("update_ratio_max", 512))
+            idle_slice = bool(monitored_names) and not recording and not alarms_config
+            force_full = not idle_slice
+            count = max(1, min(max_r, int(update_ratio))) if idle_slice else 1
+            await asyncio.to_thread(bridge.set_shm_publish_slice, count, force_full)
+        except Exception:
+            pass
+
+    if shm_reader and shm_queue is not None:
+        shm_drain_task = asyncio.create_task(_shm_drain_loop())
+        update_shm_read_pause()
+    await push_shm_publish_slice()
+    await _refresh_server_info()
+    if info and (info.get("sem_sidecar_name") or "").strip():
+        print(
+            f"[VarMonitor Web] SHM: sem sidecar para grabación/alarmas nativas: {info['sem_sidecar_name']}",
+            flush=True,
+        )
+    elif info and info.get("shm_name") and info.get("sem_name"):
+        print(
+            "[VarMonitor Web] SHM: server_info sin `sem_sidecar_name` — el sidecar usará el sem principal "
+            "(compite con Python). Recompila y reinicia el proceso C++ con libvarmonitor actual.",
+            flush=True,
+        )
+
+    ws_id = id(ws)
+    if not hasattr(ws.app.state, "ws_monitored_counts"):
+        ws.app.state.ws_monitored_counts = {}
+    ws.app.state.ws_monitored_counts[ws_id] = len(monitored_names)
+
+    def _stop_alarm_sidecar() -> None:
+        nonlocal alarm_sidecar_proc, alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path
+        nonlocal alarm_sidecar_events_off, alarm_sidecar_shm_health_path, alarm_sidecar_shm_health_off
+        if alarm_sidecar_proc is not None:
+            p = alarm_sidecar_proc
+            alarm_sidecar_proc = None
+            try:
+                p.send_signal(signal.SIGTERM)
+                p.wait(timeout=4)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        for aux in (
+            alarm_sidecar_events_path,
+            alarm_sidecar_names_path,
+            alarm_sidecar_alarms_path,
+            alarm_sidecar_shm_health_path,
+        ):
+            if aux and os.path.isfile(aux):
+                try:
+                    os.remove(aux)
+                except OSError:
+                    pass
+        alarm_sidecar_events_path = None
+        alarm_sidecar_names_path = None
+        alarm_sidecar_alarms_path = None
+        alarm_sidecar_events_off = 0
+        alarm_sidecar_shm_health_path = None
+        alarm_sidecar_shm_health_off = 0
+
+    async def _try_start_alarm_sidecar() -> None:
+        nonlocal alarm_sidecar_proc, alarm_sidecar_events_path, alarm_sidecar_names_path, alarm_sidecar_alarms_path
+        nonlocal alarm_sidecar_events_off, alarm_sidecar_shm_health_path, alarm_sidecar_shm_health_off
+        nonlocal info
+        await _refresh_server_info()
+        _stop_alarm_sidecar()
+        if not replay_alarm_engaged:
+            return
+        ab = (_config.get("alarms_backend") or "sidecar_cpp").strip().lower()
+        if ab != "sidecar_cpp" or not shm_reader or not alarms_config or not info:
+            return
+        if not info.get("shm_name") or not info.get("sem_name"):
+            return
+        if not _alarms_sidecar_eligible(alarms_config):
+            return
+        bin_path = _resolve_recording_sidecar_bin(_config)
+        if not bin_path or not os.path.isfile(bin_path):
+            print("[VarMonitor Web] Alarmas sidecar: ejecutable no encontrado; se usan alarmas en Python.", flush=True)
+            return
+        _ensure_recordings_dir()
+        ev_path = os.path.join(RECORDINGS_DIR, f".alarm_ev_{ws_id}_{int(time.time() * 1000)}.ndjson")
+        shm_health_path = os.path.join(RECORDINGS_DIR, f".alarm_shm_health_{ws_id}_{int(time.time() * 1000)}.ndjson")
+        names_path = os.path.join(RECORDINGS_DIR, f".alarm_names_{ws_id}_{int(time.time() * 1000)}.txt")
+        al_path = os.path.join(RECORDINGS_DIR, f".alarm_rules_{ws_id}_{int(time.time() * 1000)}.tsv")
+        try:
+            if os.path.isfile(ev_path):
+                os.remove(ev_path)
+            if os.path.isfile(shm_health_path):
+                os.remove(shm_health_path)
+        except OSError:
+            pass
+        sub = _shm_subscription_real_names(monitored_names, alarms_config)
+        try:
+            with open(names_path, "w", encoding="utf-8") as nf:
+                for n in sub:
+                    nf.write(n + "\n")
+        except OSError as e:
+            print(f"[VarMonitor Web] No se pudo escribir names-file alarm sidecar: {e}", flush=True)
+            return
+        n_rules = _write_sidecar_alarms_tsv(al_path, alarms_config)
+        if n_rules <= 0:
+            try:
+                os.remove(names_path)
+            except OSError:
+                pass
+            return
+        shm_max = int(_config.get("shm_max_vars", 2048))
+        sem_sc = (info.get("sem_sidecar_name") or "").strip()
+        sem_arg = str(_shm_sem_name_for_sidecar(info) or info["sem_name"])
+        args = [
+            bin_path,
+            "--alarm-monitor",
+            "--shm-name",
+            str(info["shm_name"]),
+            "--sem-name",
+            sem_arg,
+            "--names-file",
+            names_path,
+            "--alarms-file",
+            al_path,
+            "--alarm-events-file",
+            ev_path,
+            "--alarm-output-dir",
+            RECORDINGS_DIR,
+            "--max-vars",
+            str(shm_max),
+            "--shm-health-file",
+            shm_health_path,
+        ]
+        try:
+            alarm_sidecar_proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=sys.stderr,
+                start_new_session=True,
+            )
+            _apply_sidecar_cpu_affinity(alarm_sidecar_proc.pid, _config, "Alarmas sidecar")
+            alarm_sidecar_events_path = ev_path
+            alarm_sidecar_names_path = names_path
+            alarm_sidecar_alarms_path = al_path
+            alarm_sidecar_shm_health_path = shm_health_path
+            alarm_sidecar_events_off = 0
+            alarm_sidecar_shm_health_off = 0
+            if sem_sc:
+                print(
+                    f"[VarMonitor Web] Alarmas sidecar: sem dedicado {sem_arg} (eventos: {ev_path})",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[VarMonitor Web] Alarmas sidecar: sin sem_sidecar_name en server_info → --sem-name={sem_arg} "
+                    f"(mismo sem que Python; recompila/reinicia VarMonitor). Eventos: {ev_path}",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"[VarMonitor Web] No se pudo arrancar alarm-sidecar: {e}", flush=True)
+            _stop_alarm_sidecar()
+
+    def _read_alarm_sidecar_event_lines() -> list[dict]:
+        nonlocal alarm_sidecar_events_off
+        path = alarm_sidecar_events_path
+        if not path or not os.path.isfile(path):
+            return []
+        out: list[dict] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                f.seek(alarm_sidecar_events_off)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    alarm_sidecar_events_off = f.tell()
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+        return out
+
+    async def _drain_alarm_sidecar_events() -> None:
+        evs = await asyncio.to_thread(_read_alarm_sidecar_event_lines)
+        for ev in evs:
+            k = ev.get("kind")
+            if k == "cleared":
+                try:
+                    await ws.send_json({"type": "alarm_cleared", "names": ev.get("names") or []})
+                except Exception:
+                    pass
+            elif k == "triggered":
+                tr = ev.get("triggered")
+                if isinstance(tr, list) and tr:
+                    buf_snap = list(alarm_buffer)
+                    try:
+                        await ws.send_json({"type": "alarm_triggered", "triggered": tr})
+                    except Exception:
+                        pass
+                    _schedule_alarm_recording_post_trigger(buf_snap)
+            elif k == "ready":
+                path_ready = ev.get("path") or ""
+                fn_ready = ev.get("filename") or ""
+                msg_rd: dict = {"type": "alarm_recording_ready", "path": path_ready, "filename": fn_ready}
+                if send_file_on_finish and path_ready and os.path.isfile(path_ready):
+                    b64 = await asyncio.to_thread(_file_read_base64_sync, path_ready)
+                    if b64 is not None:
+                        msg_rd["file_base64"] = b64
+                try:
+                    await ws.send_json(msg_rd)
+                except Exception:
+                    pass
+
+    async def _drain_alarm_sidecar_shm_health() -> None:
+        nonlocal alarm_sidecar_shm_health_off
+        hp = alarm_sidecar_shm_health_path
+        if not hp:
+            return
+        so = alarm_sidecar_shm_health_off
+
+        def _go() -> tuple[list[dict], int]:
+            return _read_ndjson_lines_from_offset(hp, so)
+
+        objs, alarm_sidecar_shm_health_off = await asyncio.to_thread(_go)
+        for o in objs:
+            _log_sidecar_shm_health_line(o, " · alarmas")
+
+    async def _drain_recording_sidecar_shm_health() -> None:
+        nonlocal recording_sidecar_shm_health_off
+        hp = recording_sidecar_shm_health_path
+        if not hp:
+            return
+        so = recording_sidecar_shm_health_off
+
+        def _go() -> tuple[list[dict], int]:
+            return _read_ndjson_lines_from_offset(hp, so)
+
+        objs, recording_sidecar_shm_health_off = await asyncio.to_thread(_go)
+        for o in objs:
+            _log_sidecar_shm_health_line(o, " · grabación")
+
+    async def _finalize_recording_after_sidecar_exit(alarm_payload: dict | None) -> None:
+        """Sidecar terminó solo (p. ej. alarma): cerrar TSV, notificar y limpiar sin SIGTERM."""
+        nonlocal recording, recording_sidecar_proc, recording_sidecar_status_path, recording_sidecar_names_path
+        nonlocal recording_sidecar_alarms_path, recording_sidecar_alarm_exit_path, recording_sidecar_alarm_delegate
+        nonlocal recording_tmp_fp, recording_tmp_path, recording_rows_written, recording_size_est_bytes
+        nonlocal recording_header_estimated, last_record_progress_send_at, recording_col_spec, recording_row_layout
+        nonlocal recording_t0, record_buffer, recording_var_names
+        nonlocal recording_sidecar_shm_health_path, recording_sidecar_shm_health_off
+        recording = False
+        recording_sidecar_alarm_delegate = False
+        recording_sidecar_proc = None
+        rows_done = 0
+        stp = recording_sidecar_status_path
+        if stp and os.path.isfile(stp):
+            try:
+                with open(stp, encoding="utf-8") as sf:
+                    first = (sf.readline() or "").strip()
+                if first.isdigit():
+                    rows_done = int(first)
+            except (OSError, ValueError):
+                rows_done = 0
+        if rows_done <= 0 and recording_tmp_path and os.path.isfile(recording_tmp_path):
+            try:
+                with open(recording_tmp_path, "rb") as rf:
+                    rows_done = max(0, rf.read().count(b"\n") - 1)
+            except OSError:
+                rows_done = 0
+        recording_rows_written = rows_done
+        await _drain_recording_sidecar_shm_health()
+        _sp_perf = getattr(ws.app.state, "sidecar_perf_json_path", None)
+        for aux in (
+            recording_sidecar_status_path,
+            recording_sidecar_names_path,
+            recording_sidecar_alarms_path,
+            recording_sidecar_alarm_exit_path,
+            recording_sidecar_shm_health_path,
+            _sp_perf,
+        ):
+            if aux and os.path.isfile(aux):
+                try:
+                    os.remove(aux)
+                except OSError:
+                    pass
+        ws.app.state.sidecar_perf_json_path = None
+        _unregister_sidecar_perf_session()
+        recording_sidecar_status_path = None
+        recording_sidecar_names_path = None
+        recording_sidecar_alarms_path = None
+        recording_sidecar_alarm_exit_path = None
+        recording_sidecar_shm_health_path = None
+        recording_sidecar_shm_health_off = 0
+        if recording_tmp_fp is not None:
+            try:
+                recording_tmp_fp.flush()
+            except Exception:
+                pass
+            try:
+                recording_tmp_fp.close()
+            except Exception:
+                pass
+        recording_tmp_fp = None
+        path_saved, fn_saved, size_saved = _finalize_recording_temp_file(recording_tmp_path, recording_rows_written)
+        if not path_saved and record_buffer:
+            path_saved, fn_saved, size_saved = _flush_record_buffer_to_tsv(record_buffer, recording_var_names)
+        recording_tmp_path = None
+        if alarm_payload and isinstance(alarm_payload, dict):
+            nm = alarm_payload.get("name")
+            if nm is not None:
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "alarm_triggered",
+                            "triggered": [
+                                {
+                                    "name": str(nm),
+                                    "reason": str(alarm_payload.get("reason") or ""),
+                                    "value": alarm_payload.get("value"),
+                                }
+                            ],
+                        }
+                    )
+                except Exception:
+                    pass
+        msg: dict = {"type": "record_finished", "path": path_saved or "", "filename": fn_saved or ""}
+        if path_saved:
+            msg["size_bytes"] = int(size_saved if size_saved > 0 else max(0, recording_size_est_bytes))
+        if path_saved and send_file_on_finish:
+            try:
+                with open(path_saved, "rb") as f:
+                    import base64
+
+                    msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+            except Exception:
+                pass
+        if not path_saved:
+            msg["message"] = "No se registraron datos (¿C++ con SHM activo?)."
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
+        record_buffer.clear()
+        recording_var_names = None
+        recording_size_est_bytes = 0
+        recording_header_estimated = False
+        last_record_progress_send_at = 0.0
+        recording_col_spec = None
+        recording_row_layout = None
+        recording_rows_written = 0
+        recording_t0 = None
+        update_shm_read_pause()
+        await push_shm_publish_slice()
+        await _try_start_alarm_sidecar()
+
+    ws_close_detail: str | None = None
+    try:
+        while True:
+            try:
+                now = time.monotonic()
+
+                if alarm_sidecar_proc is not None:
+                    if alarm_sidecar_proc.poll() is not None:
+                        print(
+                            "[VarMonitor Web] Aviso: alarm-sidecar terminó; alarmas en Python hasta el próximo set_alarms.",
+                            flush=True,
+                        )
+                        _stop_alarm_sidecar()
+                    else:
+                        if alarm_sidecar_events_path:
+                            await _drain_alarm_sidecar_events()
+                        await _drain_alarm_sidecar_shm_health()
+
+                if recording and recording_sidecar_proc is not None:
+                    if recording_sidecar_proc.poll() is not None:
+                        alarm_payload = None
+                        aep = recording_sidecar_alarm_exit_path
+                        if aep and os.path.isfile(aep):
+                            try:
+                                with open(aep, encoding="utf-8") as af:
+                                    alarm_payload = json.load(af)
+                            except Exception:
+                                alarm_payload = None
+                        await _finalize_recording_after_sidecar_exit(alarm_payload)
+                        continue
+                    await _drain_recording_sidecar_shm_health()
+
+                catalog_idle = not monitored_names and not recording
+                refresh_iv = names_refresh_interval_idle if catalog_idle else names_refresh_interval
+                # Sesión idle y catálogo ya enviado: no list_names/list_vars periódicos (evita RSS por asignaciones enormes).
+                if last_names_send is None:
+                    need_catalog = True
+                elif catalog_idle:
+                    need_catalog = False
+                else:
+                    need_catalog = now - last_names_send >= refresh_iv
+                if need_catalog:
+                    try:
+                        names_list = await asyncio.to_thread(bridge.list_names)
+                        if not names_list:
+                            names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+                        names_list = _merge_names_with_telemetry(names_list)
+                        await ws.send_json({"type": "vars_names", "data": names_list})
+                    except Exception as e:
+                        print(f"[VarMonitor Web] Aviso: vars_names periódico falló: {e}", flush=True)
+                    finally:
+                        # Siempre espaciar reintentos (incluso si falla UDS o send_json) para no crecer la RAM.
+                        last_names_send = now
+
+                if (
+                    shm_reader
+                    and shm_queue is not None
+                    and alarms_config
+                    and replay_alarm_engaged
+                    and not monitored_names
+                    and not recording
+                    and shm_reader.reads_paused()
+                    and (now - last_alarm_uds_poll_at >= ALARM_UDS_POLL_SEC)
+                ):
+                    last_alarm_uds_poll_at = now
+                    snapshot_alarm: list[dict] = []
+                    for aname in alarms_config:
+                        if aname in VARMON_TELEMETRY_NAME_SET:
+                            snapshot_alarm.extend(_telemetry_snapshot_rows({aname}, ws.app.state))
+                            continue
+                        vinfo = await asyncio.to_thread(bridge.get_var, aname)
+                        if vinfo:
+                            snapshot_alarm.append(vinfo)
+                    if snapshot_alarm:
+                        t_snap = time.time()
+                        alarm_buffer.append((t_snap, snapshot_alarm))
+                        cutoff = t_snap - ALARM_BUFFER_SEC
+                        while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                            alarm_buffer.popleft()
+                        prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                            snapshot_alarm, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                        )
+                        await _notify_alarm_events(cleared, triggered)
+
+                if shm_reader and shm_queue is not None:
+                    # Cola SHM la drena _shm_drain_loop en segundo plano. Aquí solo envío visual a tasa baja.
+                    interval_between_updates = update_ratio * cycle_interval_sec
+                    if monitored_names and (now - last_vars_update_at >= interval_between_updates):
+                        name_set = set(monitored_names)
+                        _t_vu = time.perf_counter()
+                        try:
+                            pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                latest_snapshot,
+                                name_set,
+                                ws.app.state,
+                                vars_update_sig_cache,
+                                force_full_vars_update,
+                            )
+                            if should_send:
+                                await ws.send_json({"type": "vars_update", "data": pack})
+                                last_vars_update_at = now
+                                if force_full_vars_update:
+                                    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                    shm_sent = {
+                                        v["name"]
+                                        for v in pack
+                                        if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                    }
+                                    if not shm_only or shm_only.issubset(shm_sent):
+                                        force_full_vars_update = False
+                            else:
+                                # Sin envío: no fijar last=now (permite reintentar cuando llegue snapshot SHM),
+                                # pero evitar llamar a merge en cada tick del recv (p. ej. cada 100 ms).
+                                _r = min(0.25, max(0.05, interval_between_updates * 0.05))
+                                last_vars_update_at = now - interval_between_updates + _r
+                        finally:
+                            if perf_lease_active(ws.app.state):
+                                perf_agg.record_phase_sec("py.vars_update_pack_send", time.perf_counter() - _t_vu)
+                else:
+                    # Sin SHM: tomar snapshot completo cada ciclo (backend-first para alarmas/grabación).
+                    if monitored_names:
+                        snapshot_now: list[dict] = []
+                        for name in monitored_names:
+                            if name in VARMON_TELEMETRY_NAME_SET:
+                                continue
+                            vinfo = await asyncio.to_thread(bridge.get_var, name)
+                            if vinfo:
+                                snapshot_now.append(vinfo)
+                        snapshot_now.extend(_telemetry_snapshot_rows(set(monitored_names), ws.app.state))
+                        if snapshot_now:
+                            t_snap = time.time()
+                            latest_snapshot = snapshot_now
+                            if alarms_config and replay_alarm_engaged:
+                                alarm_buffer.append((t_snap, snapshot_now))
+                                cutoff = t_snap - ALARM_BUFFER_SEC
+                                while alarm_buffer and alarm_buffer[0][0] < cutoff:
+                                    alarm_buffer.popleft()
+                                prev_alarm_state, alarm_pending_since_ms, triggered, cleared = _evaluate_alarms(
+                                    snapshot_now, alarms_config, prev_alarm_state, alarm_pending_since_ms, int(t_snap * 1000)
+                                )
+                                await _notify_alarm_events(cleared, triggered)
+                            if recording:
+                                if recording_tmp_fp is None:
+                                    _ensure_recordings_dir()
+                                    recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                                    recording_tmp_fp = open(recording_tmp_path, "w", buffering=1024 * 1024)
+                                if recording_col_spec is None:
+                                    names = recording_var_names or sorted(set(e["name"] for e in snapshot_now))
+                                    recording_col_spec = _build_record_col_spec(names, snapshot_now)
+                                    recording_row_layout = _record_row_layout(recording_col_spec)
+                                if recording_t0 is None:
+                                    recording_t0 = t_snap
+                                if not recording_header_estimated and recording_col_spec:
+                                    recording_size_est_bytes += _write_record_header_stream(recording_tmp_fp, recording_col_spec)
+                                    recording_header_estimated = True
+                                if recording_col_spec:
+                                    # Tiempo relativo: primera fila siempre 0.0
+                                    t_rel = 0.0 if recording_rows_written == 0 else max(0.0, t_snap - float(recording_t0))
+                                    recording_size_est_bytes += _write_record_row_stream(
+                                        recording_tmp_fp, t_rel, snapshot_now, recording_col_spec, recording_row_layout
+                                    )
+                                    recording_rows_written += 1
+                                if (t_snap - last_record_progress_send_at) >= 0.5:
+                                    last_record_progress_send_at = t_snap
+                                    try:
+                                        await ws.send_json({
+                                            "type": "recording_progress",
+                                            "bytes": int(max(0, recording_size_est_bytes)),
+                                            "samples": int(max(0, recording_rows_written)),
+                                        })
+                                    except Exception:
+                                        pass
+                    # Envío visual a tasa reducida.
+                    interval_between_updates = update_ratio * cycle_interval_sec
+                    if monitored_names and (now - last_vars_update_at >= interval_between_updates):
+                        name_set = set(monitored_names)
+                        _t_vu = time.perf_counter()
+                        try:
+                            pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                latest_snapshot,
+                                name_set,
+                                ws.app.state,
+                                vars_update_sig_cache,
+                                force_full_vars_update,
+                            )
+                            if should_send:
+                                await ws.send_json({"type": "vars_update", "data": pack})
+                                last_vars_update_at = now
+                                if force_full_vars_update:
+                                    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                    shm_sent = {
+                                        v["name"]
+                                        for v in pack
+                                        if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                    }
+                                    if not shm_only or shm_only.issubset(shm_sent):
+                                        force_full_vars_update = False
+                            else:
+                                _r = min(0.25, max(0.05, interval_between_updates * 0.05))
+                                last_vars_update_at = now - interval_between_updates + _r
+                        finally:
+                            if perf_lease_active(ws.app.state):
+                                perf_agg.record_phase_sec("py.vars_update_pack_send", time.perf_counter() - _t_vu)
+
+            except Exception as e:
+                msg_err = str(e)
+                ws_already_closed = (
+                    isinstance(e, WebSocketDisconnect)
+                    or (isinstance(e, RuntimeError) and (
+                        "close message has been sent" in msg_err
+                        or "WebSocket is not connected" in msg_err
+                    ))
+                )
+                if ws_already_closed:
+                    ws_close_detail = ws_close_detail or "cliente cerró mientras se enviaban datos"
+                    break
+                print(f"[VarMonitor Web] WebSocket error (C++ {connection_label}): {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                try:
+                    await ws.send_json({"type": "error", "message": msg_err})
+                except Exception as send_err:
+                    print(f"[VarMonitor Web] No se pudo enviar error al cliente: {send_err}", flush=True)
+
+            try:
+                # Sin monitor/alarmas/REC: receive_text() bloqueante (sin asyncio.wait_for) evita crear/cancelar
+                # una tarea interna en cada timeout; con timeouts cortos eso puede inflar RSS del proceso.
+                ws_fully_idle = not monitored_names and not recording and not alarms_config
+                if ws_fully_idle:
+                    msg = await ws.receive_text()
+                else:
+                    recv_timeout = cycle_interval_sec
+                    if recording and shm_reader and shm_queue is not None:
+                        recv_timeout = min(cycle_interval_sec, 0.005)  # 5 ms
+                    msg = await asyncio.wait_for(ws.receive_text(), timeout=recv_timeout)
+                cmd = json.loads(msg)
+                action = cmd.get("action")
+
+                if action == "set_update_ratio":
+                    max_r = _config.get("update_ratio_max", 512)
+                    v = int(cmd.get("value", 1))
+                    update_ratio = max(1, min(max_r, v))
+                    await push_shm_publish_slice()
+                elif action == "set_monitored":
+                    monitored_names = set(cmd.get("names", []))
+                    force_full_vars_update = True
+                    ws.app.state.ws_monitored_counts[ws_id] = len(monitored_names)
+                    # SHM: monitorizadas ∪ alarmas (si no, las alarmas solo verían get_var lento o nada en SHM).
+                    try:
+                        sub_real = _shm_subscription_real_names(monitored_names, alarms_config)
+                        shm_subscription_order = list(sub_real)
+                        await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
+                    except Exception:
+                        pass
+                    update_shm_read_pause()
+                    await push_shm_publish_slice()
+                    if alarms_config:
+                        await _try_start_alarm_sidecar()
+                    # Evitar "--" varios segundos: UDS ahora + vars_update inmediato; SHM rellena después.
+                    if monitored_names:
+                        try:
+                            boot = await asyncio.to_thread(
+                                _bootstrap_monitored_vars_rows, monitored_names, bridge, ws.app.state
+                            )
+                        except Exception:
+                            boot = []
+                        if boot:
+                            by_name = {v["name"]: v for v in boot if v.get("name")}
+                            for v in latest_snapshot or []:
+                                nn = v.get("name")
+                                if nn and nn in monitored_names and nn not in by_name:
+                                    by_name[nn] = v
+                            latest_snapshot = [by_name[n] for n in sorted(monitored_names) if n in by_name]
+                        try:
+                            name_set = set(monitored_names)
+                            _t_vu = time.perf_counter()
+                            try:
+                                pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                    latest_snapshot,
+                                    name_set,
+                                    ws.app.state,
+                                    vars_update_sig_cache,
+                                    force_full_vars_update,
+                                )
+                                if should_send:
+                                    await ws.send_json({"type": "vars_update", "data": pack})
+                                    # No reiniciar el reloj de envíos periódicos: si last=now, el siguiente vars_update
+                                    # queda bloqueado todo update_ratio×ciclo (p. ej. 10 s con ratio 100).
+                                    _iv = update_ratio * cycle_interval_sec
+                                    last_vars_update_at = time.monotonic() - _iv
+                                    shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
+                                    shm_sent = {
+                                        v["name"]
+                                        for v in pack
+                                        if (v.get("name") or "") not in VARMON_TELEMETRY_NAME_SET
+                                    }
+                                    if not shm_only or shm_only.issubset(shm_sent):
+                                        force_full_vars_update = False
+                            finally:
+                                if perf_lease_active(ws.app.state):
+                                    perf_agg.record_phase_sec("py.vars_update_pack_send", time.perf_counter() - _t_vu)
+                        except Exception:
+                            pass
+                # Historial en vivo eliminado: se mantiene solo vía SHM y grabaciones TSV.
+                elif action == "set_var":
+                    sn = cmd.get("name") or ""
+                    if sn in VARMON_TELEMETRY_NAME_SET:
+                        await ws.send_json({"type": "set_result", "success": False, "name": sn})
+                    else:
+                        ok = await asyncio.to_thread(
+                            _set_var_uds_and_shm_import,
+                            bridge,
+                            sn,
+                            cmd["value"],
+                            cmd.get("var_type", "double"),
+                            shm_write_mmap,
+                            shm_subscription_order,
+                            shm_layout_ver,
+                        )
+                        await ws.send_json({"type": "set_result", "success": ok, "name": sn})
+                elif action == "set_vars":
+                    rows = cmd.get("vars")
+                    if not isinstance(rows, list) or len(rows) == 0:
+                        await ws.send_json({"type": "set_result", "success": False, "batch": True})
+                    else:
+                        ok = await asyncio.to_thread(
+                            _shm_write_import_rows_batch,
+                            rows,
+                            shm_write_mmap,
+                            shm_subscription_order,
+                            shm_layout_ver,
+                        )
+                        await ws.send_json(
+                            {"type": "set_result", "success": ok, "batch": True, "count": len(rows)}
+                        )
+                elif action == "set_array_element":
+                    sn = cmd.get("name") or ""
+                    if sn in VARMON_TELEMETRY_NAME_SET:
+                        await ws.send_json({"type": "set_result", "success": False, "name": sn})
+                    else:
+                        ok = await asyncio.to_thread(
+                            bridge.set_array_element, sn, int(cmd["index"]), float(cmd["value"])
+                        )
+                        await ws.send_json({"type": "set_result", "success": ok, "name": sn})
+                elif action == "refresh_names":
+                    names_list = await asyncio.to_thread(bridge.list_names)
+                    if not names_list:
+                        names_list = [v["name"] for v in await asyncio.to_thread(bridge.list_vars)]
+                    names_list = _merge_names_with_telemetry(names_list)
+                    await ws.send_json({"type": "vars_names", "data": names_list})
+                    last_names_send = time.monotonic()
+                elif action == "set_alarms":
+                    ac = cmd.get("alarms")
+                    if isinstance(ac, dict):
+                        alarms_config.clear()
+                        prev_alarm_state.clear()
+                        alarm_pending_since_ms.clear()
+                        for k, v in ac.items():
+                            if not isinstance(v, dict):
+                                continue
+                            if v.get("compareToRef") and v.get("tol") is not None:
+                                refn = (v.get("refName") or "").strip() or _default_ref_shm_name_for_alarm(k)
+                                alarms_config[k] = {
+                                    "compareToRef": True,
+                                    "tol": v.get("tol"),
+                                    "hys": v.get("hys"),
+                                    "delayMs": v.get("delayMs"),
+                                    "refName": refn,
+                                }
+                            elif v.get("lo") is not None or v.get("hi") is not None:
+                                alarms_config[k] = {
+                                    "lo": v.get("lo"),
+                                    "hi": v.get("hi"),
+                                    "hys": v.get("hys"),
+                                    "delayMs": v.get("delayMs"),
+                                }
+                    try:
+                        sub_real = _shm_subscription_real_names(monitored_names, alarms_config)
+                        shm_subscription_order = list(sub_real)
+                        await asyncio.to_thread(bridge.set_shm_subscription, sub_real)
+                    except Exception:
+                        pass
+                    update_shm_read_pause()
+                    await push_shm_publish_slice()
+                    await _try_start_alarm_sidecar()
+                elif action == "set_replay_alarm_engaged":
+                    replay_alarm_engaged = bool(cmd.get("value", True))
+                    prev_alarm_state.clear()
+                    alarm_pending_since_ms.clear()
+                    if replay_alarm_engaged:
+                        await _try_start_alarm_sidecar()
+                    else:
+                        _stop_alarm_sidecar()
+                        try:
+                            if alarms_config:
+                                await ws.send_json(
+                                    {"type": "alarm_cleared", "names": list(alarms_config.keys())}
+                                )
+                        except Exception:
+                            pass
+                elif action == "set_send_file_on_finish":
+                    send_file_on_finish = bool(cmd.get("value", False))
+                elif action == "start_recording":
+                    _stop_alarm_sidecar()
+                    recording = True
+                    record_buffer.clear()
+                    recording_var_names = list(monitored_names) if monitored_names else None
+                    recording_format = cmd.get("format", "tsv")
+                    plugin_registry.fire_hook(
+                        "on_recording_start", recording_var_names, recording_format,
+                    )
+                    recording_size_est_bytes = 0
+                    recording_header_estimated = False
+                    last_record_progress_send_at = 0.0
+                    recording_col_spec = None
+                    recording_row_layout = None
+                    recording_rows_written = 0
+                    recording_t0 = None
+                    recording_last_shm_seq = None
+                    if _recording_trace_enabled():
+                        _rl = _recording_trace_level()
+                        print(
+                            "[VarMonitor Web] [recording_trace] start_recording: "
+                            f"VARMON_RECORDING_TRACE nivel {_rl} → SHM_BATCH"
+                            + (", SHM_BATCH_DETAIL" if _rl >= 2 else "")
+                            + ", py_rec, REC_PARQUET_PUT / REC_TSV_ROW, writer_thread",
+                            flush=True,
+                        )
+                    if recording_sidecar_proc is not None:
+                        p0 = recording_sidecar_proc
+                        recording_sidecar_proc = None
+                        try:
+                            p0.send_signal(signal.SIGTERM)
+                            p0.wait(timeout=5)
+                        except Exception:
+                            try:
+                                p0.kill()
+                            except Exception:
+                                pass
+                    _sp0 = getattr(ws.app.state, "sidecar_perf_json_path", None)
+                    for aux in (
+                        recording_sidecar_status_path,
+                        recording_sidecar_names_path,
+                        recording_sidecar_alarms_path,
+                        recording_sidecar_alarm_exit_path,
+                        recording_sidecar_shm_health_path,
+                        _sp0,
+                    ):
+                        if aux and os.path.isfile(aux):
+                            try:
+                                os.remove(aux)
+                            except OSError:
+                                pass
+                    ws.app.state.sidecar_perf_json_path = None
+                    _unregister_sidecar_perf_session()
+                    recording_sidecar_status_path = None
+                    recording_sidecar_names_path = None
+                    recording_sidecar_alarms_path = None
+                    recording_sidecar_alarm_exit_path = None
+                    recording_sidecar_shm_health_path = None
+                    recording_sidecar_shm_health_off = 0
+                    recording_sidecar_alarm_delegate = False
+                    if recording_writer_thread is not None:
+                        if recording_write_queue:
+                            recording_write_queue.put(None)
+                        recording_writer_thread.join(timeout=2.0)
+                        recording_writer_thread = None
+                    recording_write_queue = None
+                    recording_rows_written_ref = None
+                    if recording_tmp_fp is not None:
+                        try:
+                            recording_tmp_fp.close()
+                        except Exception:
+                            pass
+                    recording_tmp_fp = None
+                    if recording_tmp_path and os.path.isfile(recording_tmp_path):
+                        try:
+                            os.remove(recording_tmp_path)
+                        except Exception:
+                            pass
+                    recording_tmp_path = None
+                    await _refresh_server_info()
+                    rb = (_config.get("recording_backend") or "python").strip().lower()
+                    want_sidecar = (
+                        rb == "sidecar_cpp"
+                        and shm_reader is not None
+                        and shm_queue is not None
+                        and info
+                        and info.get("shm_name")
+                        and info.get("sem_name")
+                    )
+                    if want_sidecar:
+                        bin_path = _resolve_recording_sidecar_bin(_config)
+                        if not bin_path:
+                            recording = False
+                            await ws.send_json({
+                                "type": "error",
+                                "message": "Grabación sidecar: ejecutable no encontrado. Use VARMON_SIDECAR_BIN, recording_sidecar_bin en varmon.conf o varmon_sidecar en el PATH.",
+                            })
+                        else:
+                            _ensure_recordings_dir()
+                            recording_tmp_path = os.path.join(RECORDINGS_DIR, f".recording_{int(time.time() * 1000)}.tsv.part")
+                            recording_sidecar_status_path = recording_tmp_path + ".stat"
+                            names_path = os.path.join(
+                                RECORDINGS_DIR, f".recording_names_{os.getpid()}_{int(time.time() * 1000)}.txt"
+                            )
+                            recording_sidecar_names_path = names_path
+                            recording_sidecar_alarms_path = None
+                            recording_sidecar_alarm_exit_path = None
+                            recording_sidecar_alarm_delegate = False
+                            nv = list(monitored_names) if monitored_names else []
+                            recording_var_names = nv if nv else None
+                            rec_shm_health_path: str | None = None
+                            try:
+                                with open(names_path, "w", encoding="utf-8") as nf:
+                                    for n in nv:
+                                        nf.write(n + "\n")
+                                if alarms_config:
+                                    alarms_tsv = recording_tmp_path + ".alarms.tsv"
+                                    n_al = _write_sidecar_alarms_tsv(alarms_tsv, alarms_config)
+                                    if n_al > 0:
+                                        recording_sidecar_alarms_path = alarms_tsv
+                                        recording_sidecar_alarm_exit_path = recording_tmp_path + ".alarm_exit"
+                                        recording_sidecar_alarm_delegate = True
+                                shm_max = int(_config.get("shm_max_vars", 2048))
+                                rec_shm_health_path = (recording_tmp_path or "") + ".shm_health.ndjson"
+                                rec_perf_json = (recording_tmp_path or "") + ".sidecar_perf.json"
+                                try:
+                                    if os.path.isfile(rec_shm_health_path):
+                                        os.remove(rec_shm_health_path)
+                                except OSError:
+                                    pass
+                                try:
+                                    if os.path.isfile(rec_perf_json):
+                                        os.remove(rec_perf_json)
+                                except OSError:
+                                    pass
+                                abs_perf_json = os.path.abspath(rec_perf_json)
+                                sem_sc = (info.get("sem_sidecar_name") or "").strip()
+                                sem_arg = str(_shm_sem_name_for_sidecar(info) or info["sem_name"])
+                                args_base = [
+                                    bin_path,
+                                    "--shm-name",
+                                    str(info["shm_name"]),
+                                    "--sem-name",
+                                    sem_arg,
+                                    "--output",
+                                    recording_tmp_path,
+                                    "--names-file",
+                                    names_path,
+                                    "--max-vars",
+                                    str(shm_max),
+                                    "--status-file",
+                                    recording_sidecar_status_path,
+                                    "--shm-health-file",
+                                    rec_shm_health_path,
+                                ]
+                                if recording_sidecar_alarms_path and recording_sidecar_alarm_exit_path:
+                                    args_base.extend(
+                                        [
+                                            "--alarms-file",
+                                            recording_sidecar_alarms_path,
+                                            "--alarm-exit-file",
+                                            recording_sidecar_alarm_exit_path,
+                                        ]
+                                    )
+                                # Binarios antiguos no reconocen --perf-file (salen con código 2 al parsear).
+                                ws.app.state.sidecar_perf_json_path = abs_perf_json
+                                _register_sidecar_perf_session(abs_perf_json)
+                                _write_sidecar_perf_stub_json(abs_perf_json)
+                                args_with_perf = list(args_base) + [
+                                    "--perf-file",
+                                    abs_perf_json,
+                                ]
+                                recording_sidecar_proc = subprocess.Popen(
+                                    args_with_perf,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=sys.stderr,
+                                    close_fds=True,
+                                    env=_sidecar_recording_trace_env(_config),
+                                )
+                                time.sleep(0.05)
+                                _ex_immediate = recording_sidecar_proc.poll()
+                                if _ex_immediate == 2:
+                                    print(
+                                        "[VarMonitor Web] Sidecar salió con código 2 (p. ej. --perf-file no soportado). "
+                                        "Reintentando sin --perf-file; recompila varmon_sidecar para métricas de perf.",
+                                        flush=True,
+                                    )
+                                    ws.app.state.sidecar_perf_json_path = None
+                                    _unregister_sidecar_perf_session()
+                                    try:
+                                        if os.path.isfile(abs_perf_json):
+                                            os.remove(abs_perf_json)
+                                    except OSError:
+                                        pass
+                                    recording_sidecar_proc = subprocess.Popen(
+                                        args_base,
+                                        stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=sys.stderr,
+                                        close_fds=True,
+                                        env=_sidecar_recording_trace_env(_config),
+                                    )
+                                    time.sleep(0.05)
+                                    _ex_immediate = recording_sidecar_proc.poll()
+                                _apply_sidecar_cpu_affinity(
+                                    recording_sidecar_proc.pid, _config, "Grabación sidecar"
+                                )
+                                _perf_active = getattr(
+                                    ws.app.state, "sidecar_perf_json_path", None
+                                )
+                                try:
+                                    _stub_sz = (
+                                        os.path.getsize(_perf_active)
+                                        if _perf_active and os.path.isfile(_perf_active)
+                                        else -1
+                                    )
+                                except OSError:
+                                    _stub_sz = -1
+                                _write_sidecar_rec_session_file(
+                                    pid=int(recording_sidecar_proc.pid),
+                                    perf_json_abs=_perf_active,
+                                    bin_path=bin_path,
+                                    running=_ex_immediate is None,
+                                    exit_code=_ex_immediate,
+                                )
+                                if _ex_immediate is not None:
+                                    print(
+                                        f"[VarMonitor Web] varmon_sidecar terminó al arrancar (exit={_ex_immediate}). "
+                                        f"Bin={bin_path!r} perf={_perf_active!r} stub_bytes={_stub_sz}. "
+                                        "¿Error de sem/SHM u opciones? Ver stderr.",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(
+                                        f"[VarMonitor Web] varmon_sidecar en marcha pid={recording_sidecar_proc.pid} "
+                                        f"perf_json={_perf_active!r} stub_bytes={_stub_sz}",
+                                        flush=True,
+                                    )
+                                recording_sidecar_shm_health_path = rec_shm_health_path
+                                recording_sidecar_shm_health_off = 0
+                                if sem_sc:
+                                    sc_note = f"sem sidecar {sem_arg}"
+                                else:
+                                    sc_note = (
+                                        f"sin sem_sidecar_name → {sem_arg} (comparte sem con Python; "
+                                        "recompila/reinicia VarMonitor)"
+                                    )
+                                if recording_sidecar_alarm_delegate:
+                                    print(
+                                        f"[VarMonitor Web] Grabación sidecar C++ ({sc_note}; alarmas en sidecar): "
+                                        f"{bin_path}",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(
+                                        f"[VarMonitor Web] Grabación sidecar C++ ({sc_note}): {bin_path}",
+                                        flush=True,
+                                    )
+                            except Exception as e:
+                                recording = False
+                                recording_sidecar_proc = None
+                                recording_tmp_path = None
+                                recording_sidecar_status_path = None
+                                recording_sidecar_names_path = None
+                                recording_sidecar_shm_health_path = None
+                                recording_sidecar_shm_health_off = 0
+                                ws.app.state.sidecar_perf_json_path = None
+                                _unregister_sidecar_perf_session()
+                                ap = recording_sidecar_alarms_path
+                                aex = recording_sidecar_alarm_exit_path
+                                recording_sidecar_alarms_path = None
+                                recording_sidecar_alarm_exit_path = None
+                                recording_sidecar_alarm_delegate = False
+                                for aux in (ap, aex, rec_shm_health_path):
+                                    if aux and os.path.isfile(aux):
+                                        try:
+                                            os.remove(aux)
+                                        except OSError:
+                                            pass
+                                if os.path.isfile(names_path):
+                                    try:
+                                        os.remove(names_path)
+                                    except OSError:
+                                        pass
+                                await ws.send_json({"type": "error", "message": f"No se pudo arrancar el sidecar: {e}"})
+                    elif shm_reader and shm_queue is not None:
+                        _ensure_recordings_dir()
+                        want_parquet = parquet_recording_enabled() and (
+                            (recording_format or "tsv").strip().lower() == "parquet"
+                        )
+                        if want_parquet:
+                            recording_tmp_path = os.path.join(
+                                RECORDINGS_DIR,
+                                f".recording_{int(time.time() * 1000)}.parquet.part",
+                            )
+                            recording_write_queue = Queue()
+                            recording_rows_written_ref = [0]
+                            recording_writer_thread = threading.Thread(
+                                target=_recording_writer_thread,
+                                args=(
+                                    recording_write_queue,
+                                    recording_tmp_path,
+                                    recording_var_names,
+                                    recording_rows_written_ref,
+                                ),
+                                daemon=True,
+                            )
+                            recording_writer_thread.start()
+                    if recording:
+                        try:
+                            await ws.send_json({"type": "recording_progress", "bytes": 0, "samples": 0})
+                        except Exception:
+                            pass
+                    update_shm_read_pause()
+                    await push_shm_publish_slice()
+                elif action == "stop_recording":
+                    recording = False
+                    plugin_registry.fire_hook("on_recording_stop", recording_format)
+                    if recording_sidecar_proc is not None:
+                        psc = recording_sidecar_proc
+                        recording_sidecar_proc = None
+                        try:
+                            psc.send_signal(signal.SIGTERM)
+                            psc.wait(timeout=12)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                psc.kill()
+                                psc.wait(timeout=4)
+                            except Exception:
+                                pass
+                        except Exception:
+                            try:
+                                psc.kill()
+                            except Exception:
+                                pass
+                        rows_done = 0
+                        stp = recording_sidecar_status_path
+                        if stp and os.path.isfile(stp):
+                            try:
+                                with open(stp, encoding="utf-8") as sf:
+                                    first = (sf.readline() or "").strip()
+                                rows_done = int(first) if first.isdigit() else 0
+                            except (OSError, ValueError):
+                                rows_done = 0
+                        if rows_done <= 0 and recording_tmp_path and os.path.isfile(recording_tmp_path):
+                            try:
+                                with open(recording_tmp_path, "rb") as rf:
+                                    rows_done = max(0, rf.read().count(b"\n") - 1)
+                            except OSError:
+                                rows_done = 0
+                        recording_rows_written = rows_done
+                        recording_sidecar_alarm_delegate = False
+                        await _drain_recording_sidecar_shm_health()
+                        _sp_stop = getattr(ws.app.state, "sidecar_perf_json_path", None)
+                        for aux in (
+                            recording_sidecar_status_path,
+                            recording_sidecar_names_path,
+                            recording_sidecar_alarms_path,
+                            recording_sidecar_alarm_exit_path,
+                            recording_sidecar_shm_health_path,
+                            _sp_stop,
+                        ):
+                            if aux and os.path.isfile(aux):
+                                try:
+                                    os.remove(aux)
+                                except OSError:
+                                    pass
+                        ws.app.state.sidecar_perf_json_path = None
+                        _unregister_sidecar_perf_session()
+                        recording_sidecar_status_path = None
+                        recording_sidecar_names_path = None
+                        recording_sidecar_alarms_path = None
+                        recording_sidecar_alarm_exit_path = None
+                        recording_sidecar_shm_health_path = None
+                        recording_sidecar_shm_health_off = 0
+                    elif recording_write_queue is not None and recording_writer_thread is not None:
+                        recording_write_queue.put(None)
+                        recording_writer_thread.join(timeout=5.0)
+                        recording_writer_thread = None
+                        if recording_rows_written_ref:
+                            recording_rows_written = recording_rows_written_ref[0]
+                        recording_write_queue = None
+                        recording_rows_written_ref = None
+                    if recording_tmp_fp is not None:
+                        try:
+                            recording_tmp_fp.flush()
+                        except Exception:
+                            pass
+                        try:
+                            recording_tmp_fp.close()
+                        except Exception:
+                            pass
+                    recording_tmp_fp = None
+                    path_saved, fn_saved, size_saved = _finalize_recording_temp_file(recording_tmp_path, recording_rows_written)
+                    if not path_saved and record_buffer:
+                        path_saved, fn_saved, size_saved = _flush_record_buffer_to_tsv(record_buffer, recording_var_names)
+                    recording_tmp_path = None
+                    msg = {"type": "record_finished", "path": path_saved or "", "filename": fn_saved or ""}
+                    if path_saved:
+                        msg["size_bytes"] = int(size_saved if size_saved > 0 else max(0, recording_size_est_bytes))
+                    if path_saved and send_file_on_finish:
+                        try:
+                            with open(path_saved, "rb") as f:
+                                import base64
+                                msg["file_base64"] = base64.b64encode(f.read()).decode("ascii")
+                        except Exception:
+                            pass
+                    if not path_saved:
+                        msg["message"] = "No se registraron datos (¿C++ con SHM activo?)."
+                    try:
+                        await ws.send_json(msg)
+                    except Exception:
+                        pass
+                    record_buffer.clear()
+                    recording_var_names = None
+                    recording_size_est_bytes = 0
+                    recording_header_estimated = False
+                    last_record_progress_send_at = 0.0
+                    recording_col_spec = None
+                    recording_row_layout = None
+                    recording_rows_written = 0
+                    recording_t0 = None
+                    update_shm_read_pause()
+                    await push_shm_publish_slice()
+                    await _try_start_alarm_sidecar()
+                else:
+                    plugin_registry.fire_hook("on_ws_action", action, cmd, ws)
+            except asyncio.TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                ws_close_detail = ws_close_detail or "cliente durante receive"
+                break
+            except RuntimeError as e:
+                if "WebSocket is not connected" in str(e):
+                    ws_close_detail = ws_close_detail or "socket ya no conectado (receive)"
+                    break
+                raise
+    except WebSocketDisconnect:
+        ws_close_detail = ws_close_detail or "WebSocketDisconnect (bucle principal)"
+    finally:
+        _stop_alarm_sidecar()
+        if shm_drain_task is not None:
+            shm_drain_task.cancel()
+            try:
+                await shm_drain_task
+            except asyncio.CancelledError:
+                pass
+        if recording_sidecar_proc is not None:
+            try:
+                recording_sidecar_proc.send_signal(signal.SIGTERM)
+                recording_sidecar_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    recording_sidecar_proc.kill()
+                except Exception:
+                    pass
+            recording_sidecar_proc = None
+            if recording and recording_rows_written <= 0:
+                stp = recording_sidecar_status_path
+                if stp and os.path.isfile(stp):
+                    try:
+                        with open(stp, encoding="utf-8") as sf:
+                            first = (sf.readline() or "").strip()
+                        if first.isdigit():
+                            recording_rows_written = int(first)
+                    except (OSError, ValueError):
+                        pass
+                if recording_rows_written <= 0 and recording_tmp_path and os.path.isfile(recording_tmp_path):
+                    try:
+                        with open(recording_tmp_path, "rb") as rf:
+                            recording_rows_written = max(0, rf.read().count(b"\n") - 1)
+                    except OSError:
+                        pass
+        _sp_fin = getattr(ws.app.state, "sidecar_perf_json_path", None)
+        for aux in (
+            recording_sidecar_status_path,
+            recording_sidecar_names_path,
+            recording_sidecar_alarms_path,
+            recording_sidecar_alarm_exit_path,
+            recording_sidecar_shm_health_path,
+            _sp_fin,
+        ):
+            if aux and os.path.isfile(aux):
+                try:
+                    os.remove(aux)
+                except OSError:
+                    pass
+        ws.app.state.sidecar_perf_json_path = None
+        _unregister_sidecar_perf_session()
+        recording_sidecar_status_path = None
+        recording_sidecar_names_path = None
+        recording_sidecar_alarms_path = None
+        recording_sidecar_alarm_exit_path = None
+        recording_sidecar_shm_health_path = None
+        recording_sidecar_shm_health_off = 0
+        recording_sidecar_alarm_delegate = False
+        if recording_write_queue is not None and recording_writer_thread is not None:
+            try:
+                recording_write_queue.put(None)
+                recording_writer_thread.join(timeout=5.0)
+            except Exception:
+                pass
+            if recording_rows_written_ref:
+                recording_rows_written = recording_rows_written_ref[0]
+            recording_write_queue = None
+            recording_writer_thread = None
+            recording_rows_written_ref = None
+        if recording and (record_buffer or recording_rows_written > 0 or recording_tmp_path):
+            try:
+                if recording_tmp_fp is not None:
+                    try:
+                        recording_tmp_fp.flush()
+                    except Exception:
+                        pass
+                    try:
+                        recording_tmp_fp.close()
+                    except Exception:
+                        pass
+                    recording_tmp_fp = None
+                path_saved, fn_saved, size_saved = _finalize_recording_temp_file(recording_tmp_path, recording_rows_written)
+                if not path_saved:
+                    path_saved, fn_saved, size_saved = _flush_record_buffer_to_tsv(record_buffer, recording_var_names)
+                print(
+                    f"[VarMonitor Web] REC salvado por cierre de WS: {fn_saved} "
+                    f"({size_saved} bytes) en {path_saved}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[VarMonitor Web] No se pudo salvar REC al cerrar WS: {e}", flush=True)
+        if shm_write_mmap is not None:
+            try:
+                shm_write_mmap.close()
+            except OSError:
+                pass
+            shm_write_mmap = None
+        if shm_write_fd is not None:
+            try:
+                os.close(shm_write_fd)
+            except OSError:
+                pass
+            shm_write_fd = None
+        if shm_reader:
+            shm_reader.stop()
+        counts = getattr(ws.app.state, "ws_monitored_counts", None)
+        if isinstance(counts, dict):
+            counts.pop(ws_id, None)
+        ACTIVE_WS -= 1
+        bridge.disconnect()
+        suffix = f" — {ws_close_detail}" if ws_close_detail else ""
+        print(f"[VarMonitor Web] WebSocket cerrado (C++ {connection_label}){suffix}", flush=True)
+
+
+class StaticFilesWithMjsMime(StaticFiles):
+    """Evita application/octet-stream en .mjs (Chromium rechaza <script type="module">)."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        if str(full_path).endswith(".mjs"):
+            ct = (response.headers.get("content-type") or "").lower()
+            if "javascript" not in ct and "ecmascript" not in ct:
+                response.headers["content-type"] = "text/javascript; charset=utf-8"
+        return response
+
+
+app.mount("/static", StaticFilesWithMjsMime(directory=STATIC_DIR), name="static")
+
+_FAVICON_SVG = os.path.join(STATIC_DIR, "favicon.svg")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    """Evita 404: los navegadores piden /favicon.ico por defecto; servimos el mismo SVG que en /static/."""
+    return FileResponse(_FAVICON_SVG, media_type="image/svg+xml")
+
+
+# Documentación MkDocs: site/ (ES) y site_en/ (EN) en la raíz del proyecto
+_DOCS_ES_DIR = os.path.join(os.path.dirname(__file__), "..", "site")
+_DOCS_EN_DIR = os.path.join(os.path.dirname(__file__), "..", "site_en")
+_DOCS_HAS_ES = os.path.isdir(_DOCS_ES_DIR)
+_DOCS_HAS_EN = os.path.isdir(_DOCS_EN_DIR)
+
+_DOCS_NOT_BUILT_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Documentation</title></head><body style="font-family:sans-serif;padding:2rem;max-width:640px">
+    <h1>Documentation not built</h1>
+    <p>From the project root, run:</p>
+    <pre>pip install mkdocs mkdocs-material
+mkdocs build
+mkdocs build -f mkdocs.en.yml</pre>
+    <p>Then restart the monitor. Spanish will be at <a href="/docs/es/">/docs/es/</a>, English at <a href="/docs/en/">/docs/en/</a>.</p>
+    </body></html>"""
+
+
+@app.get("/api/docs_languages", include_in_schema=False)
+async def api_docs_languages():
+    """Which MkDocs site folders exist (for the Docs language picker in the UI)."""
+    return {"es": _DOCS_HAS_ES, "en": _DOCS_HAS_EN}
+
+
+if _DOCS_HAS_ES or _DOCS_HAS_EN:
+    if _DOCS_HAS_ES:
+        app.mount("/docs/es", StaticFiles(directory=_DOCS_ES_DIR, html=True), name="docs_es")
+    if _DOCS_HAS_EN:
+        app.mount("/docs/en", StaticFiles(directory=_DOCS_EN_DIR, html=True), name="docs_en")
+
+    @app.get("/docs", include_in_schema=False)
+    @app.get("/docs/", include_in_schema=False)
+    async def _docs_redirect_root():
+        if _DOCS_HAS_ES:
+            return RedirectResponse(url="/docs/es/", status_code=302)
+        return RedirectResponse(url="/docs/en/", status_code=302)
+
+else:
+
+    @app.get("/docs")
+    async def _docs_not_built_root():
+        return HTMLResponse(_DOCS_NOT_BUILT_HTML)
+
+    @app.get("/docs/{full_path:path}")
+    async def _docs_not_built(full_path: str):
+        return HTMLResponse(_DOCS_NOT_BUILT_HTML)
+
+def _find_available_port(host: str, start_port: int, max_offset: int = 10) -> int:
+    """Intenta bind en start_port, start_port+1, ... hasta start_port+max_offset. Devuelve el primero libre."""
+    for offset in range(max_offset + 1):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(
+        f"[VarMonitor Web] Error: no hay puertos libres en rango [{start_port}, {start_port + max_offset}]"
+    )
+
+
+class _SuppressAdvancedStatsAccessLog(logging.Filter):
+    """No registrar en access log peticiones OK ruidosas (stats / perf)."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if " 200 " in msg and ("/api/advanced_stats" in msg or "/api/perf" in msg):
+            return False
+        return True
+
+
+# Aplicar filtro al cargar el módulo para que funcione con "python app.py" y "uvicorn app:app"
+logging.getLogger("uvicorn.access").addFilter(_SuppressAdvancedStatsAccessLog())
+
+if __name__ == "__main__":
+    import uvicorn
+
+    base_port = _config["web_port"]
+    lan_ip = _config["lan_ip"]
+    bind_host = (_config.get("bind_host") or "").strip()
+    listen_host = bind_host if bind_host else "0.0.0.0"
+
+    port = _find_available_port(listen_host, base_port, int(_config.get("web_port_scan_max", 10)))
+    app.state.actual_web_port = port
+    app.state.startup_time = time.monotonic()
+
+    print(f"[VarMonitor Web] Servidor escuchando en puerto {port}")
+    print(f"  http://localhost:{port}         (local)")
+    if bind_host:
+        print(f"  Escuchando solo en {bind_host} (bind_host)")
+    elif lan_ip:
+        print(f"  http://{lan_ip}:{port}    (red)")
+    uvicorn.run(app, host=listen_host, port=port)

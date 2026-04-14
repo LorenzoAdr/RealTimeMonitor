@@ -1,0 +1,6 @@
+# Dependencias extra para empaquetar el backend completo (Parquet, API tests) + wheel de plugins.
+# Se instalan en .venv-build junto con requirements-docker.txt cuando VARMON_PLUGINS_RELEASE=1.
+# No incluye mkdocs (solo documentación).
+
+pyarrow>=14.0.0
+httpx>=0.27.0

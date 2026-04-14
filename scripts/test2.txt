@@ -1,0 +1,140 @@
+[launch_web] VARMON_CONFIG=/opt/workspace/monitor/data/varmon.conf
+[launch_web] taskset -c 4-5
+[VarMonitor Web] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor Web] web_clear_browser_storage=1: cada GET / borrará localStorage y sessionStorage del navegador para este origen (antes del JS).
+[VarMonitor Web] Auth: desactivada
+[VarMonitor Web] Auth modos sensibles: activada (editor + BD protocolos)
+[VarMonitor Web] Terminal restringida: activada (lista blanca de comandos)
+[VarMonitor Web] Rutas datos: recordings=/opt/workspace/monitor/web_monitor/recordings | state=/opt/workspace/monitor/web_monitor/server_state | arinc_data=/opt/workspace/monitor/web_monitor/arinc_data
+[VarMonitor Web] Explorador proyecto=/opt/workspace/monitor | Git (git_workspace_root)=/opt/workspace/monitor
+[VarMonitor Web] Servidor escuchando en puerto 8080
+  http://localhost:8080         (local)
+  http://192.168.4.3:8080    (red)
+[VarMonitor Web] HTML principal: inyectado borrado de localStorage/sessionStorage (web_clear_browser_storage o VARMON_WEB_CLEAR_BROWSER_STORAGE).
+[Req] GET / -> 200 (20ms)
+INFO:     127.0.0.1:58754 - "GET / HTTP/1.1" 200 OK
+[Req] GET /static/js/entry.mjs -> 200 (4ms)
+INFO:     127.0.0.1:58758 - "GET /static/js/entry.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/varmonitor-plugins.bundle.min.js -> 200 (8ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/varmonitor-plugins.bundle.min.js HTTP/1.1" 200 OK
+[Req] GET /static/style.css?v=50 -> 200 (24ms)
+INFO:     127.0.0.1:58754 - "GET /static/style.css?v=50 HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/plotly-bootstrap.mjs -> 200 (33ms)
+INFO:     127.0.0.1:58778 - "GET /static/js/modules/plotly-bootstrap.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/early-network.mjs -> 200 (34ms)
+INFO:     127.0.0.1:58792 - "GET /static/js/modules/early-network.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/auth-fetch.mjs -> 200 (39ms)
+INFO:     127.0.0.1:58758 - "GET /static/js/modules/auth-fetch.mjs HTTP/1.1" 200 OK
+[Req] GET /api/auth_required -> 200 (1ms)
+INFO:     127.0.0.1:58792 - "GET /api/auth_required HTTP/1.1" 200 OK
+[Req] GET /api/connection_info -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /api/connection_info HTTP/1.1" 200 OK
+[Req] GET /api/uds_instances?user=lorenzo -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /api/uds_instances?user=lorenzo HTTP/1.1" 200 OK
+[VarMonitor Web] WebSocket /ws aceptado (cliente 127.0.0.1:58800)
+[Req] GET /static/js/app-legacy.mjs -> 200 (5ms)
+INFO:     127.0.0.1:58768 - "GET /static/js/app-legacy.mjs HTTP/1.1" 200 OK
+[VarMonitor Web] SHM activo: varmon-lorenzo-12080 — cola 512 snapshots (FIFO; llena → lector espera) (parseo al ritmo del monitor: sem + ciclo ~10 ms del C++; polling SHM alineado a ese intervalo)
+[VarMonitor Web] WebSocket conectado a C++ /tmp/varmon-lorenzo-12080.sock
+[VarMonitor Web] SHM: sem sidecar para grabación/alarmas nativas: /varmon-lorenzo-12080-sc
+[Req] GET /static/js/modules/constants.mjs -> 200 (17ms)
+INFO:     127.0.0.1:58768 - "GET /static/js/modules/constants.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/i18n.mjs -> 200 (16ms)
+INFO:     127.0.0.1:58792 - "GET /static/js/modules/i18n.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/plugin_api.mjs -> 200 (16ms)
+INFO:     127.0.0.1:58802 - "GET /static/js/modules/plugin_api.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/replay-alias-shim.mjs -> 200 (19ms)
+INFO:     127.0.0.1:58754 - "GET /static/js/modules/replay-alias-shim.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/arinc-mapping-profiles.mjs -> 200 (19ms)
+INFO:     127.0.0.1:58758 - "GET /static/js/modules/arinc-mapping-profiles.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/arinc-registry.mjs -> 200 (22ms)
+INFO:     127.0.0.1:58778 - "GET /static/js/modules/arinc-registry.mjs HTTP/1.1" 200 OK
+[Req] GET /static/js/modules/m1553-registry.mjs -> 200 (13ms)
+INFO:     127.0.0.1:58768 - "GET /static/js/modules/m1553-registry.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/live-replay-embed.mjs -> 200 (16ms)
+INFO:     127.0.0.1:58802 - "GET /static/plugins/live-replay-embed.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/flight-viz.mjs -> 200 (16ms)
+INFO:     127.0.0.1:58792 - "GET /static/plugins/flight-viz.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/m1553/m1553-registry.mjs -> 200 (9ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/m1553/m1553-registry.mjs HTTP/1.1" 200 OK
+[Req] GET /static/favicon.svg -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/favicon.svg HTTP/1.1" 200 OK
+[Req] GET /api/plugins/features -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /api/plugins/features HTTP/1.1" 200 OK
+[Req] GET /api/templates -> 200 (2ms)
+INFO:     127.0.0.1:58792 - "GET /api/templates HTTP/1.1" 200 OK
+[Req] GET /static/plugins/plugins-loader.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/plugins-loader.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/register-plugin-ids.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/register-plugin-ids.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/plugin-manifest.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/plugin-manifest.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/fragment-arinc-validation.mjs -> 200 (3ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/fragment-arinc-validation.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/arinc_import_validation.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/arinc_import_validation.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/fragment-replay-alias.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/fragment-replay-alias.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/replay-alias.mjs -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/replay-alias.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/fragment-m1553.mjs -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/fragment-m1553.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/fragment-terminal.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/fragment-terminal.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/terminal.mjs -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/terminal.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/fragment-file-edit.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/fragment-file-edit.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/file-edit.mjs -> 200 (7ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/file-edit.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/file-edit-codemirror.mjs -> 200 (3ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/file-edit-codemirror.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/build/plugins-loader.js -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/build/plugins-loader.js HTTP/1.1" 200 OK
+[Req] GET /static/plugins/build/chunks/chunk-XAWE4EAK.js -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/build/chunks/chunk-XAWE4EAK.js HTTP/1.1" 200 OK
+[Req] GET /static/plugins/build/plugin-manifest.mjs -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/build/plugin-manifest.mjs HTTP/1.1" 200 OK
+[Req] GET /static/plugins/build/chunks/fragment-replay-alias-UM5IQ4SG.js -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/build/chunks/fragment-replay-alias-UM5IQ4SG.js HTTP/1.1" 200 OK
+[Req] GET /static/plugins/build/chunks/fragment-flight-viz-2DNGL7VP.js -> 200 (2ms)
+INFO:     127.0.0.1:58768 - "GET /static/plugins/build/chunks/fragment-flight-viz-2DNGL7VP.js HTTP/1.1" 200 OK
+[Req] GET /api/auth_status -> 200 (1ms)
+INFO:     127.0.0.1:58768 - "GET /api/auth_status HTTP/1.1" 200 OK
+[Req] GET /api/auth_required -> 200 (5ms)
+INFO:     127.0.0.1:58778 - "GET /api/auth_required HTTP/1.1" 200 OK
+[Req] GET /api/connection_info -> 200 (1ms)
+INFO:     127.0.0.1:58778 - "GET /api/connection_info HTTP/1.1" 200 OK
+[Req] GET /api/arinc_db/status -> 200 (13ms)
+INFO:     127.0.0.1:58768 - "GET /api/arinc_db/status HTTP/1.1" 200 OK
+[Req] GET /api/m1553_db/status -> 200 (17ms)
+INFO:     127.0.0.1:58792 - "GET /api/m1553_db/status HTTP/1.1" 200 OK
+[Req] GET /api/uds_instances?user=lorenzo -> 200 (12ms)
+INFO:     127.0.0.1:58768 - "GET /api/uds_instances?user=lorenzo HTTP/1.1" 200 OK
+[Req] GET /api/arinc_registry/active -> 200 (20ms)
+INFO:     127.0.0.1:58792 - "GET /api/arinc_registry/active HTTP/1.1" 200 OK
+[Req] GET /api/m1553_registry/active -> 200 (24ms)
+INFO:     127.0.0.1:58778 - "GET /api/m1553_registry/active HTTP/1.1" 200 OK
+[VarMonitor Web] varmon_sidecar en marcha pid=16918 perf_json='/opt/workspace/monitor/web_monitor/recordings/.recording_1776031205048.tsv.part.sidecar_perf.json' stub_bytes=1874
+[VarMonitor Web] Grabación sidecar C++ (sem sidecar /varmon-lorenzo-12080-sc): /opt/workspace/monitor/build/varmon_sidecar/varmon_sidecar
+[Req] GET /api/recordings?_=1776031207632 -> 200 (9ms)
+INFO:     127.0.0.1:41316 - "GET /api/recordings?_=1776031207632 HTTP/1.1" 200 OK
+[Req] GET /api/unitary_test?_=1776031207651 -> 200 (4ms)
+INFO:     127.0.0.1:41316 - "GET /api/unitary_test?_=1776031207651 HTTP/1.1" 200 OK
+[Req] GET /api/unitary_test?_=1776031207661 -> 200 (2ms)
+INFO:     127.0.0.1:41316 - "GET /api/unitary_test?_=1776031207661 HTTP/1.1" 200 OK
+[VarMonitor Web] WebSocket cerrado (C++ /tmp/varmon-lorenzo-12080.sock) — cliente durante receive
+[Req] GET /api/recordings?_=1776031209504 -> 200 (2ms)
+INFO:     127.0.0.1:41316 - "GET /api/recordings?_=1776031209504 HTTP/1.1" 200 OK
+[Req] GET /api/unitary_test?_=1776031209538 -> 200 (1ms)
+INFO:     127.0.0.1:41316 - "GET /api/unitary_test?_=1776031209538 HTTP/1.1" 200 OK
+[Req] GET /api/unitary_test?_=1776031209543 -> 200 (2ms)
+INFO:     127.0.0.1:41316 - "GET /api/unitary_test?_=1776031209543 HTTP/1.1" 200 OK
+[Req] GET /api/recordings/record_20260413_000007.tsv -> 200 (4ms)
+INFO:     127.0.0.1:41316 - "GET /api/recordings/record_20260413_000007.tsv HTTP/1.1" 200 OK
+[Req] GET /api/recordings/record_20260413_000007.tsv/bounds -> 200 (1ms)
+INFO:     127.0.0.1:41316 - "GET /api/recordings/record_20260413_000007.tsv/bounds HTTP/1.1" 200 OK
+[Req] GET /api/recordings/record_20260413_000007.tsv/history?var=flight_demo.latitude_deg -> 200 (3ms)
+INFO:     127.0.0.1:41316 - "GET /api/recordings/record_20260413_000007.tsv/history?var=flight_demo.latitude_deg HTTP/1.1" 200 OK
+[Req] GET /api/recordings/record_20260413_000007.tsv/history?var=flight_demo.altitude_m -> 200 (2ms)
+INFO:     127.0.0.1:41316 - "GET /api/recordings/record_20260413_000007.tsv/history?var=flight_demo.altitude_m HTTP/1.1" 200 OK

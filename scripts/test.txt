@@ -1,0 +1,54 @@
+[launch_web] VARMON_CONFIG=/opt/workspace/monitor/data/varmon.conf
+[launch_web] taskset -c 4-5
+[VarMonitor Web] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor Web] web_clear_browser_storage=1: cada GET / borrará localStorage y sessionStorage del navegador para este origen (antes del JS).
+[VarMonitor Web] Auth: desactivada
+[VarMonitor Web] Auth modos sensibles: activada (editor + BD protocolos)
+[VarMonitor Web] Terminal restringida: activada (lista blanca de comandos)
+[VarMonitor Web] Rutas datos: recordings=/opt/workspace/monitor/web_monitor/recordings | state=/opt/workspace/monitor/web_monitor/server_state | arinc_data=/opt/workspace/monitor/web_monitor/arinc_data
+[VarMonitor Web] Explorador proyecto=/opt/workspace/monitor | Git (git_workspace_root)=/opt/workspace/monitor
+[VarMonitor Web] Servidor escuchando en puerto 8080
+  http://localhost:8080         (local)
+  http://192.168.4.3:8080    (red)
+[VarMonitor Web] HTML principal: inyectado borrado de localStorage/sessionStorage (web_clear_browser_storage o VARMON_WEB_CLEAR_BROWSER_STORAGE).
+[Req] GET / -> 200 (17ms)
+INFO:     127.0.0.1:43914 - "GET / HTTP/1.1" 200 OK
+[Req] GET /api/auth_required -> 200 (1ms)
+INFO:     127.0.0.1:43914 - "GET /api/auth_required HTTP/1.1" 200 OK
+[Req] GET /api/connection_info -> 200 (4ms)
+INFO:     127.0.0.1:43914 - "GET /api/connection_info HTTP/1.1" 200 OK
+[Req] GET /api/uds_instances?user=lorenzo -> 200 (6ms)
+INFO:     127.0.0.1:43936 - "GET /api/uds_instances?user=lorenzo HTTP/1.1" 200 OK
+[VarMonitor Web] WebSocket /ws aceptado (cliente 127.0.0.1:43950)
+[VarMonitor Web] SHM activo: varmon-lorenzo-12080 — cola 512 snapshots (FIFO; llena → lector espera) (parseo al ritmo del monitor: sem + ciclo ~10 ms del C++; polling SHM alineado a ese intervalo)
+[VarMonitor Web] WebSocket conectado a C++ /tmp/varmon-lorenzo-12080.sock
+[VarMonitor Web] SHM: sem sidecar para grabación/alarmas nativas: /varmon-lorenzo-12080-sc
+[Req] GET /api/plugins/features -> 200 (1ms)
+INFO:     127.0.0.1:43936 - "GET /api/plugins/features HTTP/1.1" 200 OK
+[Req] GET /api/templates -> 200 (1ms)
+INFO:     127.0.0.1:43914 - "GET /api/templates HTTP/1.1" 200 OK
+[Req] GET /api/auth_status -> 200 (1ms)
+INFO:     127.0.0.1:43936 - "GET /api/auth_status HTTP/1.1" 200 OK
+[Req] GET /api/auth_required -> 200 (1ms)
+INFO:     127.0.0.1:43956 - "GET /api/auth_required HTTP/1.1" 200 OK
+[Req] GET /api/connection_info -> 200 (1ms)
+INFO:     127.0.0.1:43956 - "GET /api/connection_info HTTP/1.1" 200 OK
+[Req] GET /api/arinc_db/status -> 200 (17ms)
+INFO:     127.0.0.1:43936 - "GET /api/arinc_db/status HTTP/1.1" 200 OK
+[Req] GET /api/m1553_db/status -> 200 (19ms)
+INFO:     127.0.0.1:43914 - "GET /api/m1553_db/status HTTP/1.1" 200 OK
+[Req] GET /api/uds_instances?user=lorenzo -> 200 (9ms)
+INFO:     127.0.0.1:43956 - "GET /api/uds_instances?user=lorenzo HTTP/1.1" 200 OK
+[Req] GET /api/arinc_registry/active -> 200 (19ms)
+INFO:     127.0.0.1:43956 - "GET /api/arinc_registry/active HTTP/1.1" 200 OK
+[Req] GET /api/m1553_registry/active -> 200 (21ms)
+INFO:     127.0.0.1:43936 - "GET /api/m1553_registry/active HTTP/1.1" 200 OK
+[VarMonitor Web] varmon_sidecar en marcha pid=15604 perf_json='/opt/workspace/monitor/web_monitor/recordings/.recording_1776030211003.tsv.part.sidecar_perf.json' stub_bytes=2024
+[VarMonitor Web] Grabación sidecar C++ (sem sidecar /varmon-lorenzo-12080-sc): /opt/workspace/monitor/build-sidecar/varmon_sidecar/varmon_sidecar
+[Req] GET /api/recordings?_=1776030211484 -> 200 (3ms)
+INFO:     127.0.0.1:43956 - "GET /api/recordings?_=1776030211484 HTTP/1.1" 200 OK
+[Req] GET /api/unitary_test?_=1776030211491 -> 200 (4ms)
+INFO:     127.0.0.1:43956 - "GET /api/unitary_test?_=1776030211491 HTTP/1.1" 200 OK
+[Req] GET /api/unitary_test?_=1776030211499 -> 200 (1ms)
+INFO:     127.0.0.1:43956 - "GET /api/unitary_test?_=1776030211499 HTTP/1.1" 200 OK
+[VarMonitor Web] WebSocket cerrado (C++ /tmp/varmon-lorenzo-12080.sock) — cliente durante receive
