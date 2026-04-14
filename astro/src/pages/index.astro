@@ -2,16 +2,42 @@
 import '../styles/global.css';
 ---
 
-<html lang="en">
+<html lang="es">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
 		<link rel="icon" href={`${import.meta.env.BASE_URL}favicon.ico`} />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
+		<meta
+			name="description"
+			content="VarMonitor — monitorización de variables en tiempo real para aplicaciones C++20."
+		/>
+		<title>VarMonitor</title>
 	</head>
-	<body>
-		<h1>Astro</h1>
+	<body class="min-h-dvh bg-slate-950 text-slate-100 antialiased">
+		<main
+			class="mx-auto flex min-h-dvh max-w-2xl flex-col justify-center gap-6 px-6 py-16"
+		>
+			<p class="text-sm font-medium uppercase tracking-widest text-cyan-400/90">
+				VarMonitor
+			</p>
+			<h1 class="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+				Monitor de variables en tiempo real
+			</h1>
+			<p class="text-lg leading-relaxed text-slate-400">
+				Sitio estático de presentación. El monitor web completo se ejecuta en tu entorno local o
+				servidor junto al backend Python y la aplicación C++.
+			</p>
+			<p class="text-sm text-slate-500">
+				Repositorio:{' '}
+				<a
+					href="https://github.com/LorenzoAdr/RealTimeMonitor"
+					class="text-cyan-400 underline decoration-cyan-400/40 underline-offset-4 hover:text-cyan-300"
+				>
+					LorenzoAdr/RealTimeMonitor
+				</a>
+			</p>
+		</main>
 	</body>
 </html>
