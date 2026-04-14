@@ -10,6 +10,10 @@ export default defineConfig({
   // Repositorio = subruta donde se sirven los assets (barra final obligatoria)
   base: '/RealTimeMonitor/',
   output: 'static',
+  // Evita depender de un .css externo en /_astro/ (cachés, bloqueos, rutas raras)
+  build: {
+    inlineStylesheets: 'always',
+  },
   // Tailwind v4: plugin de Vite (no @astrojs/tailwind / integrations: [tailwind()])
   vite: {
     plugins: [tailwindcss()],

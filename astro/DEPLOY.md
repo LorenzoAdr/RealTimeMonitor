@@ -115,6 +115,11 @@ Eso aparece cuando el repositorio **no tiene GitHub Pages configurado para despl
 
 6. **Forks**: en algunos forks hay que habilitar **Actions** en *Settings* → *Actions* → *General* y permitir workflows.
 
+### La página se ve “en blanco” o solo una palabra pequeña
+
+- Tras el build, Astro puede emitir el CSS en un fichero bajo **`/_astro/*.css`**. Si el navegador no lo carga (caché, bloqueador, red), verías HTML sin estilos. En **`astro.config.mjs`** está **`build.inlineStylesheets: 'always'`** para incrustar el CSS en el HTML y no depender de esa petición extra.
+- Prueba **recarga forzada** o ventana privada; un `index.html` antiguo en caché también puede hacer que sigas viendo la versión mínima anterior.
+
 ### La URL pública da 404, error o “no carga” aunque el workflow sea verde
 
 - **URL exacta del proyecto**: `https://<usuario>.github.io/<nombre-repo>/` (barra final recomendable). El nombre en la ruta debe coincidir con **`base`** en `astro.config.mjs` (p. ej. `/RealTimeMonitor/`). Si el repo se llama distinto, cambia `base` y vuelve a desplegar.
