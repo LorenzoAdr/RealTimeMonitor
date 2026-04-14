@@ -1,0 +1,1347 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Real-time variable monitor documentation">
+      
+      
+        <meta name="author" content="VarMonitor">
+      
+      
+      
+        <link rel="prev" href="../frontend/">
+      
+      
+        <link rel="next" href="../performance/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>Protocols - VarMonitor</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#protocols" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="VarMonitor" class="md-header__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            VarMonitor
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Protocols
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="VarMonitor" class="md-nav__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    VarMonitor
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation and configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../launch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Launch scripts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../build-binary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packaged binary (PyInstaller)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backend (Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frontend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocols
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocols
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#uds-message-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UDS message format
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="UDS message format">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#uds-packet-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UDS packet layout
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sending-from-python-udsbridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sending from Python (UdsBridge)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#receiving-in-c-uds_server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Receiving in C++ (uds_server)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#commands-from-python-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Commands from Python (request)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-from-c-response" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Responses from C++ (response)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-memory-shm-names-layout-and-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared memory (SHM): names, layout and cleanup
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Shared memory (SHM): names, layout and cleanup">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#creation-and-destruction-in-c" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creation and destruction in C++
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#stale-segment-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stale segment cleanup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#segment-layout-c-and-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Segment layout (C++ and Python)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ring-buffer-arena-what-it-is-and-why" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ring buffer arena: what it is and why
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#second-semaphore-and-independent-consumers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Second semaphore and independent consumers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sidecar-process-varmon_sidecar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sidecar process (varmon_sidecar)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#write-path-c" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Write path (C++)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#read-path-python-shmreader" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read path (Python, ShmReader)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#monitored-variable-update-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitored variable update system
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#alarms-and-recording-in-the-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Alarms and recording in the backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cpp-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#uds-message-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UDS message format
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="UDS message format">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#uds-packet-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UDS packet layout
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sending-from-python-udsbridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sending from Python (UdsBridge)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#receiving-in-c-uds_server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Receiving in C++ (uds_server)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#commands-from-python-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Commands from Python (request)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responses-from-c-response" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Responses from C++ (response)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-memory-shm-names-layout-and-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared memory (SHM): names, layout and cleanup
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Shared memory (SHM): names, layout and cleanup">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#creation-and-destruction-in-c" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creation and destruction in C++
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#stale-segment-cleanup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stale segment cleanup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#segment-layout-c-and-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Segment layout (C++ and Python)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ring-buffer-arena-what-it-is-and-why" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ring buffer arena: what it is and why
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#second-semaphore-and-independent-consumers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Second semaphore and independent consumers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sidecar-process-varmon_sidecar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sidecar process (varmon_sidecar)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#write-path-c" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Write path (C++)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#read-path-python-shmreader" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read path (Python, ShmReader)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#monitored-variable-update-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitored variable update system
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#alarms-and-recording-in-the-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Alarms and recording in the backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="protocols">Protocols</h1>
+<h2 id="uds-message-format">UDS message format</h2>
+<p>All Python ↔ C++ messages over UDS follow:</p>
+<ol>
+<li>
+<p><strong>Length (4 bytes, big-endian, unsigned)</strong><br />
+   Byte length of the following JSON (not including these 4 bytes).</p>
+</li>
+<li>
+<p><strong>Body (JSON)</strong><br />
+   UTF-8 JSON object.</p>
+</li>
+</ol>
+<p><strong>Limit</strong>: 10 MiB per message (C++ and <code>uds_client.py</code>).</p>
+<h3 id="uds-packet-layout">UDS packet layout</h3>
+<p>Each message is one packet with length header and body:</p>
+<pre class="mermaid"><code>block-beta
+  columns 2
+  block:UDS packet
+    block:Header 4 bytes
+      A["Length (big-endian uint32)\nJSON byte length"]
+    end
+    block:Body N bytes
+      B["JSON UTF-8\n{ \"cmd\": \"...\", ... }"]
+    end
+  end
+end</code></pre>
+<table>
+<thead>
+<tr>
+<th>Offset</th>
+<th>Size</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>4</td>
+<td>JSON length (network byte order, big-endian <code>!I</code>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>N</td>
+<td>JSON UTF-8 bytes; N = first 4 bytes</td>
+</tr>
+</tbody>
+</table>
+<h3 id="sending-from-python-udsbridge">Sending from Python (UdsBridge)</h3>
+<ul>
+<li>Build a <code>dict</code>, serialize with <code>json.dumps(..., separators=(",", ":"))</code>.</li>
+<li>Send <code>struct.pack("!I", len(raw)) + raw</code>.</li>
+</ul>
+<h3 id="receiving-in-c-uds_server">Receiving in C++ (uds_server)</h3>
+<ul>
+<li><code>recv_message()</code>: read 4 bytes, <code>ntohl</code> → <code>len</code>, then read <code>len</code> bytes (JSON).</li>
+<li>Parse JSON to extract <code>cmd</code> and parameters.</li>
+</ul>
+<h3 id="commands-from-python-request">Commands from Python (request)</h3>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Parameters (JSON)</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>server_info</code></td>
+<td>(none)</td>
+<td>Server info, uptime, shm_name, sem_name, sem_sidecar_name, uds_path, RAM/CPU</td>
+</tr>
+<tr>
+<td><code>list_names</code></td>
+<td>(none)</td>
+<td>Variable name list</td>
+</tr>
+<tr>
+<td><code>list_vars</code></td>
+<td>(none)</td>
+<td>Variables with type and current value</td>
+</tr>
+<tr>
+<td><code>get_var</code></td>
+<td><code>"name": "&lt;name&gt;"</code></td>
+<td>Current value</td>
+</tr>
+<tr>
+<td><code>set_var</code></td>
+<td><code>"name", "value", "type"</code></td>
+<td>Write variable (double, int32, bool, etc.)</td>
+</tr>
+<tr>
+<td><code>set_array_element</code></td>
+<td><code>"name", "index", "value"</code></td>
+<td>Write array element</td>
+</tr>
+<tr>
+<td><code>unregister_var</code></td>
+<td><code>"name"</code></td>
+<td>Hot-unregister variable</td>
+</tr>
+<tr>
+<td><code>set_shm_subscription</code></td>
+<td><code>"names": ["a","b",...]</code></td>
+<td>SHM subscription: only write those variables to SHM; empty = write no entries (header only)</td>
+</tr>
+<tr>
+<td><code>set_shm_publish_slice</code></td>
+<td><code>"count": N</code>, <code>"force_full": bool</code></td>
+<td><strong>Export</strong> slicing: with <code>force_full: false</code> and <code>N&gt;1</code>, each C++ cycle only updates export rows whose subscription index satisfies <code>i % N == phase</code> (phase rotates every cycle). <code>force_full: true</code> or <code>N=1</code> = all export rows every cycle. <strong>IMPORT</strong> rows (mode 1) are always processed. <code>count</code> is clamped to <code>update_ratio_max</code> in <code>varmon.conf</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>History comes from SHM (live) and TSV recordings on disk; there are no <code>get_history</code> / <code>get_histories</code> commands in the current protocol.</p>
+<h3 id="responses-from-c-response">Responses from C++ (response)</h3>
+<p>C++ always returns JSON with at least <code>"type"</code>:</p>
+<ul>
+<li><code>server_info</code>: <code>type</code>, <code>uptime_seconds</code>, <code>shm_name</code>, <code>sem_name</code>, <strong><code>sem_sidecar_name</code></strong> (second POSIX sem: the C++ publisher <code>sem_post</code>s <strong>both</strong> per snapshot; Python’s <code>ShmReader</code> waits on <code>sem_name</code> only; <strong>varmon_sidecar</strong> must wait on <code>sem_sidecar_name</code> so the two consumers do not share one counter), <code>uds_path</code>, optional <code>memory_rss_kb</code>, <code>cpu_percent</code>; when SHM is active, <code>shm_layout_version</code>: <strong>2</strong>, plus <code>shm_publish_slice_n</code>, <code>shm_publish_slice_force_full</code>, <code>shm_publish_slice_partial</code> (true when <code>n&gt;1</code> and not <code>force_full</code>). <strong>Note:</strong> time between paired <code>sem_post</code> calls still follows the RT loop cadence; slicing reduces work <em>inside</em> each cycle, not how often semaphores fire.</li>
+<li><code>list_names</code>: <code>type: "names"</code>, <code>data: ["name1", ...]</code>.</li>
+<li><code>list_vars</code>: <code>type: "vars"</code>, <code>data: [{ "name", "type", "value", "timestamp" }, ...]</code>.</li>
+<li><code>get_var</code>: <code>type: "var"</code>, <code>data: &lt;var object or null&gt;</code>.</li>
+<li><code>set_var</code> / <code>set_array_element</code>: <code>type: "set_result", "ok": true|false</code>.</li>
+<li><code>unregister_var</code>: <code>type: "unregister_result", "ok": true|false</code>.</li>
+<li><code>set_shm_subscription</code>: <code>type: "shm_subscription_result", "ok": true</code>.</li>
+<li><code>set_shm_publish_slice</code>: <code>type: "shm_publish_slice_result", "ok": true</code>.</li>
+<li>Error: <code>type: "error", "message": "..."</code>.</li>
+</ul>
+<hr />
+<h2 id="shared-memory-shm-names-layout-and-cleanup">Shared memory (SHM): names, layout and cleanup</h2>
+<h3 id="names">Names</h3>
+<ul>
+<li><strong>POSIX semaphore (primary reader)</strong>: name <code>/varmon-&lt;user&gt;-&lt;pid&gt;</code> (leading slash). Waited on by the Python <strong><code>ShmReader</code></strong> thread for each published snapshot.</li>
+<li><strong>Second POSIX semaphore (sidecar)</strong>: name <strong><code>/varmon-&lt;user&gt;-&lt;pid&gt;-sc</code></strong>. Same <code>&lt;user&gt;</code> and <code>&lt;pid&gt;</code>. Waited on by <strong><code>varmon_sidecar</code></strong> (native recording and optional C++ alarm monitor).</li>
+<li><strong>SHM segment</strong> (under <code>/dev/shm/</code>): name <code>varmon-&lt;user&gt;-&lt;pid&gt;</code> (full path <code>/dev/shm/varmon-&lt;user&gt;-&lt;pid&gt;</code>).</li>
+</ul>
+<p>Each C++ process has <strong>one SHM segment and two semaphores</strong>; the user/pid pair identifies UDS and SHM. See <a href="#second-semaphore-and-independent-consumers">Second semaphore and independent consumers</a>.</p>
+<h3 id="creation-and-destruction-in-c">Creation and destruction in C++</h3>
+<ul>
+<li><strong>init()</strong> (after <code>cleanup_stale_shm_for_user()</code>): <code>shm_open</code>, <code>ftruncate</code>, <code>mmap</code>, <code>sem_open</code> for the <strong>main</strong> semaphore <strong>and</strong> <code>sem_open</code> for the <strong><code>-sc</code></strong> semaphore. On failure, resources are released.</li>
+<li><strong>shutdown()</strong>: <code>sem_close</code>/<code>sem_unlink</code> for <strong>both</strong> semaphores, <code>munmap</code>/<code>close</code>, <code>shm_unlink</code>.</li>
+</ul>
+<h3 id="stale-segment-cleanup">Stale segment cleanup</h3>
+<ul>
+<li><strong>cleanup_stale_shm_for_user()</strong> (<code>shm_publisher.cpp</code>): lists <code>/dev/shm</code> entries with prefix <code>varmon-&lt;user&gt;-</code>, extracts PID, checks <code>kill(pid, 0)</code>; if the process is gone, <code>shm_unlink</code> and <code>sem_unlink</code>. Called at start of <code>init()</code>.</li>
+</ul>
+<h3 id="segment-layout-c-and-python">Segment layout (C++ and Python)</h3>
+<p><strong>Version 2 (current):</strong> same <code>magic</code>; <code>version</code> = <strong>2</strong>. First <strong>32 bytes</strong> match the v1 header layout. Extended header <strong>64 bytes</strong>; <strong>N = min(|subscription|, shm_max_vars)</strong> table rows of <strong>176 bytes</strong>; then a <strong>ring arena</strong> of <code>shm_max_vars × shm_ring_depth × 16</code> bytes (two <code>double</code>s per sample: time + value).</p>
+<ul>
+<li>
+<p><strong>v2 header (64 B)</strong>: bytes 0–31 as before; 32–35 <code>table_offset</code> (typically 64); 36–39 <code>table_stride</code> (176); 40–43 row capacity (<code>shm_max_vars</code>); 44–47 ring arena offset; 48–49 slot size (16); 50–51 <code>shm_ring_depth</code>. <strong>52–59</strong>: little-endian <strong><code>double</code> <code>publish_period_sec</code></strong>: seconds between this publish and the previous one (same clock as <code>timestamp</code> at +24); written by C++ on each <code>write_snapshot</code>; the backend can show the SHM cycle without inferring Δt from Python’s consumer timing.</p>
+</li>
+<li>
+<p><strong>Table row (176 B)</strong>: <code>name[128]</code>; byte 128 <strong>mode</strong> (0 export snapshot, 1 import one-shot, 2 export ring); byte 129 type (scalar kind); <strong>130–133</strong> little-endian <strong><code>uint32</code> <code>row_pub_seq</code></strong>: copy of the global header <code>seq</code> the last time C++ wrote that row (partial slices / skip-unchanged can leave an older value → Python may reuse the decoded row); offset 136 value <code>double</code>; 144 <code>ring_rel_off</code>; 148 <code>ring_capacity</code>; 152 <code>write_idx</code>; 160 <code>read_idx</code> (consumer-owned, e.g. sidecar); 168 <code>mirror_value</code> (latest scalar for UI/alarms in ring mode).</p>
+</li>
+</ul>
+<p><strong>Row order</strong> matches <code>set_shm_subscription</code> (ordered, deduplicated). Empty subscription → <code>count = 0</code>, header + <code>sem_post</code> only.</p>
+<p><strong>Import one-shot (mode 1):</strong> a producer (e.g. backend with RW <code>mmap</code>) fills name/type/value and mode 1; on the next <code>write_shm_snapshot</code>, C++ applies <code>set_var</code>, restores default mode (<code>shm_default_export_mode</code> in <code>varmon.conf</code>: 0 snapshot or 2 ring).</p>
+<p><strong>v1 compatibility:</strong> old segments with <code>version</code> 1 use a 32-byte header and 137-byte entries; Python and <code>varmon_sidecar</code> still parse that layout.</p>
+<p><strong>Size (v2):</strong> <code>64 + shm_max_vars×176 + shm_max_vars×shm_ring_depth×16</code> bytes. <code>shm_ring_depth</code> and <code>shm_default_export_mode</code> are read only by the C++ process from <code>varmon.conf</code>.</p>
+<h3 id="ring-buffer-arena-what-it-is-and-why">Ring buffer arena: what it is and why</h3>
+<p>After the <strong>row table</strong> (one row per subscribed variable, up to <code>shm_max_vars</code>), the segment contains a <strong>contiguous arena</strong> for <strong>per-variable ring buffers</strong>.</p>
+<ul>
+<li><strong>Layout</strong>: for each row in <strong>export ring</strong> mode (<code>mode = 2</code>), the row stores <code>ring_rel_off</code> and <code>ring_capacity</code> (= <code>shm_ring_depth</code>). That offset points into the arena to a block of <strong><code>depth × 16</code> bytes</strong> (16 = two little-endian <code>doubles</code>: sample time + scalar value).</li>
+<li><strong>Producer (C++)</strong>: on each publish, for ring mode it <strong>pushes</strong> into slot <code>(write_idx % depth)</code>, increments <code>write_idx</code>, and updates <strong><code>mirror_value</code></strong> with the latest scalar (UI, alarms, readers that only need the current value).</li>
+<li><strong>Goals</strong>: (1) <strong>Short embedded history</strong> without heap allocations or a second segment; (2) <strong>Recording</strong>: the sidecar can emit TSV lines from <strong>new ring slots</strong> since last read (ring replay); (3) <strong>Snapshot mode</strong> remains a single scalar per cycle where ring mode is not used.</li>
+</ul>
+<p>If <code>shm_ring_depth</code> is 0 or the row is not in ring mode, that variable does not use arena slots for time-series samples.</p>
+<h3 id="second-semaphore-and-independent-consumers">Second semaphore and independent consumers</h3>
+<p>On each valid snapshot the C++ code calls <strong><code>post_shm_readers()</code></strong>: <code>sem_post</code> on the <strong>main</strong> semaphore and <strong><code>sem_post</code></strong> on the <strong>sidecar</strong> semaphore (<code>…-sc</code>).</p>
+<ul>
+<li>A <strong>single</strong> semaphore shared by Python and the sidecar would be awkward: both would <code>sem_wait</code> on the same counter—one consumer could <strong>steal</strong> wakeups meant for the other, or you would need ad-hoc draining. The intended contract is <strong>one snapshot → one wakeup per consumer</strong>.</li>
+<li><strong>Two semaphores</strong> give <strong>independent counters</strong>. After one snapshot the producer issues <strong>one post for Python</strong> and <strong>one for the sidecar</strong>; each side waits on <strong>its</strong> semaphore only.</li>
+<li><strong><code>ShmReader</code></strong> uses <strong><code>sem_name</code></strong>. <strong><code>varmon_sidecar</code></strong> must use <strong><code>sem_sidecar_name</code></strong> from <code>server_info</code>. Native recording and C++ alarm loops then do not contend with the web backend on POSIX wait queues.</li>
+</ul>
+<p>Zombie cleanup should unlink <strong>both</strong> semaphore names for stale <code>varmon-&lt;user&gt;-&lt;pid&gt;</code> segments (as implemented in the publisher).</p>
+<h3 id="sidecar-process-varmon_sidecar">Sidecar process (<code>varmon_sidecar</code>)</h3>
+<p>The <strong>sidecar</strong> is a separate C++ binary from the process running <code>VarMonitor</code> and your RT loop. It shares only the SHM segment (mmap) and the <strong><code>-sc</code></strong> semaphore—not the variable server’s UDS socket.</p>
+<ul>
+<li><strong><code>sidecar_cpp</code> recording</strong>: Python spawns the sidecar with <code>shm_name</code>, column list (<code>names-file</code>), and <strong><code>sem_sidecar_name</code></strong>. The sidecar waits on one <code>sem_post</code> per snapshot, reads the mmap (same layout as <code>shm_reader.py</code>), formats TSV rows, and writes to disk. Python may cap how often it <strong>parses</strong> mmap for the UI (<code>shm_parse_hz_sidecar_recording</code>) without slowing TSV writes in the sidecar.</li>
+<li><strong>Native alarms</strong>: with rules in TSV, <code>--alarm-monitor</code> can evaluate thresholds on each sidecar semaphore wakeup.</li>
+<li><strong>Rationale</strong>: move heavy SHM table scans and TSV formatting out of Python, and avoid sharing one semaphore between the web reader and the recorder. More detail in <a href="../performance/">Performance</a> (native recording and sidecar phases).</li>
+</ul>
+<h3 id="write-path-c">Write path (C++)</h3>
+<p>Each cycle: <code>write_shm_snapshot(mon)</code> → seq, timestamp; rows per subscription (import → apply + reset; snapshot/ring → fill from <code>get_var</code>); <strong><code>sem_post</code> on both semaphores</strong>.</p>
+<p><strong>Partial export slice:</strong> if <code>set_shm_publish_slice</code> set <code>force_full: false</code> and <code>count = N &gt; 1</code>, only export rows with <code>subscription_index % N == phase</code> are updated that cycle; other export rows keep their last mmap values. Header (<code>seq</code>, <code>timestamp</code>) always updates; readers must not assume every row changes on every post. Recording or alarms in Python typically force <code>force_full: true</code> so critical variables are not starved.</p>
+<h3 id="read-path-python-shmreader">Read path (Python, ShmReader)</h3>
+<ul>
+<li>Open segment with <code>os.open("/dev/shm/"+shm_name)</code> and <code>mmap.mmap(..., MAP_SHARED, PROT_READ)</code>.</li>
+<li>Open the monitor semaphore with <code>sem_open(sem_name, O_RDWR)</code> (ctypes). Native recording/alarms: <code>sem_open(sem_sidecar_name, …)</code> when present in <code>server_info</code>.</li>
+<li>Thread loop: <code>sem_timedwait(sem, timeout)</code>; on signal read header + entries, build <code>{name, type, value}</code> list, push to <code>Queue</code>. WebSocket loop consumes the queue.</li>
+</ul>
+<h3 id="monitored-variable-update-system">Monitored variable update system</h3>
+<p>Only <strong>monitored</strong> variables are updated and sent to the browser; others are not written to SHM (when subscribed) and not sent over WebSocket.</p>
+<ol>
+<li>
+<p><strong>Frontend</strong>: user selects variables to show. List sent to backend as <code>monitored</code> (<code>names</code>).</p>
+</li>
+<li>
+<p><strong>SHM subscription (C++)</strong>: backend calls <code>set_shm_subscription(list(...))</code> over UDS (order preserved).</p>
+</li>
+<li><strong>Non-empty subscription</strong> (v2): one <strong>fixed row per index</strong> (0…N−1) in list order.</li>
+<li>
+<p><strong>Empty subscription</strong>: C++ writes <strong>no</strong> variable entries—only header (<code>seq</code>, <code>count = 0</code>, <code>timestamp</code>) and <code>sem_post</code>. Avoids dumping all variables each cycle when nothing is monitored. <strong>Available</strong> variables come from <strong>UDS</strong> (<code>list_names</code> / <code>list_vars</code>) when needed; more efficient than writing all names/values to SHM every cycle.</p>
+</li>
+<li>
+<p><strong>Backend (Python)</strong>: <code>ShmReader</code> reads whatever snapshot is in SHM (<code>count</code> entries; empty subscription → <code>data: []</code>). WebSocket <code>vars_update</code> includes only names in <code>monitored_names</code>.</p>
+</li>
+<li>
+<p><strong>Rel act</strong>: backend does not send <code>vars_update</code> every SHM cycle; minimum interval between sends (UI setting) reduces traffic and browser load. The same factor <strong>N</strong> is often pushed to C++ as <code>set_shm_publish_slice</code> during passive monitoring (non-empty list, no REC/alarms), lowering per-cycle producer cost; REC or alarm rules force full SHM publish.</p>
+</li>
+</ol>
+<p><strong>Summary</strong>: non-monitored variables are not sent to the browser. Empty subscription → no SHM variable data (header only); non-empty → only subscribed variables, reducing C++ work and snapshot size.</p>
+<hr />
+<h2 id="alarms-and-recording-in-the-backend">Alarms and recording in the backend</h2>
+<ul>
+<li><strong>Alarms</strong>: frontend sends <code>set_alarms</code> with <code>{ name: { lo, hi } }</code>. Backend evaluates each snapshot; threshold cross → <code>alarm_triggered</code>; back in range → <code>alarm_cleared</code>. Short rolling buffer (~1 s + 1 s) with <strong>full snapshot</strong> per sample; after trigger, 1 s later write TSV and <code>alarm_recording_ready</code>.</li>
+<li><strong>Recording</strong>: <code>start_recording</code> / <code>stop_recording</code>. With <strong><code>recording_backend = python</code></strong>, a writer thread queues snapshots and writes TSV. With <strong><code>sidecar_cpp</code></strong>, <strong><code>varmon_sidecar</code></strong> is spawned (same <code>shm_name</code>, semaphore <strong><code>sem_sidecar_name</code></strong>); it writes the TSV. On stop, <code>record_finished</code> with <code>path</code>, etc. Toast shows path; optional base64 if "Send file when finished" is enabled.</li>
+<li><strong><code>GET /api/perf</code></strong>: JSON with <code>python</code>, <code>cpp</code>, <code>sidecar</code> layers. Sidecar reads the JSON file produced when the binary is launched with <strong><code>--perf-file</code></strong> (next to the temp TSV); not part of UDS/SHM wire format.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.suggest", "search.highlight", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

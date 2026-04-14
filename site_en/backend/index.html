@@ -1,0 +1,1071 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Real-time variable monitor documentation">
+      
+      
+        <meta name="author" content="VarMonitor">
+      
+      
+      
+        <link rel="prev" href="../build-binary/">
+      
+      
+        <link rel="next" href="../frontend/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>Backend (Python) - VarMonitor</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#backend-python" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="VarMonitor" class="md-header__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            VarMonitor
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Backend (Python)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="VarMonitor" class="md-nav__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    VarMonitor
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation and configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../launch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Launch scripts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../build-binary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packaged binary (PyInstaller)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backend (Python)
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backend (Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#main-routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Main routes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Main routes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#optional-varmonitor_plugins-package-pro" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional varmonitor_plugins package (Pro)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#uds-instance-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UDS instance discovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#websocket-flow-in-websocket_endpoint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WebSocket: flow in websocket_endpoint()
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#varmon_sidecar-executable-native-recording" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        varmon_sidecar executable (native recording)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#helper-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Helper modules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-functions-for-alarms-and-recording" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key functions for alarms and recording
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frontend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../protocols/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocols
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cpp-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#main-routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Main routes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Main routes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#optional-varmonitor_plugins-package-pro" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional varmonitor_plugins package (Pro)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#uds-instance-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UDS instance discovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#websocket-flow-in-websocket_endpoint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WebSocket: flow in websocket_endpoint()
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#varmon_sidecar-executable-native-recording" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        varmon_sidecar executable (native recording)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#helper-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Helper modules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-functions-for-alarms-and-recording" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key functions for alarms and recording
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="backend-python">Backend (Python)</h1>
+<p>The backend lives in <a href="../web_monitor/app.py">web_monitor/app.py</a>: FastAPI, WebSocket, UDS and SHM integration.</p>
+<h2 id="main-routes">Main routes</h2>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Handler</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /</code></td>
+<td><code>index()</code></td>
+<td>Main page (static HTML).</td>
+</tr>
+<tr>
+<td><code>GET /api/vars</code></td>
+<td><code>api_list_vars()</code></td>
+<td>Variable list (via UdsBridge).</td>
+</tr>
+<tr>
+<td><code>GET /api/var/{name}</code></td>
+<td><code>api_get_var()</code></td>
+<td>Current variable value.</td>
+</tr>
+<tr>
+<td><code>POST /api/var/{name}</code></td>
+<td><code>api_set_var()</code></td>
+<td>Write variable (query: value, var_type).</td>
+</tr>
+<tr>
+<td><code>GET /api/uds_instances</code></td>
+<td><code>api_uds_instances()</code></td>
+<td>UDS instance list (optional <code>?user=</code>).</td>
+</tr>
+<tr>
+<td><code>GET /api/recordings</code></td>
+<td><code>api_recordings()</code></td>
+<td>Recording list (TSV and/or <strong>Parquet</strong> when the plugin is installed).</td>
+</tr>
+<tr>
+<td><code>GET /api/recordings/{filename}</code></td>
+<td><code>api_recording_download()</code></td>
+<td>Download TSV or Parquet by extension.</td>
+</tr>
+<tr>
+<td><code>GET /api/recordings/{filename}/history</code></td>
+<td><code>api_recording_var_history()</code></td>
+<td>Variable history (TSV or Parquet via pyarrow).</td>
+</tr>
+<tr>
+<td><code>GET /api/recordings/{filename}/window</code></td>
+<td><code>api_recording_var_window()</code></td>
+<td>Time window for one variable.</td>
+</tr>
+<tr>
+<td><code>GET /api/recordings/{filename}/window_batch</code></td>
+<td><code>api_recording_var_window_batch()</code></td>
+<td>Multiple variables in one window (batch).</td>
+</tr>
+<tr>
+<td><code>GET /api/recordings/{filename}/bounds</code></td>
+<td><code>api_recording_time_bounds()</code></td>
+<td>Time bounds of the file.</td>
+</tr>
+<tr>
+<td><code>GET /api/browse</code></td>
+<td><code>api_browse()</code></td>
+<td>Remote file browser (path relative to project).</td>
+</tr>
+<tr>
+<td><code>GET /api/browse/download</code></td>
+<td><code>api_browse_download()</code></td>
+<td>Download a project file.</td>
+</tr>
+<tr>
+<td><code>POST /api/browse/mkdir</code></td>
+<td><code>api_browse_mkdir()</code></td>
+<td>Create folder in project.</td>
+</tr>
+<tr>
+<td><code>GET /api/admin/storage</code></td>
+<td><code>api_admin_storage()</code></td>
+<td>Paths and state for advanced admin.</td>
+</tr>
+<tr>
+<td><code>POST /api/admin/storage/delete</code></td>
+<td><code>api_admin_storage_delete()</code></td>
+<td>Delete recording or template.</td>
+</tr>
+<tr>
+<td><code>POST /api/admin/runtime_config</code></td>
+<td><code>api_admin_runtime_config()</code></td>
+<td>Save web_port / web_port_scan_max.</td>
+</tr>
+<tr>
+<td><code>GET /api/auth_required</code></td>
+<td><code>api_auth_required()</code></td>
+<td>Whether password is required.</td>
+</tr>
+<tr>
+<td><code>GET /api/uptime</code></td>
+<td><code>api_uptime()</code></td>
+<td>Backend uptime.</td>
+</tr>
+<tr>
+<td><code>GET /api/connection_info</code></td>
+<td><code>api_connection_info()</code></td>
+<td>Connection info (port, etc.).</td>
+</tr>
+<tr>
+<td><code>GET /api/instance_info</code></td>
+<td><code>api_instance_info()</code></td>
+<td>C++ instance info (pid, user, etc.).</td>
+</tr>
+<tr>
+<td><code>GET /api/advanced_stats</code></td>
+<td><code>api_advanced_stats()</code></td>
+<td>RAM/CPU (HTML, Python, C++). Query <code>perf=1</code> renews the perf-measurement lease (same session as the Perf panel).</td>
+</tr>
+<tr>
+<td><code>GET /api/perf</code></td>
+<td><code>api_perf()</code></td>
+<td>JSON: <code>ts</code>, <code>lease_active</code>, <code>layers.python\|cpp\|sidecar</code> with <code>phases[{id,last_us,ema_us,samples}]</code>. Python = <code>perf_agg</code>; C++ = publisher <code>shm_perf_us</code>; sidecar = JSON from <code>varmon_sidecar --perf-file</code> during <code>sidecar_cpp</code> REC. <strong>Renews</strong> the measurement lease; without the panel or <code>advanced_stats?perf=1</code>, C++ stops reporting after ~1 s.</td>
+</tr>
+<tr>
+<td><code>WebSocket /ws</code></td>
+<td><code>websocket_endpoint()</code></td>
+<td>Live connection (vars_update, alarms, recording).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="optional-varmonitor_plugins-package-pro">Optional <code>varmonitor_plugins</code> package (Pro)</h3>
+<p><strong>ARINC / MIL-STD-1553</strong> registry APIs (SQLite), <strong>Git UI</strong>, <strong>restricted terminal</strong>, <strong>GDB</strong>, <strong>Parquet upload preview</strong> (<code>POST /api/recordings/parquet_preview_upload</code>), and the Python Parquet I/O used with the plugin live in the installable package under <a href="../tool_plugins/python/"><code>tool_plugins/python/</code></a> (e.g. <code>pip install -e tool_plugins/python</code>, optional <code>[parquet]</code> for pyarrow). The MIT core registers them at startup through <code>plugin_registry</code> when the package is installed; without it, the server still provides monitoring, TSV, and the core routes above.</p>
+<h2 id="configuration">Configuration</h2>
+<ul>
+<li><strong>load_config()</strong>: Reads <code>varmon.conf</code> (or <code>VARMON_CONFIG</code> path). Returns a dict with <code>web_port</code>, <code>auth_password</code>, <code>cycle_interval_ms</code>, <strong><code>shm_max_vars</code></strong>, etc. Called at startup; result stored in <code>_config</code>. The <code>shm_max_vars</code> value (default 2048) is passed to <strong>ShmReader</strong> so it reads up to that many entries from SHM; if omitted, the backend uses 2048 and truncates larger snapshots (variables beyond that show "--" in the frontend).</li>
+</ul>
+<h2 id="uds-instance-discovery">UDS instance discovery</h2>
+<ul>
+<li><strong>_list_uds_instances(user_filter)</strong>: Lists sockets under <code>/tmp/varmon-*.sock</code> (or <code>varmon-&lt;user&gt;-*.sock</code> if <code>user_filter</code> is set). For each path opens <code>UdsBridge(path, timeout=0.6)</code>, calls <code>get_server_info()</code>, closes. Returns only responding instances. Order: socket <strong>mtime</strong> (newest first). Returns list of dicts with <code>uds_path</code>, <code>pid</code>, <code>uptime_seconds</code>, <code>user</code>.</li>
+</ul>
+<h2 id="websocket-flow-in-websocket_endpoint">WebSocket: flow in <code>websocket_endpoint()</code></h2>
+<ol>
+<li><strong>Accept and auth</strong>: <code>ws.accept()</code>. If <code>auth_password</code> is set, require <code>?password=...</code> in the URL; on failure send <code>error</code> with <code>message: "auth_required"</code> and close.</li>
+<li><strong>Pick UDS instance</strong>: If <code>uds_path</code> is missing in the query, call <code>_list_uds_instances(None)</code> and take the first. If none, send <code>error</code> and close.</li>
+<li><strong>Connect UDS and server_info</strong>: Create <code>UdsBridge(query_uds, 5.0)</code> and call <code>bridge.get_server_info()</code>. Read <code>shm_name</code> and <code>sem_name</code>.</li>
+<li><strong>ShmReader</strong>: If <code>shm_name</code> and <code>sem_name</code> exist, create a <code>Queue</code> and <code>ShmReader(...)</code> with <code>max_vars</code> from config and <code>sample_interval_ms</code> from C++ <code>server_info</code>. Call <code>shm_reader.start()</code>. With a working semaphore, each publisher <code>post</code> wakes the reader and one snapshot is parsed (monitor cadence). If the semaphore cannot open (e.g. WSL), polling mode spaces reads using <code>sample_interval_ms</code> (not a fixed 5 ms). Optionally <code>shm_parse_max_hz</code> &gt; 0 caps parses/s in monitoring-only mode (default 0 = no cap). With <strong><code>recording_backend = sidecar_cpp</code></strong> and the sidecar running, <strong><code>shm_parse_hz_sidecar_recording</code></strong> (default <strong>30</strong> in <code>DEFAULTS</code>) caps mmap parses/s for <strong><code>vars_update</code></strong> while the sidecar writes the TSV on <strong><code>sem_sidecar_name</code></strong>; Python keeps using <strong><code>sem_name</code></strong>. Set it to <strong>0</strong> to <strong>only drain</strong> the main semaphore on a timer (<code>shm_sidecar_sem_drain_interval_sec</code>) without parsing: C++ variable values on screen <strong>stop</strong> updating from SHM (telemetry and recording progress still update).</li>
+<li><strong>Main loop</strong>: A task <code>_shm_drain_loop()</code> drains the SHM queue (FIFO; <code>shm_queue_max_size</code>, 0 = unbounded; when full the reader thread blocks on <code>put</code>). For each snapshot: update <code>latest_snapshot</code>, evaluate alarms (<code>_evaluate_alarms</code>), fill rolling <code>alarm_buffer</code> (short window ~1 s + 1 s, full snapshots), and if recording is active in <strong>Python</strong> mode enqueue the snapshot for the TSV writer thread. In <strong>sidecar_cpp</strong> mode a separate process writes the file (see below). At <strong>visual</strong> rate (every <code>update_ratio</code> cycles) send <code>vars_update</code> to the browser with the current snapshot.</li>
+<li><strong>Client messages</strong>: In parallel, receive JSON from the frontend: <code>monitored</code>, <code>set_alarms</code>, <code>start_recording</code>, <code>stop_recording</code>, <code>update_ratio</code>, <code>send_file_on_finish</code>, etc. Update <code>monitored_names</code>, <code>alarms_config</code>, <code>recording</code>, etc.</li>
+<li><strong>Alarms</strong>: After <code>set_shm_subscription</code>, C++ publishes to SHM the <strong>union</strong> of monitored variables and variables with an alarm (<code>_shm_subscription_real_names</code>). With <code>alarms_backend = sidecar_cpp</code> (default) and rules <strong>only</strong> on SHM variables (not synthetic telemetry), the backend runs <strong><code>varmon_sidecar --alarm-monitor</code></strong>: it waits on <strong><code>sem_sidecar_name</code></strong> (<code>sem_timedwait</code> + drain; if <code>sem_open</code> fails, <code>seq</code> polling). It does not compete with <code>ShmReader</code>, which uses <code>sem_name</code> only. The ~2.2 s window and threshold logic run in C++, and <code>alarm_*.tsv</code> is written after 1 s more of context. With <code>alarms_backend = python</code> or any telemetry alarm, Python handles evaluation and TSV (<code>_evaluate_alarms</code>, <code>alarm_buffer</code>). The UDS fallback (<code>get_var</code> ~every 0.2 s) runs only while the SHM reader is paused. The alarm sidecar is <strong>stopped</strong> while <strong>recording</strong> and restarted when recording stops.</li>
+<li><strong>Recording</strong>: By default (<code>recording_backend = python</code>), <code>start_recording</code> starts <code>_recording_writer_thread</code> writing TSV rows from the queue. With <code>recording_backend = sidecar_cpp</code> and SHM active, the backend spawns <strong><code>varmon_sidecar</code></strong> with the same <code>shm_name</code> as <code>ShmReader</code> and <strong><code>sem_sidecar_name</code></strong> from <code>server_info</code> (dedicated sem: one <code>sem_post</code> per snapshot for the sidecar only; Python keeps <code>sem_name</code>). Older monitors without <code>sem_sidecar_name</code>: fallback to <code>sem_name</code>. It mmap-reads the segment in C++, writes the temp TSV and a <code>.stat</code> file with the row count for <code>recording_progress</code>. On <code>stop_recording</code> SIGTERM is sent to the sidecar, the TSV is renamed, and <code>record_finished</code> is sent. If <strong>alarms</strong> are set on C++ variables (not synthetic telemetry), the backend writes a rules TSV (<code>*.alarms.tsv</code>) and the sidecar evaluates thresholds each snapshot (same rules as <code>_evaluate_alarms</code>); on the <strong>first confirmed trigger</strong> it flushes the TSV, writes <code>*.alarm_exit</code> (JSON), and exits. The WebSocket loop sees <code>poll()</code> and sends <code>alarm_triggered</code> then <code>record_finished</code> without SIGTERM. Telemetry-only alarms are still evaluated in Python during that recording. The binary is resolved via <code>VARMON_SIDECAR_BIN</code>, <code>recording_sidecar_bin</code> in <code>varmon.conf</code>, <code>PATH</code>, or typical build paths under <code>build-sidecar/</code> or <code>build/</code> relative to <code>web_monitor/</code>. On Linux, <strong><code>sidecar_cpu_affinity</code></strong> (e.g. <code>3</code> or <code>2,5</code> or <code>4-7</code>) applies <code>sched_setaffinity</code> to both the recording and alarm-monitor sidecar processes so they can run on CPUs separate from the Python backend.</li>
+</ol>
+<h2 id="varmon_sidecar-executable-native-recording"><code>varmon_sidecar</code> executable (native recording)</h2>
+<ul>
+<li><strong>CMake</strong>: target <code>varmon_sidecar</code> in <a href="../varmon_sidecar/CMakeLists.txt">varmon_sidecar/CMakeLists.txt</a>; build: <code>cmake -S . -B build &amp;&amp; cmake --build build --target varmon_sidecar</code>.</li>
+<li><strong>SHM layout</strong>: <a href="../web_monitor/shm_reader.py">web_monitor/shm_reader.py</a> — v2: 64-byte header, 176-byte rows, ring arena; still parses v1 (137-byte entries) when <code>version</code> is 1.</li>
+<li><strong>CLI</strong>: <strong>Recording:</strong> <code>--shm-name</code>, <code>--sem-name</code> (sidecar sem from <code>server_info</code>), <code>--output</code> (<code>.part</code>), <code>--names-file</code>, <code>--max-vars</code>, optional <code>--status-file</code>, optional <code>--alarms-file</code> / <code>--alarm-exit-file</code>, optional <code>--shm-health-file</code> (NDJSON: <code>seq</code> gaps, ring overflow), optional <strong><code>--perf-file</code></strong> (JSON overwritten each cycle for the <strong>Perf</strong> panel → sidecar layer in <code>/api/perf</code>). <strong>Live alarm monitor:</strong> <code>--alarm-monitor</code> (same <code>--sem-name</code>; falls back to <code>seq</code> polling if no sem).</li>
+<li><strong>SHM v2 ring replay</strong>: If <strong>all</strong> <code>names-file</code> columns are ring mode and there are pending samples without overflow, the sidecar writes <strong>multiple TSV rows</strong> and advances <code>read_idx</code>. Lines are built <strong>directly</strong> from ring slots when no per-row map is needed; with sidecar alarm rules, a small map is filled per row for evaluation only.</li>
+<li><strong>Recording layout cache</strong>: After header/name validation, the sidecar avoids scanning all N SHM rows every cycle when only k TSV columns are recorded; snapshot path is O(k). See <a href="../performance/">Performance</a>.</li>
+<li><strong>Environment</strong>: <code>VARMON_SIDECAR_PERF_FLUSH_EVERY</code> (1–512) throttles how often the <code>--perf-file</code> JSON is rewritten (less hot-path I/O).</li>
+<li><strong><code>time_s</code> column</strong>: C++ SHM timestamp minus the first row’s (header +24 in snapshot mode; per-slot in v2 ring replay).</li>
+<li><strong>libvarmonitor</strong> does not handle recording; the sidecar only <strong>consumes</strong> SHM on the same host as the web monitor.</li>
+</ul>
+<h2 id="helper-modules">Helper modules</h2>
+<ul>
+<li><strong>uds_client.py</strong>: <code>UdsBridge</code> class. Unix socket connection, commands (4-byte big-endian length + JSON), responses. Methods: <code>get_server_info()</code>, <code>list_names</code>, <code>list_vars</code>, <code>get_var(name)</code>, <code>set_var(...)</code>, etc.</li>
+<li><strong>shm_reader.py</strong>: <code>ShmReader</code> class. Opens <code>/dev/shm/&lt;shm_name&gt;</code> with <code>mmap</code> and semaphore via ctypes. Thread runs <code>sem_timedwait</code> (or polling on failure), reads header + segment entries, builds <code>{name, type, value}</code> lists and enqueues each snapshot (FIFO). The WebSocket consumes the queue in <code>_shm_drain_loop</code>.</li>
+</ul>
+<h2 id="key-functions-for-alarms-and-recording">Key functions for alarms and recording</h2>
+<ul>
+<li><strong>_evaluate_alarms(...)</strong>: Evaluates lo/hi thresholds per variable; returns updated state and <code>triggered</code> / <code>cleared</code> lists.</li>
+<li><strong>_write_snapshots_tsv(filepath, snapshots, var_names)</strong>: Writes a TSV from snapshots (alarms or legacy recording).</li>
+<li><strong>_flush_record_buffer_to_tsv</strong>, <strong>_recording_writer_thread</strong>, <strong>_finalize_recording_temp_file</strong>: Streaming TSV write to temp file and final rename.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.suggest", "search.highlight", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

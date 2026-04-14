@@ -1,0 +1,1072 @@
+
+<!doctype html>
+<html lang="es" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentación del monitor de variables en tiempo real">
+      
+      
+        <meta name="author" content="VarMonitor">
+      
+      
+      
+        <link rel="prev" href="../backend/">
+      
+      
+        <link rel="next" href="../protocols/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>Frontend - VarMonitor</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#frontend" class="md-skip">
+          Saltar a contenido
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Cabecera">
+    <a href=".." title="VarMonitor" class="md-header__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            VarMonitor
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Frontend
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Cambiar a modo oscuro"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Cambiar a modo oscuro" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Cambiar a modo claro"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Cambiar a modo claro" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Búsqueda" placeholder="Búsqueda" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Buscar">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Limpiar" aria-label="Limpiar" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Inicializando búsqueda
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navegación" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="VarMonitor" class="md-nav__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    VarMonitor
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inicio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Arquitectura
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Instalación y configuración
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../launch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lanzadores
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../build-binary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Binario (PyInstaller)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backend (Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frontend
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frontend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Tabla de contenidos">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Tabla de contenidos
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#vista-general-de-la-interfaz" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vista general de la interfaz
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#estructura-del-codigo-cliente" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Estructura del código cliente
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tres-columnas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tres columnas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#flujo-de-datos-en-vivo-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Flujo de datos en vivo (WebSocket)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#graficos-funciones-clave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gráficos: funciones clave
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#persistencia-localstorage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Persistencia (localStorage)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#registro-arinc-importable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registro ARINC importable
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modos-live-analisis-y-replay-hibrido" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modos: live, análisis y replay híbrido
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#opciones-avanzadas-en-la-zona-de-graficos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Opciones avanzadas en la zona de gráficos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ayuda-integrada-y-visor-de-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ayuda integrada y visor de log
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resize-de-graficos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resize de gráficos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#panel-perf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Panel Perf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#atajos-y-otros" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Atajos y otros
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../protocols/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocolos
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cpp-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integración C++
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resolución de problemas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Tabla de contenidos">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Tabla de contenidos
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#vista-general-de-la-interfaz" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vista general de la interfaz
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#estructura-del-codigo-cliente" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Estructura del código cliente
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tres-columnas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tres columnas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#flujo-de-datos-en-vivo-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Flujo de datos en vivo (WebSocket)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#graficos-funciones-clave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gráficos: funciones clave
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#persistencia-localstorage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Persistencia (localStorage)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#registro-arinc-importable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registro ARINC importable
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modos-live-analisis-y-replay-hibrido" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modos: live, análisis y replay híbrido
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#opciones-avanzadas-en-la-zona-de-graficos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Opciones avanzadas en la zona de gráficos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ayuda-integrada-y-visor-de-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ayuda integrada y visor de log
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resize-de-graficos" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resize de gráficos
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#panel-perf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Panel Perf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#atajos-y-otros" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Atajos y otros
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="frontend">Frontend</h1>
+<p>El frontend es una SPA en <a href="../web_monitor/static/">web_monitor/static/</a>: <code>index.html</code>, hoja de estilos y cliente <strong>modular ES</strong> (<code>js/entry.mjs</code> → <code>app-legacy.mjs</code>, módulos <code>constants</code> / <code>i18n</code>; opcionalmente bundle IIFE vía esbuild). Usa <strong>Plotly.js</strong> para los gráficos.</p>
+<h2 id="vista-general-de-la-interfaz">Vista general de la interfaz</h2>
+<p>Cabecera con estado de conexión, selector de <strong>modo</strong> (Live / Análisis / Replay / <strong>Registro ARINC</strong>), <strong>Rel act</strong>, tema e idioma; tres columnas (variables, monitor, gráficos) salvo en modo registro.</p>
+<p><img alt="Interfaz en tema claro" src="../images/general_claro.png" width="100%" /></p>
+<p><img alt="Interfaz en tema oscuro" src="../images/general_oscuro2.png" width="100%" /></p>
+<h2 id="estructura-del-codigo-cliente">Estructura del código cliente</h2>
+<ul>
+<li><strong>Módulos ES</strong>: el punto de entrada <a href="../web_monitor/static/js/entry.mjs"><code>entry.mjs</code></a> importa la lógica principal; las constantes y traducciones viven en <a href="../web_monitor/static/js/modules/"><code>js/modules/</code></a>. Sin bundler, el navegador carga los <code>.mjs</code> con <code>type="module"</code>.</li>
+<li><strong>Estado y DOM</strong>: la lógica principal mantiene el estado en el ámbito del módulo (equivalente al antiguo IIFE de un único <code>app.js</code>) y manipula el DOM con callbacks; no hay framework (React/Vue).</li>
+<li><strong>Estado global</strong> (ámbito del módulo principal): <code>monitoredNames</code>, <code>monitoredOrder</code>, <code>varGraphAssignment</code>, <code>arrayElemAssignment</code>, <code>graphList</code>, <code>historyCache</code>, <code>arrayElemHistory</code>, <code>plotInstances</code>, <code>alarms</code>, <code>computedVars</code>, <code>appMode</code>, <code>offlineDataset</code>, etc.</li>
+<li><strong>Inicialización</strong>: Tras cargar el módulo se ejecutan <code>loadConfig()</code>, <code>pruneArincDerivedFromMonitored()</code>, <code>applyTheme()</code>, <code>applyLanguage()</code>, listeners, <code>ResizeObserver</code> del área de gráficos y <code>rebuildPlotArea()</code>.</li>
+</ul>
+<h2 id="tres-columnas">Tres columnas</h2>
+<ol>
+<li><strong>Columna 1 (navegador de variables)</strong>: Lista de variables conocidas (<code>knownVarNames</code>), filtro, agrupación opcional, checkboxes para añadir a “monitor” o seleccionar para arrastrar. Drag &amp; drop para llevar variables a la columna 2 o a un gráfico.</li>
+<li><strong>Columna 2 (monitor)</strong>: Variables en vivo con valor actual. Orden según <code>monitoredOrder</code>. Cada fila puede tener un selector para asignar la variable a un gráfico (<code>varGraphAssignment[name] = gid</code>). Aquí se envían al backend las variables “monitorizadas” (<code>monitored</code> por WebSocket).</li>
+<li><strong>Columna 3 (gráficos)</strong>: Área de gráficos Plotly. Slots por gráfico (<code>graphList</code>: lista de IDs <code>g1</code>, <code>g2</code>, ...). Cada slot tiene un contenedor <code>#plotContainer_&lt;gid&gt;</code>. Las variables asignadas a un gráfico vienen de <code>varGraphAssignment</code> y <code>arrayElemAssignment</code>; la función <strong>getVarsForGraph(gid)</strong> devuelve los nombres asignados a ese <code>gid</code>.</li>
+</ol>
+<h2 id="flujo-de-datos-en-vivo-websocket">Flujo de datos en vivo (WebSocket)</h2>
+<ul>
+<li>Al conectar, el frontend envía la lista de variables a monitorizar (<code>monitored</code>) y el backend envía <code>vars_update</code> con snapshots.</li>
+<li>El manejador del mensaje recibe el payload, actualiza <code>historyCache</code> y <code>arrayElemHistory</code> (histórico por variable para los gráficos), y llama a <strong>schedulePlotRender()</strong>.</li>
+<li><strong>schedulePlotRender()</strong>: Si no está pausado y pasa el throttle (adaptive load), encola un <strong>requestAnimationFrame</strong> que llama a <strong>renderPlots()</strong>.</li>
+</ul>
+<h2 id="graficos-funciones-clave">Gráficos: funciones clave</h2>
+<ul>
+<li><strong>rebuildPlotArea()</strong>: Purgar todos los Plotly de los contenedores existentes, vaciar el área (excepto el nodo <code>#plotEmpty</code>), y para cada <code>gid</code> en <code>graphList</code> crear un slot (cabecera + contenedor <code>#plotContainer_&lt;gid&gt;</code>). Insertar los slots antes de <code>plotEmpty</code>. Si hay al menos un gráfico, ocultar <code>plotEmpty</code> (<code>display: none</code>) para que el cajetín ocupe todo el alto; si no hay gráficos, mostrar <code>plotEmpty</code> (zona de “suelta aquí para crear gráfico”).</li>
+<li><strong>renderPlots()</strong>: Para cada <code>gid</code> en <code>graphList</code>, obtener las variables del gráfico con <strong>getVarsForGraph(gid)</strong>, construir las trazas desde <code>historyCache</code> / <code>arrayElemHistory</code> (ventana de tiempo según <code>timeWindowSelect</code>), aplicar suavizado opcional, y llamar a <code>Plotly.newPlot</code> (primera vez) o <code>Plotly.react</code> (actualizaciones). También actualiza la visibilidad de <code>plotEmpty</code> y las estadísticas de render. <strong>Segundo pintado tras F5</strong>: la primera vez que termina <code>renderPlots()</code> con <code>graphList.length &gt; 0</code>, se programa un único <strong>schedulePlotRender()</strong> a los 500 ms (<code>__plotSecondPaintScheduled</code>), para que cuando los datos ya hayan llegado por WebSocket se vuelvan a dibujar las curvas y no quede el cajetín vacío.</li>
+<li><strong>getVarsForGraph(gid)</strong>: Devuelve los nombres de variables asignados al gráfico <code>gid</code>: los que están en <code>monitoredNames</code> con <code>varGraphAssignment[name] === gid</code>, más los de <code>varGraphAssignment</code> que son derivados ARINC y apuntan a <code>gid</code>, más los de <code>arrayElemAssignment</code> que apuntan a <code>gid</code>.</li>
+</ul>
+<h2 id="persistencia-localstorage">Persistencia (localStorage)</h2>
+<ul>
+<li><strong>saveConfig()</strong> / <strong>loadConfig()</strong>: Guardan y cargan en <code>localStorage</code> (clave <code>varmon_config</code>) la lista de variables monitorizadas, <code>varGraphAssignment</code>, <code>graphList</code>, ventana de tiempo, tema, idioma, modo (live/offline/replay/arinc_registry), rutas de grabación, <strong><code>arincLabelRegistry</code></strong> (definiciones importadas por label en octal) y <strong><code>arincImportColumnMap</code></strong> (último mapeo columnas CSV → campos), etc. Al cargar la página, <code>loadConfig()</code> restaura el estado y luego se llama a <code>rebuildPlotArea()</code> al final del init, de modo que los slots de gráficos existan desde el principio.</li>
+</ul>
+<h2 id="registro-arinc-importable">Registro ARINC importable</h2>
+<ul>
+<li><strong>Módulo</strong> <a href="../web_monitor/static/js/modules/arinc-registry.mjs"><code>js/modules/arinc-registry.mjs</code></a>: parseo CSV/TSV/XML tabular, fusión de entradas, serialización JSON y resolución de definición por label (<code>getArincLabelDef</code>) combinando registro de usuario y demos integradas (<code>ARINC_BUILTIN_LABEL_DEFS</code>).</li>
+<li><strong>Modo UI «Registro ARINC»</strong>: tabla filtrable, importación con <strong>modal de mapeo</strong> (cada columna del fichero → campo lógico: label oct/hex/dec, nombre, codificación, bits, LSB, etc.; modo «una fila por label» o «filas DIS» con índice y nombre de bit), exportación JSON (opción de incluir demos), plantilla CSV mínima y vaciado del registro importado.</li>
+<li><strong>Formato JSON canónico</strong>: <code>{ "version": 1, "labels": { "203": { "name", "encoding", "bits", "scale", "signed", "units", "min", "max", "ssmAllowed", "lsb", "discreteBits": [{ "index", "name" }] }, ... } }</code> (claves <code>labels</code> en <strong>octal de 3 dígitos</strong>, como en la decodificación ARINC 429).</li>
+<li><strong>XML</strong>: se admiten documentos cuyos <strong>hijos directos de la raíz</strong> tengan subelementos homogéneos (cada hijo → fila; nombres de tags → cabeceras). Si el XML no encaja, exportar a CSV o usar la plantilla.</li>
+<li><strong>DIS en detalle de variable</strong>: con codificación <code>discrete</code> y <code>discreteBits</code> en el registro, el panel de estadísticas de la variable ARINC muestra el valor 0/1 por bit nombrado.</li>
+</ul>
+<h2 id="modos-live-analisis-y-replay-hibrido">Modos: live, análisis y replay híbrido</h2>
+<ul>
+<li><strong>Live</strong>: Datos por WebSocket desde el backend (SHM/UDS). Selector de instancia UDS, Rel act (update_ratio), grabación, alarmas.</li>
+<li><strong>Offline (análisis)</strong>: Se cargan grabaciones en <strong>Parquet</strong> (formato canónico) o <strong>TSV</strong> legado (servidor, fichero local o explorador remoto). Parquet grande: <strong>modo seguro por filas</strong> (<code>row_start</code> / <code>row_count</code> vía API); el fichero local <code>.parquet</code> se envía a <code>POST /api/recordings/parquet_preview_upload</code> para obtener JSON compatible con el mismo flujo que el TSV. Las ventanas de tiempo siguen yendo a <code>/api/recordings/{filename}/window</code> o <code>window_batch</code> (el backend lee Parquet o TSV según extensión). <code>offlineDataset</code>, <code>offlineRecordingName</code>, segmentos, scrubber y controles de reproducción son específicos de este modo.</li>
+<li><strong>Replay (híbrido)</strong>: Mantiene WebSocket activo para recibir <code>vars_names</code>/<code>vars_update</code> de SHM y, a la vez, usa una grabación TSV como referencia temporal. La lista de variables es la unión de backend + TSV. Solo las variables TSV marcadas como <strong>imponer</strong> escriben continuamente a SHM siguiendo el valor del TSV (con offsets <code>Δt</code>/<code>Δv</code>); las TSV no impuestas se comportan como variables normales de SHM.</li>
+</ul>
+<p><img alt="Modo análisis — TSV y controles offline" src="../images/analisis.png" width="100%" /></p>
+<p><img alt="Modo replay — referencia TSV + datos en vivo" src="../images/replay.png" width="100%" /></p>
+<h2 id="opciones-avanzadas-en-la-zona-de-graficos">Opciones avanzadas en la zona de gráficos</h2>
+<p>Panel colapsable (esquina inferior derecha) con anomalías, segmentos, notas, informe PDF, etc.</p>
+<p><img alt="Opciones avanzadas junto a los gráficos" src="../images/avanzado.png" width="100%" /></p>
+<h2 id="ayuda-integrada-y-visor-de-log">Ayuda integrada y visor de log</h2>
+<ul>
+<li><strong>Ayuda</strong> (<code>H</code> / <code>?</code>): modal con guía por modos (Live, análisis, replay) y enlaces a documentación MkDocs si está generada.</li>
+</ul>
+<p><img alt="Ventana de ayuda integrada" src="../images/manual.png" width="100%" /></p>
+<ul>
+<li><strong>Log</strong>: panel con el registro del backend (y opcionalmente C++ vía <code>log_file_cpp</code>); véase <a href="../setup/#visor-de-log-integrado">Instalación — Visor de log</a>.</li>
+</ul>
+<p><img alt="Visor de log en la cabecera" src="../images/log.png" width="100%" /></p>
+<h2 id="resize-de-graficos">Resize de gráficos</h2>
+<ul>
+<li>Un <strong>ResizeObserver</strong> observa el nodo <code>#plotArea</code>. Cuando cambia el tamaño del área (p. ej. redimensionar ventana), se hace <strong>Plotly.relayout</strong> de cada contenedor de gráfico con el tamaño actual (<code>getBoundingClientRect()</code>), para que los gráficos se adapten al espacio disponible.</li>
+</ul>
+<h2 id="panel-perf">Panel Perf</h2>
+<ul>
+<li>Botón <strong>Perf</strong> en la cabecera: overlay a pantalla completa que consulta periódicamente <strong><code>GET /api/perf</code></strong> mientras está abierto.</li>
+<li>Tres bloques: fases <strong>Python</strong>, <strong>C++</strong> (<code>write_shm_snapshot</code>) y <strong>sidecar</strong> (solo si hay grabación <code>sidecar_cpp</code> activa y el binario escribe el JSON de <code>--perf-file</code>). Tablas con último tiempo, EMA y número de muestras; barras apiladas por capa.</li>
+</ul>
+<p><img alt="Panel Perf — capas Python, C++ y sidecar" src="../images/perf.png" width="100%" />
+- La primera petición <strong>renueva el lease</strong> de medición en el servidor (igual que <code>GET /api/advanced_stats?perf=1</code> desde la tira de estadísticas). Si el lease expira, el panel muestra un aviso hasta que se vuelva a abrir o se use estadísticas avanzadas.
+- Detalle de fases y optimizaciones del sidecar: <a href="../performance/">Rendimiento</a>.</p>
+<h2 id="atajos-y-otros">Atajos y otros</h2>
+<ul>
+<li>Teclado: Escape (cerrar overlays), Espacio (pausar/reanudar gráficos), Ctrl+Z / Ctrl+Y (deshacer/rehacer layout), R (grabación), S (screenshot), etc.</li>
+<li>Administración avanzada: overlay con rutas de config, grabaciones, estado del servidor; botón “Guardar cambios” aplica <code>web_port</code>, <code>web_port_scan_max</code> y <strong><code>recordings_write_tsv</code></strong> al backend (<code>/api/admin/runtime_config</code>). La casilla “Generar también TSV” controla si, además del Parquet canónico, se escribe un <code>.tsv</code> para interoperabilidad. Si se cambian puertos, incremento o esa casilla, el botón se resalta en verde hasta guardar.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.suggest", "search.highlight", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copiado al portapapeles", "clipboard.copy": "Copiar al portapapeles", "search.result.more.one": "1 m\u00e1s en esta p\u00e1gina", "search.result.more.other": "# m\u00e1s en esta p\u00e1gina", "search.result.none": "No se encontraron documentos", "search.result.one": "1 documento encontrado", "search.result.other": "# documentos encontrados", "search.result.placeholder": "Teclee para comenzar b\u00fasqueda", "search.result.term.missing": "Falta", "select.version": "Seleccionar versi\u00f3n"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

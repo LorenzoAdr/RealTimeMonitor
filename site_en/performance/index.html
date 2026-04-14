@@ -1,0 +1,1254 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Real-time variable monitor documentation">
+      
+      
+        <meta name="author" content="VarMonitor">
+      
+      
+      
+        <link rel="prev" href="../protocols/">
+      
+      
+        <link rel="next" href="../cpp-integration/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>Performance - VarMonitor</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#performance" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="VarMonitor" class="md-header__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            VarMonitor
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Performance
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="VarMonitor" class="md-nav__button md-logo" aria-label="VarMonitor" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    VarMonitor
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation and configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../launch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Launch scripts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../build-binary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packaged binary (PyInstaller)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backend (Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frontend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../protocols/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocols
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#low-cost-transport-shm-and-uds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Low-cost transport: SHM and UDS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c-publisher-libvarmonitor-shm_publisher" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C++ publisher (libvarmonitor / shm_publisher)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C++ publisher (libvarmonitor / shm_publisher)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#dirty-mode-shm_publish_dirty_mode-default-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dirty mode (shm_publish_dirty_mode, default 1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skip-unchanged-shm_publish_skip_unchanged-default-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skip unchanged (shm_publish_skip_unchanged, default 1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#export-slice-shm_publish_slice_count-uds-set_shm_publish_slice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Export slice (shm_publish_slice_count + UDS set_shm_publish_slice)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#async-shm-publish-thread-shm_async_publish" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Async SHM publish thread (shm_async_publish)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cpu-affinity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CPU affinity
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#other-pieces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other pieces
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#measures-to-limit-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Measures to limit load
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Measures to limit load">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#monitored-variables-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitored variables only
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rel-act-browser-update-period" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rel act (browser update period)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#virtualized-variable-browser" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Virtualized variable browser
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#chart-downsampling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Chart downsampling
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adaptive-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adaptive load
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#large-files-offline-analysis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Large files (offline analysis)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#visual-buffer-and-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Visual buffer and history
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#perf-panel-and-apiperf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Perf panel and /api/perf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-recording-varmon_sidecar-cost-optimizations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native recording (varmon_sidecar): cost optimizations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#python-while-sidecar_cpp-recording-is-active" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python while sidecar_cpp recording is active
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cpp-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#low-cost-transport-shm-and-uds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Low-cost transport: SHM and UDS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c-publisher-libvarmonitor-shm_publisher" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C++ publisher (libvarmonitor / shm_publisher)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C++ publisher (libvarmonitor / shm_publisher)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#dirty-mode-shm_publish_dirty_mode-default-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dirty mode (shm_publish_dirty_mode, default 1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#skip-unchanged-shm_publish_skip_unchanged-default-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skip unchanged (shm_publish_skip_unchanged, default 1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#export-slice-shm_publish_slice_count-uds-set_shm_publish_slice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Export slice (shm_publish_slice_count + UDS set_shm_publish_slice)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#async-shm-publish-thread-shm_async_publish" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Async SHM publish thread (shm_async_publish)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cpu-affinity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CPU affinity
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#other-pieces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other pieces
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#measures-to-limit-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Measures to limit load
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Measures to limit load">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#monitored-variables-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitored variables only
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rel-act-browser-update-period" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rel act (browser update period)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#virtualized-variable-browser" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Virtualized variable browser
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#chart-downsampling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Chart downsampling
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adaptive-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adaptive load
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#large-files-offline-analysis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Large files (offline analysis)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#visual-buffer-and-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Visual buffer and history
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#perf-panel-and-apiperf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Perf panel and /api/perf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-recording-varmon_sidecar-cost-optimizations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native recording (varmon_sidecar): cost optimizations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#python-while-sidecar_cpp-recording-is-active" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python while sidecar_cpp recording is active
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="performance">Performance</h1>
+<p>The stack targets <strong>maximum performance</strong>: low latency and low CPU/network use between the publishing C++ process and the browser.</p>
+<h2 id="low-cost-transport-shm-and-uds">Low-cost transport: SHM and UDS</h2>
+<ul>
+<li><strong>C++ ↔ Python</strong>: no TCP. Local communication via:</li>
+<li><strong>Shared memory (SHM)</strong>: C++ writes snapshots to <code>/dev/shm/</code> and signals with a POSIX semaphore. Python maps the same segment and reads without extra copies or network serialization.</li>
+<li><strong>Unix domain sockets (UDS)</strong>: commands (list variables, read/write, SHM subscription) go over a local socket. Lower overhead than TCP and no network stack.</li>
+</ul>
+<p>This avoids network and CPU overhead on the live data path.</p>
+<h2 id="c-publisher-libvarmonitor-shm_publisher">C++ publisher (<code>libvarmonitor</code> / <code>shm_publisher</code>)</h2>
+<p>Beyond SHM+UDS, the binary linking <strong>libvarmonitor</strong> applies several optimizations inside <strong><code>write_snapshot</code></strong> (once per publish cycle). Keys live in <code>varmon.conf</code> (C++ only; restart after changes).</p>
+<h3 id="dirty-mode-shm_publish_dirty_mode-default-1">Dirty mode (<code>shm_publish_dirty_mode</code>, default 1)</h3>
+<ul>
+<li>Variables marked with <strong><code>mark_dirty(name)</code></strong> (e.g. after UDS <code>set_var</code> or after applying a one-shot SHM <strong>import</strong>) go into an in-memory <strong>dirty</strong> set.</li>
+<li>Between <strong>full refreshes</strong>, the publisher can build a mask and <strong>skip getters</strong> for rows that are neither dirty nor in the current export slice, which helps when most variables are unchanged.</li>
+<li><strong><code>shm_publish_full_refresh_cycles</code></strong> (default <strong>1</strong>): how often a <strong>full</strong> refresh of all export rows is forced. With <strong>1</strong>, <em>every</em> cycle is a full refresh: safe default compatible with apps that do <strong>not</strong> call <code>mark_dirty</code> when mutating data behind the API. If you raise this (e.g. 5–10) <strong>and</strong> your app marks dirty correctly, you reduce reads on intermediate cycles.</li>
+</ul>
+<h3 id="skip-unchanged-shm_publish_skip_unchanged-default-1">Skip unchanged (<code>shm_publish_skip_unchanged</code>, default 1)</h3>
+<ul>
+<li>After the scalar value is obtained, if <strong>type and double value</strong> match the last publish for that row, the publisher <strong>skips writing</strong> the mmap row (less memory traffic and cache churn).</li>
+<li><strong><code>row_pub_seq</code></strong> may stay at the previous value: Python can <strong>reuse</strong> the decoded row when comparing sequences (works with partial slicing).</li>
+</ul>
+<h3 id="export-slice-shm_publish_slice_count-uds-set_shm_publish_slice">Export slice (<code>shm_publish_slice_count</code> + UDS <code>set_shm_publish_slice</code>)</h3>
+<ul>
+<li>Described in <a href="../protocols/">Protocols</a>: in partial mode only a subset of subscription indices is updated per cycle; header (<code>seq</code>, <code>timestamp</code>) always updates. The backend often aligns <strong>N</strong> with <strong>Rel act</strong> during passive monitoring.</li>
+</ul>
+<h3 id="async-shm-publish-thread-shm_async_publish">Async SHM publish thread (<code>shm_async_publish</code>)</h3>
+<ul>
+<li>With <strong>1</strong>, <code>write_shm_snapshot()</code> on the RT thread only sets a <strong>pending</strong> flag and notifies a <strong>dedicated thread</strong> that runs <code>write_snapshot</code>. Goal: <strong>lower jitter</strong> on the loop that calls the monitor.</li>
+<li>With <strong>0</strong>, publishing is <strong>synchronous</strong> in the caller (classic behavior).</li>
+</ul>
+<h3 id="cpu-affinity">CPU affinity</h3>
+<ul>
+<li><strong>libvarmonitor</strong> does not set affinity for the user’s C++ process (use <code>taskset</code>/OS policy).</li>
+<li>The Python backend may set <strong><code>sidecar_cpu_affinity</code></strong> for <strong><code>varmon_sidecar</code></strong> (recording and alarms) via <code>sched_setaffinity</code> on Linux, pinning recorder work away from your RT cores. See <a href="../setup/">Setup</a>.</li>
+</ul>
+<h3 id="other-pieces">Other pieces</h3>
+<ul>
+<li><strong>Subscription cache</strong> in the publisher: snapshot of the name list only when the subscription generation changes, avoiding massive per-cycle <code>std::string</code> copies.</li>
+<li><strong>Reused buffers</strong> in <code>write_snapshot</code>: static vectors for masks, export indices, and scalar batch to cut allocations on the hot path.</li>
+</ul>
+<h2 id="measures-to-limit-load">Measures to limit load</h2>
+<h3 id="monitored-variables-only">Monitored variables only</h3>
+<ul>
+<li>Only user-selected <strong>monitored</strong> variables are sent over WebSocket to the browser.</li>
+<li>C++ only writes to SHM for subscribed variables (<code>set_shm_subscription</code>): if the subscription has names, only those are written (by name via <code>get_var</code>); if <strong>empty</strong>, no variable entries are written (header only with <code>count = 0</code> and <code>sem_post</code>), avoiding dumping every variable each cycle when nothing is monitored. Available variables are fetched via UDS (<code>list_names</code> / <code>list_vars</code>) on demand.</li>
+<li>Non-monitored variables are not included in client updates.</li>
+<li>Maximum variables in the SHM segment is <strong>shm_max_vars</strong> (<code>varmon.conf</code>; C++ and Python must match). If you monitor more than that, only the first get values; the rest show "--". See <a href="../troubleshooting/">Troubleshooting</a> (section on many variables showing "--").</li>
+</ul>
+<p>See <a href="../protocols/#monitored-variable-update-system">Protocols — Monitored variable update system</a>.</p>
+<h3 id="rel-act-browser-update-period">Rel act (browser update period)</h3>
+<ul>
+<li>The backend does not send <code>vars_update</code> on every SHM cycle.</li>
+<li>A minimum interval between WebSocket sends (UI <strong>Rel act</strong>) limits message rate and browser redraw without losing usefulness.</li>
+</ul>
+<h3 id="virtualized-variable-browser">Virtualized variable browser</h3>
+<ul>
+<li>The add-variables panel can show hundreds or thousands of names.</li>
+<li>The list is <strong>virtualized</strong>: only visible rows (plus overscan) are rendered, keeping the DOM small.</li>
+</ul>
+<h3 id="chart-downsampling">Chart downsampling</h3>
+<ul>
+<li>Time series do not draw every history point.</li>
+<li><strong>Downsample</strong> (configurable max points per series) limits canvas work.</li>
+</ul>
+<h3 id="adaptive-load">Adaptive load</h3>
+<ul>
+<li>When the tab is hidden (<code>document.hidden</code>), the frontend can skip or throttle chart/table updates.</li>
+</ul>
+<h3 id="large-files-offline-analysis">Large files (offline analysis)</h3>
+<ul>
+<li>Very large TSVs are not read entirely at once:</li>
+<li><strong>Preview</strong>: reads an initial chunk to estimate size and row count.</li>
+<li><strong>Risk estimation</strong>: decides whether <strong>safe mode</strong> is recommended.</li>
+<li><strong>Safe mode</strong>: work in <strong>segments</strong> (byte ranges); only needed segments load into memory.</li>
+</ul>
+<h3 id="visual-buffer-and-history">Visual buffer and history</h3>
+<ul>
+<li>Frontend <code>historyCache</code> follows the same window as the header <strong>Visual buffer</strong> control (and the advanced default): time-based trimming, a sample budget scaled to those seconds, and live chart X range. The server can set an initial default via <code>visual_buffer_sec</code> in <code>varmon.conf</code> (see <code>docs_en/setup.md</code>) when the user has no saved preference.</li>
+</ul>
+<p>Together, these allow many variables and high update rates without saturating the machine or network.</p>
+<h2 id="perf-panel-and-apiperf">Perf panel and <code>/api/perf</code></h2>
+<p><img alt="Perf panel in the UI" src="../images/perf.png" width="100%" /></p>
+<ul>
+<li><strong>UI</strong>: The header <strong>Perf</strong> button opens a panel that polls <code>GET /api/perf</code> while visible. It shows three layers in tables and stacked bars:</li>
+<li><strong>Python</strong> (<code>perf_agg</code>): backend phases (e.g. SHM snapshot handling, <code>vars_update</code> pack/send).</li>
+<li><strong>C++</strong> (<code>server_info.shm_perf_us</code>): CPU time inside <code>write_shm_snapshot</code> when the publisher has measurement enabled.</li>
+<li><strong>Sidecar</strong>: phases from the <code>varmon_sidecar</code> process during <strong><code>sidecar_cpp</code> recording</strong>, read from the JSON file written via <strong><code>--perf-file</code></strong> (e.g. <code>*.part.sidecar_perf.json</code>).</li>
+<li><strong>Lease</strong>: Opening the panel or the advanced stats strip with <code>?perf=1</code> on <code>GET /api/advanced_stats</code> <strong>renews a server lease</strong>; without it, C++ stops filling <code>shm_perf_us</code> after ~1 s so idle processes are not measured constantly.</li>
+<li><strong>JSON shape</strong> (summary): <code>ts</code>, <code>lease_active</code>, <code>layers.python|cpp|sidecar</code>, each with <code>phases: [{ id, last_us, ema_us, samples }, ...]</code>. Sidecar and Python times are usually in <strong>microseconds</strong>; the UI displays <strong>milliseconds</strong>.</li>
+</ul>
+<h2 id="native-recording-varmon_sidecar-cost-optimizations">Native recording (<code>varmon_sidecar</code>): cost optimizations</h2>
+<p>With a large SHM table (<code>shm_max_vars</code>) and a small TSV column set, the dominant cost used to be <strong>scanning every row</strong> on each <code>sem_post</code> and building name-keyed maps. The sidecar applies several techniques:</p>
+<ol>
+<li><strong>Layout cache (<code>RecordingLayoutCache</code>)</strong>: After validating the header (<code>version</code>, <code>count</code>, <code>table_off</code>, <code>stride</code>, mmap size) and cached row names, a single O(N) pass fills <code>name_to_row_off</code> and per-column offsets from the <code>names-file</code>. While the layout stays valid, <strong>snapshot</strong> recording reads are <strong>O(k)</strong> in the number of TSV columns (<code>read_recording_snapshot_columns</code>), not O(N).</li>
+<li><strong>v2 ring replay without a per-sample map</strong>: When all columns are ring mode and indices align, TSV lines are built <strong>directly</strong> from ring slots (<code>v2_ring_replay_extract_lines</code>); a name→value map per row is built <strong>only if</strong> sidecar alarm rules are enabled.</li>
+<li><strong>Reusing the name→offset map</strong>: With a valid cache, ring column resolution avoids rescanning all N rows (perf phase <code>sidecar.ring_col_resolve_scan</code> becomes essentially O(k)).</li>
+<li><strong>TSV formatting</strong>: Scalar cells use <code>std::to_chars</code> where available; fewer temporary strings and no <code>ostringstream</code> on the hot path.</li>
+<li><strong>Sidecar perf file</strong>: <code>VARMON_SIDECAR_PERF_FLUSH_EVERY</code> (1–512, default 4 internally) throttles how often the diagnostic JSON is rewritten when using <code>--perf-file</code>.</li>
+</ol>
+<p>Phase ids (<code>sidecar.*</code>) are defined in <code>varmon_sidecar</code> (<code>kSidecarPerfIds</code>), e.g. <code>sem_wait</code>, parse body, <code>ring_extract</code>, <code>ring_replay_build_rows</code>, <code>snap_format</code>, <code>cycle_wall_wake_to_fwrite_done</code>. The JSON also carries aggregates such as <code>sum_to_fwrite_us</code> for cross-checking the recording cycle.</p>
+<h2 id="python-while-sidecar_cpp-recording-is-active">Python while <code>sidecar_cpp</code> recording is active</h2>
+<ul>
+<li><strong><code>shm_parse_hz_sidecar_recording</code></strong> (default <strong>30</strong> Hz in <code>app.py</code>): caps how often the reader thread mmap-parses SHM so <strong><code>latest_snapshot</code></strong> and on-screen C++ values keep updating; the TSV is still written by the sidecar on the dedicated semaphore (<code>sem_sidecar_name</code>).</li>
+<li><strong><code>0</code></strong>: the reader <strong>only drains</strong> the main semaphore (<code>sem_name</code>) on a timer (<code>shm_sidecar_sem_drain_interval_sec</code>) without parsing: C++ variable values from SHM freeze in the UI (telemetry and recording progress still update).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.suggest", "search.highlight", "content.tabs.link"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
