@@ -2,6 +2,83 @@
 import '../styles/global.css';
 
 const base = import.meta.env.BASE_URL;
+
+/** Orden: posición i·60° desde las 12 en punto; radios visuales coherentes con translateY en el template */
+const ecosystemRadialEn = [
+	{
+		title: '3D flight visualization',
+		body: 'Spatial flight-path and attitude views for telemetry-driven 3D scenes.',
+		svgPath:
+			'M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 5l-2-1-2 1M4 5l2-1M4 5l2 1M4 5v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5',
+	},
+	{
+		title: 'Simulated PFD & joystick',
+		body: 'Synthetic primary flight display and joystick input for desktop HIL-style workflows.',
+		svgPath:
+			'M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',
+	},
+	{
+		title: 'Automatic documentation',
+		body: 'Generated docs from your project metadata—keep manuals in sync with the codebase.',
+		svgPath:
+			'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+	},
+	{
+		title: 'Remote IDE & debug',
+		body: 'Browser-based IDE surface with attach-to-process debugging over your stack.',
+		svgPath: 'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4',
+	},
+	{
+		title: 'Git remote management',
+		body: 'Repository operations from the monitor—branches, remotes, and review flows without leaving the UI.',
+		svgPath: 'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6',
+	},
+	{
+		title: 'ARINC 429 & MIL-STD-1553',
+		bodyHtml:
+			'Real-time word decode and <strong class="text-slate-300">health detection</strong>—parity faults, bad SSM, and more—backed by an easy-to-manage <strong class="text-slate-300">SQLite</strong> label registry.',
+		svgPath:
+			'M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0',
+	},
+];
+
+const ecosystemRadialEs = [
+	{
+		title: 'Visualización 3D de vuelo',
+		body: 'Vistas espaciales de trayectoria y actitud alimentadas por telemetría.',
+		svgPath:
+			'M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 5l-2-1-2 1M4 5l2-1M4 5l2 1M4 5v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5',
+	},
+	{
+		title: 'PFD simulada y joystick',
+		body: 'Display primario de vuelo sintético y entrada joystick para flujos tipo HIL en escritorio.',
+		svgPath:
+			'M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',
+	},
+	{
+		title: 'Documentación automática',
+		body: 'Generación de manuales a partir de metadatos del proyecto, alineados con el código.',
+		svgPath:
+			'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+	},
+	{
+		title: 'IDE remoto y depuración',
+		body: 'Superficie IDE en el navegador con capacidad de depuración sobre tu pila.',
+		svgPath: 'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4',
+	},
+	{
+		title: 'Gestión remota de Git',
+		body: 'Operaciones de repositorio desde el monitor: ramas, remotos y flujos de revisión sin salir de la UI.',
+		svgPath: 'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6',
+	},
+	{
+		title: 'ARINC 429 y MIL-STD-1553',
+		bodyHtml:
+			'Decodificación en tiempo real y <strong class="text-slate-300">detección de salud</strong> (paridad, SSM erróneo, etc.) sobre un registro <strong class="text-slate-300">SQLite</strong> fácil de mantener.',
+		svgPath:
+			'M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0',
+	},
+];
 ---
 
 <html lang="en">
@@ -127,8 +204,9 @@ const base = import.meta.env.BASE_URL;
 							Native performance. Zero blocking.
 						</p>
 
-						<div class="mt-20 grid gap-16 lg:grid-cols-2 lg:items-start lg:gap-x-24 lg:gap-y-16">
-							<div class="lg:-translate-x-2 xl:-translate-x-3">
+						<div class="mt-20 grid gap-16 lg:grid-cols-2 lg:items-center lg:gap-x-12 xl:gap-x-16">
+							<div class="flex w-full justify-center lg:justify-start lg:pl-0">
+								<div class="w-full max-w-xl lg:-translate-x-10 xl:-translate-x-14 2xl:-translate-x-16">
 								<div
 									class="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-2xl shadow-black/40 backdrop-blur-sm sm:p-8"
 									aria-hidden="true"
@@ -192,9 +270,10 @@ const base = import.meta.env.BASE_URL;
 										</div>
 									</div>
 								</div>
+								</div>
 							</div>
 
-							<ul class="flex flex-col gap-10 lg:pt-2">
+							<ul class="flex flex-col gap-10">
 								<li class="group flex gap-5">
 									<div
 										class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-400 transition group-hover:border-cyan-400/40 group-hover:bg-cyan-500/15"
@@ -298,92 +377,53 @@ const base = import.meta.env.BASE_URL;
 							</p>
 						</div>
 
-						<div class="mt-16 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
+						<div
+							class="relative mx-auto mt-12 min-h-[min(135vw,40rem)] w-full max-w-5xl overflow-x-clip overflow-y-visible px-2 pb-20 pt-10 sm:min-h-[36rem] md:mt-16 md:min-h-[38rem] lg:min-h-[40rem]"
+						>
+							<svg
+								class="pointer-events-none absolute left-1/2 top-1/2 z-0 h-[min(92vw,34rem)] w-[min(92vw,34rem)] -translate-x-1/2 -translate-y-1/2"
+								viewBox="0 0 200 200"
+								aria-hidden="true"
 							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 5l-2-1-2 1M4 5l2-1M4 5l2 1M4 5v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">3D flight visualization</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Spatial flight-path and attitude views for telemetry-driven 3D scenes.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Simulated PFD &amp; joystick</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Synthetic primary flight display and joystick input for desktop HIL-style workflows.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Automatic documentation</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Generated docs from your project metadata—keep manuals in sync with the codebase.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Remote IDE &amp; debug</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Browser-based IDE surface with attach-to-process debugging over your stack.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Git remote management</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Repository operations from the monitor—branches, remotes, and review flows without leaving the UI.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">ARINC 429 &amp; MIL-STD-1553</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Real-time word decode and <strong class="text-slate-300">health detection</strong>—parity faults,
-									bad SSM, and more—backed by an easy-to-manage <strong class="text-slate-300">SQLite</strong> label
-									registry.
-								</p>
-							</article>
+								<circle cx="100" cy="100" r="88" fill="none" stroke="rgba(34,211,238,0.14)" stroke-width="0.75" />
+							</svg>
+							<div class="absolute left-1/2 top-1/2 z-20 flex h-[5.25rem] w-[5.25rem] sm:h-24 sm:w-24 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border border-cyan-500/35 bg-slate-950/95 px-2 text-center shadow-lg shadow-cyan-500/10 ring-1 ring-cyan-500/20">
+								<span class="font-mono text-[0.65rem] font-semibold uppercase leading-tight tracking-wider text-cyan-300 sm:text-xs">
+									SHM core
+								</span>
+							</div>
+							<div class="absolute left-1/2 top-1/2 z-10 h-2 w-2 -translate-x-1/2 -translate-y-1/2 overflow-visible">
+								{
+									[0, 1, 2, 3, 4, 5].map((i) => (
+										<div
+											class="absolute bottom-1/2 left-1/2 w-px origin-bottom bg-gradient-to-t from-cyan-500/30 via-cyan-500/10 to-transparent"
+											style={`height: clamp(7rem, 22vw, 11rem); transform: translateX(-50%) rotate(${i * 60}deg)`}
+										/>
+									))
+								}
+								{
+									ecosystemRadialEn.map((item, i) => (
+										<div
+											class="absolute bottom-1/2 left-1/2 flex w-[min(92vw,13rem)] max-w-[13rem] origin-bottom flex-col items-stretch sm:w-[min(90vw,14rem)] sm:max-w-[14rem]"
+											style={`transform: translateX(-50%) rotate(${i * 60}deg) translateY(calc(-1 * clamp(7rem, 22vw, 11rem))) rotate(${-i * 60}deg)`}
+										>
+											<article class="group rounded-2xl border border-white/5 bg-slate-950/90 p-4 shadow-lg transition hover:-translate-y-0.5 hover:border-cyan-500/25 hover:shadow-cyan-500/5 sm:p-5">
+												<div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20 sm:h-11 sm:w-11">
+													<svg class="h-5 w-5 sm:h-6 sm:w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+														<path stroke-linecap="round" stroke-linejoin="round" d={item.svgPath} />
+													</svg>
+												</div>
+												<h3 class="text-sm font-semibold leading-snug text-white sm:text-base">{item.title}</h3>
+												{item.bodyHtml ? (
+													<p class="mt-2 text-xs leading-relaxed text-slate-400 sm:text-sm" set:html={item.bodyHtml} />
+												) : (
+													<p class="mt-2 text-xs leading-relaxed text-slate-400 sm:text-sm">{item.body}</p>
+												)}
+											</article>
+										</div>
+									))
+								}
+							</div>
 						</div>
 					</div>
 				</section>
@@ -486,8 +526,9 @@ const base = import.meta.env.BASE_URL;
 							Rendimiento nativo. Cero bloqueos.
 						</p>
 
-						<div class="mt-20 grid gap-16 lg:grid-cols-2 lg:items-start lg:gap-x-24 lg:gap-y-16">
-							<div class="lg:-translate-x-2 xl:-translate-x-3">
+						<div class="mt-20 grid gap-16 lg:grid-cols-2 lg:items-center lg:gap-x-12 xl:gap-x-16">
+							<div class="flex w-full justify-center lg:justify-start lg:pl-0">
+								<div class="w-full max-w-xl lg:-translate-x-10 xl:-translate-x-14 2xl:-translate-x-16">
 								<div
 									class="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-2xl shadow-black/40 backdrop-blur-sm sm:p-8"
 									aria-hidden="true"
@@ -551,9 +592,10 @@ const base = import.meta.env.BASE_URL;
 										</div>
 									</div>
 								</div>
+								</div>
 							</div>
 
-							<ul class="flex flex-col gap-10 lg:pt-2">
+							<ul class="flex flex-col gap-10">
 								<li class="group flex gap-5">
 									<div
 										class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-400 transition group-hover:border-cyan-400/40 group-hover:bg-cyan-500/15"
@@ -658,91 +700,53 @@ const base = import.meta.env.BASE_URL;
 							</p>
 						</div>
 
-						<div class="mt-16 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
+						<div
+							class="relative mx-auto mt-12 min-h-[min(135vw,40rem)] w-full max-w-5xl overflow-x-clip overflow-y-visible px-2 pb-20 pt-10 sm:min-h-[36rem] md:mt-16 md:min-h-[38rem] lg:min-h-[40rem]"
+						>
+							<svg
+								class="pointer-events-none absolute left-1/2 top-1/2 z-0 h-[min(92vw,34rem)] w-[min(92vw,34rem)] -translate-x-1/2 -translate-y-1/2"
+								viewBox="0 0 200 200"
+								aria-hidden="true"
 							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 5l-2-1-2 1M4 5l2-1M4 5l2 1M4 5v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Visualización 3D de vuelo</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Vistas espaciales de trayectoria y actitud alimentadas por telemetría.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">PFD simulada y joystick</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Display primario de vuelo sintético y entrada joystick para flujos tipo HIL en escritorio.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Documentación automática</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Generación de manuales a partir de metadatos del proyecto, alineados con el código.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">IDE remoto y depuración</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Superficie IDE en el navegador con capacidad de depuración sobre tu pila.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">Gestión remota de Git</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Operaciones de repositorio desde el monitor: ramas, remotos y flujos de revisión sin salir de la UI.
-								</p>
-							</article>
-
-							<article
-								class="group rounded-2xl border border-white/5 bg-slate-950/80 p-6 shadow-lg transition hover:-translate-y-1 hover:border-cyan-500/25 hover:shadow-cyan-500/5"
-							>
-								<div class="mb-4 flex h-11 w-11 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20">
-									<svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
-									</svg>
-								</div>
-								<h3 class="font-semibold text-white">ARINC 429 y MIL-STD-1553</h3>
-								<p class="mt-2 text-sm leading-relaxed text-slate-400">
-									Decodificación en tiempo real y <strong class="text-slate-300">detección de salud</strong> (paridad,
-									SSM erróneo, etc.) sobre un registro <strong class="text-slate-300">SQLite</strong> fácil de mantener.
-								</p>
-							</article>
+								<circle cx="100" cy="100" r="88" fill="none" stroke="rgba(34,211,238,0.14)" stroke-width="0.75" />
+							</svg>
+							<div class="absolute left-1/2 top-1/2 z-20 flex h-[5.25rem] w-[5.25rem] sm:h-24 sm:w-24 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border border-cyan-500/35 bg-slate-950/95 px-2 text-center shadow-lg shadow-cyan-500/10 ring-1 ring-cyan-500/20">
+								<span class="font-mono text-[0.65rem] font-semibold uppercase leading-tight tracking-wider text-cyan-300 sm:text-xs">
+									SHM core
+								</span>
+							</div>
+							<div class="absolute left-1/2 top-1/2 z-10 h-2 w-2 -translate-x-1/2 -translate-y-1/2 overflow-visible">
+								{
+									[0, 1, 2, 3, 4, 5].map((i) => (
+										<div
+											class="absolute bottom-1/2 left-1/2 w-px origin-bottom bg-gradient-to-t from-cyan-500/30 via-cyan-500/10 to-transparent"
+											style={`height: clamp(7rem, 22vw, 11rem); transform: translateX(-50%) rotate(${i * 60}deg)`}
+										/>
+									))
+								}
+								{
+									ecosystemRadialEs.map((item, i) => (
+										<div
+											class="absolute bottom-1/2 left-1/2 flex w-[min(92vw,13rem)] max-w-[13rem] origin-bottom flex-col items-stretch sm:w-[min(90vw,14rem)] sm:max-w-[14rem]"
+											style={`transform: translateX(-50%) rotate(${i * 60}deg) translateY(calc(-1 * clamp(7rem, 22vw, 11rem))) rotate(${-i * 60}deg)`}
+										>
+											<article class="group rounded-2xl border border-white/5 bg-slate-950/90 p-4 shadow-lg transition hover:-translate-y-0.5 hover:border-cyan-500/25 hover:shadow-cyan-500/5 sm:p-5">
+												<div class="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 transition group-hover:bg-cyan-500/20 sm:h-11 sm:w-11">
+													<svg class="h-5 w-5 sm:h-6 sm:w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+														<path stroke-linecap="round" stroke-linejoin="round" d={item.svgPath} />
+													</svg>
+												</div>
+												<h3 class="text-sm font-semibold leading-snug text-white sm:text-base">{item.title}</h3>
+												{item.bodyHtml ? (
+													<p class="mt-2 text-xs leading-relaxed text-slate-400 sm:text-sm" set:html={item.bodyHtml} />
+												) : (
+													<p class="mt-2 text-xs leading-relaxed text-slate-400 sm:text-sm">{item.body}</p>
+												)}
+											</article>
+										</div>
+									))
+								}
+							</div>
 						</div>
 					</div>
 				</section>
