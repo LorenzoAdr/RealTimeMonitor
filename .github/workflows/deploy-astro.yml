@@ -1,4 +1,4 @@
-# Despliega el sitio estático en astro/dist a GitHub Pages.
+# Despliega el sitio estático en astro/dist a GitHub Pages (landing + MkDocs en /docs/es|en).
 # Requiere: Settings → Pages → Build and deployment → Source: GitHub Actions.
 # URL esperada (proyecto): https://LorenzoAdr.github.io/RealTimeMonitor/
 # El nombre del repo debe coincidir con astro.config.mjs → base: '/RealTimeMonitor/'
@@ -7,10 +7,15 @@ name: Deploy Astro to GitHub Pages
 
 on:
   push:
-    branches: [feature/astro-site]
+    branches: [main, feature/astro-site]
     paths:
       - 'astro/**'
       - '.github/workflows/deploy-astro.yml'
+      - 'scripts/build_docs_for_astro.sh'
+      - 'mkdocs.yml'
+      - 'mkdocs.en.yml'
+      - 'docs/**'
+      - 'docs_en/**'
   workflow_dispatch:
 
 permissions:
@@ -29,13 +34,23 @@ jobs:
       # v6: runtime Node 24 en la acción (v4 usaba Node 20; aviso deprecación GH)
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MkDocs (Material + pymdownx)
+        run: pip install mkdocs mkdocs-material pymdown-extensions
+
+      - name: Build MkDocs into astro/public/docs
+        run: ./scripts/build_docs_for_astro.sh
+
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: astro/package-lock.json
 
-      - name: Install and build
+      - name: Install and build Astro
         working-directory: astro
         run: |
           npm ci

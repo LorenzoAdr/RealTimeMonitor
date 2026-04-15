@@ -6,8 +6,9 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "dev": "astro dev",
+    "dev": "env ASTRO_LOCAL_BASE=1 astro dev",
     "build": "astro build",
+    "build:with-docs": "bash ../scripts/build_docs_for_astro.sh && astro build",
     "preview": "astro preview",
     "astro": "astro"
   },

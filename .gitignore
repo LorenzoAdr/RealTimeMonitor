@@ -31,6 +31,9 @@ web_monitor/server_state/sessions/
 # MkDocs build output
 # PDF de documentación generado localmente
 dist-docs/
+# MkDocs copiado al sitio Astro (scripts/build_docs_for_astro.sh); regenerar antes de build/preview
+astro/public/docs/es/
+astro/public/docs/en/
 
 # Datos bajo data/ (config data/varmon.conf sí se versiona)
 data/recordings/
