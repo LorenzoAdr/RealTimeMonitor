@@ -1,6 +1,7 @@
 site_name: VarMonitor
 site_description: Real-time variable monitor documentation
 site_author: VarMonitor
+use_directory_urls: false
 
 docs_dir: docs_en
 site_dir: site_en
@@ -9,16 +10,9 @@ theme:
   name: material
   language: en
   palette:
-    - scheme: default
-      primary: indigo
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
     - scheme: slate
-      primary: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+      primary: cyan
+      accent: cyan
   features:
     - search.suggest
     - search.highlight
@@ -44,6 +38,13 @@ nav:
 
 plugins:
   - search
+
+extra_css:
+  # Available presets:
+  # - assets/astro-theme-soft.css
+  # - assets/astro-theme.css        (balanced, default active)
+  - assets/astro-theme-neon.css
+  # - assets/astro-theme.css
 
 markdown_extensions:
   - pymdownx.superfences:

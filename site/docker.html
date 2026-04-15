@@ -13,8 +13,10 @@
       
       
       
+        <link rel="prev" href="launch.html">
       
-        <link rel="next" href="architecture.html">
+      
+        <link rel="next" href="build-binary.html">
       
       
         
@@ -25,7 +27,7 @@
     
     
       
-        <title>VarMonitor</title>
+        <title>Docker - VarMonitor</title>
       
     
     
@@ -78,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#varmonitor" class="md-skip">
+        <a href="#docker" class="md-skip">
           Saltar a contenido
         </a>
       
@@ -114,7 +116,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Inicio
+              Docker
             
           </span>
         </div>
@@ -221,37 +223,10 @@
       
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Inicio
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="index.html" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="index.html" class="md-nav__link">
         
   
   
@@ -267,59 +242,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Tabla de contenidos">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Tabla de contenidos
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#capturas-de-la-interfaz" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Capturas de la interfaz
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#que-encontrar-en-esta-documentacion" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Qué encontrar en esta documentación
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#enlaces-rapidos" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Enlaces rápidos
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -409,10 +331,37 @@
       
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="docker.html" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="docker.html" class="md-nav__link md-nav__link--active">
         
   
   
@@ -428,6 +377,92 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Tabla de contenidos">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Tabla de contenidos
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#modo-puente-recomendado-para-analisis-sin-c-en-el-host" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modo puente (recomendado para análisis sin C++ en el host)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modo-host-linux-live-con-el-c-del-mismo-equipo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modo host (Linux: live con el C++ del mismo equipo)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#variables-de-entorno" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Variables de entorno
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitaciones" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitaciones
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#imagen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Imagen
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#integracion-en-el-dockerfile-de-otro-proyecto" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Integración en el Dockerfile de otro proyecto
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -648,10 +683,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#capturas-de-la-interfaz" class="md-nav__link">
+  <a href="#modo-puente-recomendado-para-analisis-sin-c-en-el-host" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Capturas de la interfaz
+        Modo puente (recomendado para análisis sin C++ en el host)
       
     </span>
   </a>
@@ -659,10 +694,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#que-encontrar-en-esta-documentacion" class="md-nav__link">
+  <a href="#modo-host-linux-live-con-el-c-del-mismo-equipo" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Qué encontrar en esta documentación
+        Modo host (Linux: live con el C++ del mismo equipo)
       
     </span>
   </a>
@@ -670,10 +705,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#enlaces-rapidos" class="md-nav__link">
+  <a href="#variables-de-entorno" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Enlaces rápidos
+        Variables de entorno
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitaciones" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitaciones
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#imagen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Imagen
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#integracion-en-el-dockerfile-de-otro-proyecto" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Integración en el Dockerfile de otro proyecto
       
     </span>
   </a>
@@ -697,40 +765,79 @@
 
 
 
-<h1 id="varmonitor">VarMonitor</h1>
-<p>Sistema de monitorización de variables en tiempo real para aplicaciones C++20. La comunicación entre la aplicación C++ y el monitor web usa <strong>Unix Domain Sockets (UDS)</strong> y <strong>memoria compartida (SHM)</strong> con semáforos POSIX.</p>
-<p><strong>Código fuente</strong>: <a href="https://github.com/LorenzoAdr/RealTimeMonitor">VarMonitor en GitHub</a>.</p>
-<h2 id="capturas-de-la-interfaz">Capturas de la interfaz</h2>
-<p>Vista general en <strong>tema claro</strong> y <strong>tema oscuro</strong> (cabecera con modo Live/Análisis/Replay, monitor, gráficos y controles).</p>
-<p><img alt="Interfaz VarMonitor — tema claro" src="images/general_claro.png" width="100%" /></p>
-<p><img alt="Interfaz VarMonitor — tema oscuro" src="images/general_oscuro2.png" width="100%" /></p>
+<h1 id="docker">Docker</h1>
+<p>El backend web (FastAPI + estáticos) puede ejecutarse en contenedor. Hay <strong>dos modos</strong> según necesites conectar al proceso <strong>C++ del host</strong> (UDS + memoria compartida).</p>
+<h2 id="modo-puente-recomendado-para-analisis-sin-c-en-el-host">Modo puente (recomendado para análisis sin C++ en el host)</h2>
+<p>Desde la raíz del repositorio:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>--build
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="c1"># o:</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>./scripts/varmon/docker-run.sh
+</code></pre></div>
 <ul>
-<li><strong>Modo análisis</strong> (grabaciones offline TSV o Parquet): <img alt="Modo análisis" src="images/analisis.png" width="100%" /></li>
-<li><strong>Modo replay</strong> (referencia TSV + WebSocket): <img alt="Modo replay" src="images/replay.png" width="100%" /></li>
-<li><strong>Opciones avanzadas</strong> (anomalías, segmentos, notas, PDF…): <img alt="Opciones avanzadas junto a los gráficos" src="images/avanzado.png" width="100%" /></li>
-<li><strong>Panel Perf</strong> (fases Python / C++ / sidecar): <img alt="Panel Perf" src="images/perf.png" width="100%" /></li>
-<li><strong>Ayuda</strong> (guía integrada): <img alt="Ventana de ayuda" src="images/manual.png" width="100%" /></li>
-<li><strong>Visor de log</strong> (backend y opcionalmente C++): <img alt="Visor de log" src="images/log.png" width="100%" /></li>
+<li>Abre <strong>http://localhost:8080</strong> (o el puerto que muestre el log si hay autodescubrimiento).</li>
+<li>El fichero <strong><code>data/varmon.conf</code></strong> del repo se monta en solo lectura en <code>/app/varmon.conf</code>. La carpeta <strong><code>web_monitor/recordings</code></strong> del host se monta en el contenedor para persistir grabaciones (desarrollo).</li>
 </ul>
-<h2 id="que-encontrar-en-esta-documentacion">Qué encontrar en esta documentación</h2>
+<h2 id="modo-host-linux-live-con-el-c-del-mismo-equipo">Modo host (Linux: live con el C++ del mismo equipo)</h2>
+<p>El contenedor comparte la red y el IPC del host para ver los mismos <strong>sockets Unix en <code>/tmp</code></strong> y el <strong>shm</strong> que usa el C++.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>-f<span class="w"> </span>docker-compose.host.yml<span class="w"> </span>up<span class="w"> </span>--build
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1"># o:</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>./scripts/varmon/docker-run.sh<span class="w"> </span>host
+</code></pre></div>
+<p>Luego abre <strong>http://127.0.0.1:&lt;web_port&gt;</strong> (por defecto <code>8080</code> en <code>varmon.conf</code>).</p>
+<p><strong>Requisitos:</strong> Linux (no aplica igual en Docker Desktop macOS/Windows). El binario C++ y el backend Python deben usar la misma configuración SHM (<code>varmon.conf</code> coherente).</p>
+<p><strong>Seguridad:</strong> Montar <code>/tmp</code> del host en el contenedor expone esos ficheros al contenedor; úsalo solo en entornos de desarrollo o confiados.</p>
+<h2 id="variables-de-entorno">Variables de entorno</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Descripción</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VARMON_CONFIG</code></td>
+<td>Ruta al <code>varmon.conf</code> (en compose ya va a <code>/app/varmon.conf</code>).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="limitaciones">Limitaciones</h2>
 <ul>
-<li><strong><a href="architecture.html">Arquitectura</a></strong>: Componentes (C++, Python, frontend), flujo de datos, tasas visual e interna.</li>
-<li><strong><a href="setup.html">Instalación y configuración</a></strong>: Requisitos, instalación rápida, <code>varmon.conf</code>.</li>
-<li><strong><a href="launch.html">Lanzadores</a></strong>: <code>launch_demo</code>, <code>launch_web</code>, <code>launch_ui</code>; respaldo local en <code>scripts/_legacy_launch/</code>.</li>
-<li><strong><a href="docker.html">Docker</a></strong>: Contenedor del monitor web (modo puente o host para C++ en el mismo Linux).</li>
-<li><strong><a href="backend.html">Backend (Python)</a></strong>: <code>app.py</code>, descubrimiento de instancias, WebSocket, UdsBridge, ShmReader, alarmas y grabación.</li>
-<li><strong><a href="frontend.html">Frontend</a></strong>: Módulos ES (<code>entry.mjs</code>, <code>app-legacy.mjs</code>), columnas, gráficos Plotly, estado y persistencia.</li>
-<li><strong><a href="protocols.html">Protocolos</a></strong>: Formato UDS (longitud + JSON), comandos, layout SHM, mensajes WebSocket.</li>
-<li><strong><a href="performance.html">Rendimiento</a></strong>: SHM/UDS, panel Perf, <code>/api/perf</code>, optimizaciones del sidecar de grabación.</li>
-<li><strong><a href="cpp-integration.html">Integración C++</a></strong>: Cómo enlazar <code>libvarmonitor</code>, VarMonitor, <code>write_shm_snapshot</code>, macros.</li>
-<li><strong><a href="troubleshooting.html">Resolución de problemas</a></strong>: WSL/semáforos, "no conecta", gráficos vacíos, etc.</li>
+<li><strong>Sidecar / grabación nativa</strong>: el ejecutable <code>varmon_sidecar</code> no está en la imagen por defecto; la grabación suele requerir el stack nativo o una imagen extendida que incluya el binario y dependencias.</li>
+<li><strong>Paquete opcional Pro (<code>varmonitor_plugins</code>)</strong>: la imagen mínima (<code>requirements-docker.txt</code>) no instala el wheel editable; rutas Pro (registros ARINC/MIL-1553, Parquet en servidor, Git UI, terminal, GDB) solo están disponibles si añades <code>pip install</code> de <code>tool_plugins/python</code> en una imagen derivada (véase <a href="backend.html">Backend (Python)</a>).</li>
+<li><strong>Puerto distinto de 8080</strong>: si el backend elige otro puerto, el <code>HEALTHCHECK</code> del <code>Dockerfile</code> puede fallar; ajusta o desactiva la capa <code>HEALTHCHECK</code> en una imagen derivada.</li>
 </ul>
-<h2 id="enlaces-rapidos">Enlaces rápidos</h2>
-<ul>
-<li><a href="https://github.com/LorenzoAdr/RealTimeMonitor">VarMonitor en GitHub</a> — código fuente, issues y contribuciones.</li>
-<li>El <a href="../README.md">README</a> del repositorio contiene un resumen y la estructura del proyecto.</li>
-<li>Para generar y ver la documentación localmente: <code>mkdocs serve</code> (ES) o <code>mkdocs serve -f mkdocs.en.yml</code> (EN). Con el monitor en marcha, tras <code>mkdocs build</code> y <code>mkdocs build -f mkdocs.en.yml</code>, las URLs son <strong><code>/docs/es/</code></strong> y <strong><code>/docs/en/</code></strong> (o use el botón <strong>Docs</strong> con selector de idioma).</li>
-</ul>
+<h2 id="imagen">Imagen</h2>
+<p><code>web_monitor/Dockerfile</code> instala solo <strong><code>requirements-docker.txt</code></strong> (FastAPI, uvicorn, websockets; no MkDocs ni PySide6 / <code>requirements-desktop.txt</code>). El navegador se abre en el <strong>host</strong> apuntando a la URL del servicio; <strong>no hace falta</strong> instalar Chromium/Firefox dentro del contenedor.</p>
+<h2 id="integracion-en-el-dockerfile-de-otro-proyecto">Integración en el Dockerfile de otro proyecto</h2>
+<p>Si este repositorio va como subcarpeta (submódulo o copia) dentro de un proyecto grande, para <strong>solo</strong> levantar el monitor web en la misma imagen:</p>
+<ol>
+<li><strong>Dependencias pip (recomendado si usas submódulo Git):</strong> no dependas de un <code>COPY</code> de ficheros dentro de <code>web_monitor/</code>: si alguien clona sin <code>--recurse-submodules</code>, esa ruta no existirá y fallará el build. Instala el runtime mínimo <strong>en el Dockerfile del proyecto padre</strong> con las mismas restricciones de versión (sin MkDocs, sin escritorio):</li>
+</ol>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">RUN</span><span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--no-cache-dir<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">    </span><span class="s2">&quot;fastapi&gt;=0.104.0&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="s2">&quot;uvicorn[standard]&gt;=0.24.0&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="s2">&quot;websockets&gt;=12.0&quot;</span>
+</code></pre></div>
+<p>Tras actualizar el submódulo del monitor, conviene revisar que estas líneas sigan alineadas con <code>web_monitor/requirements-docker.txt</code> en este repositorio (ahí está la referencia de versiones).</p>
+<p><strong>Alternativa</strong> (solo si el árbol <code>web_monitor/</code> está siempre presente en el contexto de build, p. ej. tras <code>git submodule update --init</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">COPY</span><span class="w"> </span>web_monitor/requirements-docker.txt<span class="w"> </span>/tmp/requirements-varmon.txt
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">RUN</span><span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--no-cache-dir<span class="w"> </span>-r<span class="w"> </span>/tmp/requirements-varmon.txt
+</code></pre></div>
+<ol>
+<li>
+<p><strong>No instales</strong> <code>requirements-desktop.txt</code> en la imagen salvo que tengas un entorno gráfico real (DISPLAY, etc.); la ventana embebida no es el camino habitual en Docker.</p>
+</li>
+<li>
+<p><strong>Paquetes apt extra:</strong> con <code>python:*-slim</code> suele bastar lo que ya trae <code>pip</code> para las wheels de FastAPI/uvicorn/websockets. Solo añade <code>build-essential</code> o <code>gcc</code> si alguna dependencia futura no tiene wheel y compila desde fuente.</p>
+</li>
+<li>
+<p><strong>Arranque:</strong> <code>WORKDIR</code> donde esté <code>app.py</code> y <code>CMD</code>/<code>ENTRYPOINT</code> equivalente a <code>python app.py</code> (o <code>uvicorn</code> si lo externalizas). <strong>Expone</strong> el puerto (<code>EXPOSE</code> / <code>-p</code>) y abre <code>http://localhost:&lt;puerto&gt;</code> desde el navegador del <strong>host</strong> (o la IP del host en red).</p>
+</li>
+<li>
+<p><strong>Live con C++ en el host (Linux):</strong> el mismo patrón que <a href="#modo-host-linux-live-con-el-c-del-mismo-equipo">Modo host</a>: <code>network_mode: host</code>, <code>ipc: host</code>, montaje de <code>/tmp</code> y <code>varmon.conf</code> alineado con el binario nativo.</p>
+</li>
+</ol>
 
 
 

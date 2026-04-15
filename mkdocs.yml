@@ -1,21 +1,15 @@
 site_name: VarMonitor
 site_description: Documentación del monitor de variables en tiempo real
 site_author: VarMonitor
+use_directory_urls: false
 
 theme:
   name: material
   language: es
   palette:
-    - scheme: default
-      primary: indigo
-      toggle:
-        icon: material/brightness-7
-        name: Cambiar a modo oscuro
     - scheme: slate
-      primary: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Cambiar a modo claro
+      primary: cyan
+      accent: cyan
   features:
     - search.suggest
     - search.highlight
@@ -41,6 +35,13 @@ nav:
 
 plugins:
   - search
+
+extra_css:
+  # Presets disponibles:
+  # - assets/astro-theme-soft.css
+  # - assets/astro-theme.css        (balanced, activo por defecto)
+  - assets/astro-theme-neon.css
+  # - assets/astro-theme.css
 
 markdown_extensions:
   - pymdownx.superfences:

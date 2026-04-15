@@ -13,8 +13,10 @@
       
       
       
+        <link rel="prev" href="index.html">
       
-        <link rel="next" href="architecture.html">
+      
+        <link rel="next" href="setup.html">
       
       
         
@@ -25,7 +27,7 @@
     
     
       
-        <title>VarMonitor</title>
+        <title>Architecture - VarMonitor</title>
       
     
     
@@ -78,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#varmonitor" class="md-skip">
+        <a href="#overall-architecture" class="md-skip">
           Skip to content
         </a>
       
@@ -114,7 +116,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Home
+              Architecture
             
           </span>
         </div>
@@ -221,6 +223,33 @@
       
   
   
+  
+  
+    <li class="md-nav__item">
+      <a href="index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
     
   
   
@@ -240,7 +269,7 @@
   <span class="md-ellipsis">
     
   
-    Home
+    Architecture
   
 
     
@@ -251,14 +280,14 @@
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <a href="index.html" class="md-nav__link md-nav__link--active">
+      <a href="architecture.html" class="md-nav__link md-nav__link--active">
         
   
   
   <span class="md-ellipsis">
     
   
-    Home
+    Architecture
   
 
     
@@ -284,10 +313,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#interface-screenshots" class="md-nav__link">
+  <a href="#component-diagram-and-data-flow" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Interface screenshots
+        Component diagram and data flow
       
     </span>
   </a>
@@ -295,10 +324,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#what-you-will-find-in-this-documentation" class="md-nav__link">
+  <a href="#web-backend-core-and-optional-extensions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What you will find in this documentation
+        Web backend: core and optional extensions
       
     </span>
   </a>
@@ -306,10 +335,82 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#quick-links" class="md-nav__link">
+  <a href="#instance-discovery" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Quick links
+        Instance discovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initial-connection-and-first-messages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initial connection and first messages
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Initial connection and first messages">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-browser-backend-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Browser → backend (WebSocket)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-backend-c-uds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Backend → C++ (UDS)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-shared-memory-segment-association" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Shared memory segment association
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-live-data-flow-shm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Live data flow (SHM)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-rates-visual-vs-monitoring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two rates: visual vs monitoring
       
     </span>
   </a>
@@ -320,33 +421,6 @@
   
 </nav>
       
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="architecture.html" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Architecture
-  
-
-    
-  </span>
-  
-  
-
-      </a>
     </li>
   
 
@@ -648,10 +722,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#interface-screenshots" class="md-nav__link">
+  <a href="#component-diagram-and-data-flow" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Interface screenshots
+        Component diagram and data flow
       
     </span>
   </a>
@@ -659,10 +733,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#what-you-will-find-in-this-documentation" class="md-nav__link">
+  <a href="#web-backend-core-and-optional-extensions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What you will find in this documentation
+        Web backend: core and optional extensions
       
     </span>
   </a>
@@ -670,10 +744,82 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#quick-links" class="md-nav__link">
+  <a href="#instance-discovery" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Quick links
+        Instance discovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initial-connection-and-first-messages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initial connection and first messages
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Initial connection and first messages">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-browser-backend-websocket" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Browser → backend (WebSocket)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-backend-c-uds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Backend → C++ (UDS)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-shared-memory-segment-association" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Shared memory segment association
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-live-data-flow-shm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Live data flow (SHM)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-rates-visual-vs-monitoring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two rates: visual vs monitoring
       
     </span>
   </a>
@@ -697,39 +843,98 @@
 
 
 
-<h1 id="varmonitor">VarMonitor</h1>
-<p>Real-time variable monitoring for C++20 applications. Communication between your C++ app and the web monitor uses <strong>Unix Domain Sockets (UDS)</strong> and <strong>shared memory (SHM)</strong> with POSIX semaphores.</p>
-<p><strong>Source code</strong>: <a href="https://github.com/LorenzoAdr/RealTimeMonitor">VarMonitor on GitHub</a>.</p>
-<h2 id="interface-screenshots">Interface screenshots</h2>
-<p>General layout in <strong>light</strong> and <strong>dark</strong> theme (header with Live/Analysis/Replay, monitor column, plots).</p>
-<p><img alt="VarMonitor UI — light theme" src="images/general_claro.png" width="100%" /></p>
-<p><img alt="VarMonitor UI — dark theme" src="images/general_oscuro2.png" width="100%" /></p>
+<h1 id="overall-architecture">Overall architecture</h1>
+<p>VarMonitor connects a C++ application to a web UI without TCP between C++ and Python: everything is local via <strong>UDS</strong> and <strong>SHM</strong>.</p>
+<h2 id="component-diagram-and-data-flow">Component diagram and data flow</h2>
+<pre class="mermaid"><code>flowchart TB
+    subgraph cpp [C++ application]
+        VarMonitor[VarMonitor variables]
+        ShmPub[shm_publisher]
+        UdsSrv[uds_server_loop]
+        VarMonitor --&gt; ShmPub
+        VarMonitor --&gt; UdsSrv
+    end
+    Shm["/dev/shm/varmon-user-pid\nsem: /varmon-..."]
+    Uds["/tmp/varmon-user-pid.sock\nJSON length-prefixed"]
+    ShmPub --&gt;|"sem_post each cycle"| Shm
+    UdsSrv --&gt; Uds
+
+    subgraph python [Python FastAPI backend]
+        ShmReader[ShmReader\nsem_timedwait → read snapshot → Queue]
+        UdsBridge[UdsBridge\nJSON commands]
+        WS[WebSocket / HTTP\nvars_update, alarms, record_finished]
+    end
+    Shm --&gt; ShmReader
+    Uds --&gt; UdsBridge
+    ShmReader --&gt; WS
+    UdsBridge --&gt; WS
+
+    subgraph frontend [Browser frontend]
+        UI[Plotly.js, UDS instance selector\nRel act, alarms, recording, toast]
+    end
+    WS --&gt; UI</code></pre>
 <ul>
-<li><strong>Analysis mode</strong> (offline TSV or Parquet recordings): <img alt="Analysis mode" src="images/analisis.png" width="100%" /></li>
-<li><strong>Replay mode</strong> (TSV reference + WebSocket): <img alt="Replay mode" src="images/replay.png" width="100%" /></li>
-<li><strong>Advanced plot tools</strong> (anomalies, segments, notes, PDF…): <img alt="Advanced options near plots" src="images/avanzado.png" width="100%" /></li>
-<li><strong>Perf panel</strong> (Python / C++ / sidecar phases): <img alt="Perf overlay" src="images/perf.png" width="100%" /></li>
-<li><strong>Help</strong> (in-app guide): <img alt="Help window" src="images/manual.png" width="100%" /></li>
-<li><strong>Log viewer</strong> (Python backend and optional C++ tail): <img alt="Log panel" src="images/log.png" width="100%" /></li>
+<li><strong>No TCP</strong> between C++ and Python: no network ports; UDS + SHM on the same machine.</li>
+<li><strong>web_port</strong> in <code>varmon.conf</code> is only the HTTP/WebSocket port for the Python web server.</li>
 </ul>
-<h2 id="what-you-will-find-in-this-documentation">What you will find in this documentation</h2>
+<h2 id="web-backend-core-and-optional-extensions">Web backend: core and optional extensions</h2>
+<p>The public repository ships the FastAPI server (<code>web_monitor/app.py</code>), the plugin registry (<code>plugin_registry</code>), and an empty stub when no extra package is installed. Protocol registry APIs (ARINC / MIL-STD-1553), Git UI, terminal, GDB, and the server-side Parquet implementation are loaded from the optional Python package under <code>tool_plugins/python</code> (e.g. <code>pip install -e tool_plugins/python</code>). Without it, the monitor still works for variables, TSV recordings, WebSocket, and the MIT core routes described in <a href="backend.html">Backend (Python)</a>. See the section «Optional <code>varmonitor_plugins</code> package (Pro)» in <code>backend.md</code>.</p>
+<h2 id="instance-discovery">Instance discovery</h2>
+<p>The network is not scanned by IP/port. C++ instances are discovered via <strong>Unix sockets</strong> under <code>/tmp</code>:</p>
+<ol>
+<li><strong>Name pattern</strong>: <code>/tmp/varmon-&lt;user&gt;-&lt;pid&gt;.sock</code></li>
+<li><code>user</code>: system user (<code>USER</code> env or <code>getpwuid(geteuid())</code> in C++).</li>
+<li>
+<p><code>pid</code>: C++ process PID.</p>
+</li>
+<li>
+<p><strong>How the Python backend lists them</strong> (<code>_list_uds_instances</code> in <code>app.py</code>):</p>
+</li>
+<li><code>glob.glob("/tmp/varmon-*.sock")</code> or, when filtered by user, <code>glob.glob("/tmp/varmon-&lt;user&gt;-*.sock")</code>.</li>
+<li>For each path, opens a temporary UDS connection (<code>UdsBridge(path, timeout=0.6)</code>), calls <code>get_server_info()</code> (<code>server_info</code> command), then closes.</li>
+<li>Only instances that respond correctly to <code>server_info</code> are kept.</li>
+<li><code>user</code> and <code>pid</code> are parsed from the filename (e.g. <code>varmon-juan-12345.sock</code> → user=<code>juan</code>, pid=<code>12345</code>).</li>
+<li>
+<p><strong>Order</strong>: sorted by <strong>socket mtime</strong> (newest first) so the default instance is the most recent.</p>
+</li>
+<li>
+<p><strong>REST API</strong>: <code>GET /api/uds_instances?user=&lt;optional&gt;</code> returns <code>{"instances": [{ "uds_path", "pid", "uptime_seconds", "user" }, ...]}</code>.</p>
+</li>
+<li>
+<p><strong>Frontend</strong>: the "Instance" selector fills a <code>&lt;select&gt;</code>; each option has <code>value="uds:&lt;uds_path&gt;"</code>. If the user does not choose, the backend uses the first instance in the list when accepting the WebSocket.</p>
+</li>
+</ol>
+<h2 id="initial-connection-and-first-messages">Initial connection and first messages</h2>
+<h3 id="1-browser-backend-websocket">1. Browser → backend (WebSocket)</h3>
 <ul>
-<li><strong><a href="architecture.html">Architecture</a></strong>: Components (C++, Python, frontend), data flow, visual vs internal rates.</li>
-<li><strong><a href="setup.html">Installation and configuration</a></strong>: Requirements, quick install, <code>varmon.conf</code>.</li>
-<li><strong><a href="launch.html">Launch scripts</a></strong>: <code>launch_demo</code>, <code>launch_web</code>, <code>launch_ui</code>; local backup under <code>scripts/_legacy_launch/</code>.</li>
-<li><strong><a href="docker.html">Docker</a></strong>: Web monitor container (bridge or host mode for C++ on the same Linux host).</li>
-<li><strong><a href="backend.html">Backend (Python)</a></strong>: <code>app.py</code>, instance discovery, WebSocket, UdsBridge, ShmReader, alarms and recording.</li>
-<li><strong><a href="frontend.html">Frontend</a></strong>: ES modules (<code>entry.mjs</code>, <code>app-legacy.mjs</code>), columns, Plotly charts, state and persistence.</li>
-<li><strong><a href="protocols.html">Protocols</a></strong>: UDS format (length + JSON), commands, SHM layout, WebSocket messages.</li>
-<li><strong><a href="performance.html">Performance</a></strong>: SHM/UDS, Perf panel, <code>/api/perf</code>, native recording sidecar optimizations.</li>
-<li><strong><a href="cpp-integration.html">C++ integration</a></strong>: Linking <code>libvarmonitor</code>, VarMonitor, <code>write_shm_snapshot</code>, macros.</li>
-<li><strong><a href="troubleshooting.html">Troubleshooting</a></strong>: WSL/semaphores, connection issues, empty charts, etc.</li>
+<li>The frontend opens <code>ws://&lt;host&gt;/ws</code> (optionally <code>?uds_path=&lt;path&gt;&amp;password=...</code>).</li>
+<li>If <code>uds_path</code> is omitted, the backend calls <code>_list_uds_instances(None)</code> and picks the first instance as <code>uds_path</code>.</li>
 </ul>
-<h2 id="quick-links">Quick links</h2>
+<h3 id="2-backend-c-uds">2. Backend → C++ (UDS)</h3>
 <ul>
-<li><a href="https://github.com/LorenzoAdr/RealTimeMonitor">VarMonitor on GitHub</a> — source, issues and contributions.</li>
-<li>The repository <a href="../README.md">README</a> has a project overview and layout.</li>
-<li>To build and view this documentation locally: <code>mkdocs serve -f mkdocs.en.yml</code> (from the repo root) and open <code>http://localhost:8000</code>.</li>
+<li>An <code>UdsBridge(uds_path, timeout=5.0)</code> is created and connects to the Unix socket.</li>
+<li><strong>First required message</strong>: <code>get_server_info()</code> → sends <code>server_info</code> over UDS and reads the response.</li>
+<li>Response includes: <code>uds_path</code>, <code>shm_name</code>, <code>sem_name</code>, <code>uptime_seconds</code>, <code>memory_rss_kb</code>, <code>cpu_percent</code> (when available).</li>
+</ul>
+<h3 id="3-shared-memory-segment-association">3. Shared memory segment association</h3>
+<ul>
+<li>There is <strong>one segment per C++ process</strong> (per VarMonitor instance): name <code>varmon-&lt;user&gt;-&lt;pid&gt;</code>.</li>
+<li>The backend, <strong>per WebSocket connection</strong>, picks <strong>one</strong> UDS instance. From that instance it gets <code>shm_name</code> and <code>sem_name</code> via <code>server_info</code>. Then:</li>
+<li>It creates <strong>one</strong> <code>ShmReader</code> (thread that reads that segment and semaphore and pushes snapshots to a queue).</li>
+<li>That WebSocket uses only that segment/semaphore for <code>vars_update</code>, alarms and recording.</li>
+<li>Multiple C++ processes → multiple UDS and SHM pairs; each WebSocket client is tied to one instance.</li>
+</ul>
+<h3 id="4-live-data-flow-shm">4. Live data flow (SHM)</h3>
+<ul>
+<li><strong>C++</strong>: each cycle (e.g. every 10 ms) calls <code>write_shm_snapshot()</code> → writes SHM and <code>sem_post(sem)</code>.</li>
+<li><strong>Python</strong>: the <code>ShmReader</code> thread does <code>sem_timedwait(sem, timeout)</code>; on signal, reads the snapshot, parses it and enqueues it. The WebSocket loop drains that queue, evaluates alarms, fills recording buffers and, at visual rate (Rel act), sends <code>vars_update</code> to the browser.</li>
+<li><strong><code>sidecar_cpp</code> recording</strong>: the publisher also <code>sem_post</code>s <strong><code>sem_sidecar_name</code></strong>; <strong><code>varmon_sidecar</code></strong> consumes that semaphore and writes the TSV in C++. Python keeps <strong><code>sem_name</code></strong>; SHM parsing for the UI during REC can be capped with <strong><code>shm_parse_hz_sidecar_recording</code></strong> (see <a href="performance.html">Performance</a>).</li>
+</ul>
+<h2 id="two-rates-visual-vs-monitoring">Two rates: visual vs monitoring</h2>
+<ul>
+<li><strong>Visual rate (low)</strong>: how often <code>vars_update</code> is sent to the browser. Controlled by <strong>Rel act</strong> (1 = every cycle, 5 by default). Only affects traffic to the browser.</li>
+<li><strong>Internal rate (high)</strong>: the backend processes <strong>every</strong> snapshot (SHM or UDS): evaluates alarms, fills recording buffers. No cycles are skipped for alarms or recording.</li>
+<li><strong>Rel act 1</strong>: maximum send rate to the browser when needed.</li>
 </ul>
 
 

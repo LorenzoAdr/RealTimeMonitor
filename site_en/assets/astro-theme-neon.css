@@ -1,0 +1,39 @@
+@import url("./astro-theme.css");
+
+:root {
+  --astro-cyan: #22d3ee;
+  --astro-cyan-soft: #a5f3fc;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-accent-fg-color: #22d3ee;
+  --md-typeset-a-color: #a5f3fc;
+  --md-typeset-mark-color: rgba(34, 211, 238, 0.24);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  box-shadow: 0 14px 36px rgba(34, 211, 238, 0.12), 0 10px 30px rgba(2, 6, 23, 0.55);
+}
+
+[data-md-color-scheme="slate"] .md-main__inner {
+  background:
+    radial-gradient(1200px 420px at 50% -90px, rgba(34, 211, 238, 0.14), transparent 56%),
+    radial-gradient(900px 260px at 50% -60px, rgba(103, 232, 249, 0.08), transparent 60%);
+}
+
+[data-md-color-scheme="slate"] .md-typeset h1,
+[data-md-color-scheme="slate"] .md-typeset h2 {
+  text-shadow: 0 0 22px rgba(34, 211, 238, 0.12);
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre,
+[data-md-color-scheme="slate"] .md-typeset code {
+  border-color: rgba(34, 211, 238, 0.28);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.08);
+}
+
+[data-md-color-scheme="slate"] .md-nav__link--active,
+[data-md-color-scheme="slate"] .md-tabs__link--active {
+  text-shadow: 0 0 10px rgba(34, 211, 238, 0.28);
+}

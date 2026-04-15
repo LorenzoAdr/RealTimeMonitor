@@ -3,8 +3,8 @@ import '../styles/global.css';
 
 const base = import.meta.env.BASE_URL;
 /** Enlace relativo: funciona en dev (/) y en Pages de proyecto (/RealTimeMonitor/). */
-const docsHrefEn = 'docs/en/';
-const docsHrefEs = 'docs/es/';
+const docsHrefEn = 'docs/en/index.html';
+const docsHrefEs = 'docs/es/index.html';
 
 /** Orden: posición i·60° desde las 12 en punto; radio --orbit-r en la sección ecosistema */
 const ecosystemRadialEn = [
@@ -943,7 +943,7 @@ const ecosystemRadialEs = [
 					});
 					var mk = document.querySelector('[data-mkdocs-link]');
 					if (mk) {
-						mk.href = isEn ? 'docs/en/' : 'docs/es/';
+						mk.href = isEn ? 'docs/en/index.html' : 'docs/es/index.html';
 						mk.setAttribute(
 							'aria-label',
 							isEn ? 'MkDocs technical documentation (English)' : 'Documentación técnica MkDocs (español)',
