@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+	<defs>
+		<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+			<stop offset="0%" stop-color="#020617" />
+			<stop offset="100%" stop-color="#0f172a" />
+		</linearGradient>
+		<radialGradient id="glow" cx="78%" cy="22%" r="45%">
+			<stop offset="0%" stop-color="#22d3ee" stop-opacity="0.22" />
+			<stop offset="55%" stop-color="#3b82f6" stop-opacity="0.06" />
+			<stop offset="100%" stop-color="#020617" stop-opacity="0" />
+		</radialGradient>
+		<linearGradient id="tx" x1="0%" y1="0%" x2="100%" y2="0%">
+			<stop offset="0%" stop-color="#22d3ee" />
+			<stop offset="100%" stop-color="#3b82f6" />
+		</linearGradient>
+	</defs>
+	<rect width="1200" height="630" fill="url(#bg)" />
+	<rect width="1200" height="630" fill="url(#glow)" />
+	<text x="72" y="280" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="92" fill="url(#tx)">
+		<tspan font-weight="700">VAR</tspan><tspan font-weight="200">MONITOR</tspan>
+	</text>
+	<circle cx="700" cy="248" r="14" fill="#22d3ee" opacity="0.95" />
+	<text x="72" y="380" font-family="ui-sans-serif, system-ui, sans-serif" font-size="34" font-weight="300" fill="#94a3b8" letter-spacing="0.02em">
+		High-performance real-time observability for C++ applications
+	</text>
+	<text x="72" y="450" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" font-weight="400" fill="#64748b">
+		Shared memory | Web UI | Zero-latency telemetry paths
+	</text>
+</svg>

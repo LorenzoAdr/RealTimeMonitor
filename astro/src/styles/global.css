@@ -1,1 +1,17 @@
 @import "tailwindcss";
+
+@keyframes logo-led-pulse {
+	0%,
+	100% {
+		opacity: 1;
+		box-shadow: 0 0 6px rgb(34 211 238 / 0.95), 0 0 10px rgb(59 130 246 / 0.35);
+	}
+	50% {
+		opacity: 0.35;
+		box-shadow: 0 0 2px rgb(34 211 238 / 0.4);
+	}
+}
+
+.logo-status-led {
+	animation: logo-led-pulse 1.4s ease-in-out infinite;
+}

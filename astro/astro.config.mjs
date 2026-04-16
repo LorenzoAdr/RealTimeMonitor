@@ -1,5 +1,6 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
+import sitemap from '@astrojs/sitemap';
 
 import tailwindcss from '@tailwindcss/vite';
 
@@ -12,6 +13,7 @@ const base = process.env.ASTRO_LOCAL_BASE === '1' ? '/' : '/RealTimeMonitor/';
 export default defineConfig({
   site: 'https://lorenzoadr.github.io',
   base,
+  integrations: [sitemap()],
   output: 'static',
   // Evita depender de un .css externo en /_astro/ (cachés, bloqueos, rutas raras)
   build: {
