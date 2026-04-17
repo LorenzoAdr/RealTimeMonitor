@@ -2,6 +2,10 @@
 """
 Interfaz gráfica ligera: selección de plugins (plugin-selection.json), build y empaquetado.
 
+Tras cada build_all.sh exitoso se reinstala la wheel recién generada en web_monitor/.venv
+(python -m pip install --force-reinstall --no-cache-dir) para que el backend local no use un
+varmonitor_plugins antiguo de site-packages.
+
 Opción «Generar entrega final»: si está desmarcada, solo se ejecuta build_all.sh (wheel + JS);
 no se llama a generate_webmonitor_version.sh (CMake, PyInstaller, carpeta web_monitor_version/).
 
@@ -29,6 +33,13 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
+
+# Distribuciones pip que pueden instalar el paquete importable `varmonitor_plugins`.
+# Si conviven (p. ej. varmonitor-pro + varmonitor-plugins), una puede dejar el árbol incompleto.
+_KNOWN_VARMON_PLUGIN_DIST_NAMES = (
+    "varmonitor-plugins",
+    "varmonitor-pro",
+)
 
 try:
     import tkinter as tk
@@ -144,12 +155,26 @@ def run_bash(script_rel: str, extra_env: dict[str, str] | None = None) -> tuple[
     return r.returncode, tail
 
 
-def _wheel_has_required_modules(whl: Path) -> tuple[bool, list[str]]:
+def _selection_wants_parquet() -> bool:
+    """Lee tool_plugins/plugin-selection.json (tras guardar desde la GUI)."""
+    try:
+        data = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
+        return bool(data.get("ids", {}).get("parquet"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+
+
+def _wheel_has_required_modules(whl: Path, *, require_parquet: bool = False) -> tuple[bool, list[str]]:
     required = {
         "varmonitor_plugins/gdb_debug.py",
         "varmonitor_plugins/terminal_api.py",
         "varmonitor_plugins/pro_http.py",
     }
+    if require_parquet:
+        required |= {
+            "varmonitor_plugins/recordings_parquet.py",
+            "varmonitor_plugins/parquet_recording.py",
+        }
     try:
         with zipfile.ZipFile(whl) as zf:
             names = set(zf.namelist())
@@ -159,18 +184,238 @@ def _wheel_has_required_modules(whl: Path) -> tuple[bool, list[str]]:
     return (len(missing) == 0), missing
 
 
-def _latest_valid_dist_wheel() -> tuple[Path | None, str]:
+def _latest_valid_dist_wheel(*, require_parquet: bool | None = None) -> tuple[Path | None, str]:
+    if require_parquet is None:
+        require_parquet = _selection_wants_parquet()
     dist = ROOT / "tool_plugins" / "dist"
     cands = sorted(dist.glob("varmonitor_plugins-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not cands:
         return None, f"No hay wheels en {dist}"
     for whl in cands:
-        ok, missing = _wheel_has_required_modules(whl)
+        ok, missing = _wheel_has_required_modules(whl, require_parquet=require_parquet)
         if ok:
             return whl, ""
         miss = ", ".join(missing)
         print(f"[gui_plugins_deploy] wheel descartada (incompleta): {whl} | faltan: {miss}", file=sys.stderr)
-    return None, "Todas las wheels de tool_plugins/dist están incompletas para backend Pro (gdb/terminal/pro_http)."
+    what = "gdb/terminal/pro_http"
+    if require_parquet:
+        what += " + Parquet (recordings_parquet, parquet_recording)"
+    return None, f"Todas las wheels de tool_plugins/dist están incompletas para backend Pro ({what})."
+
+
+def _site_packages_for_venv_python(py: Path) -> Path | None:
+    r = subprocess.run(
+        [str(py), "-c", "import site; print(site.getsitepackages()[0])"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        return None
+    line = (r.stdout or "").strip().splitlines()
+    return Path(line[0]) if line else None
+
+
+def _nuke_varmonitor_site_packages(site_pkgs: Path) -> list[str]:
+    """Borra árboles de paquetes y *.dist-info de varmonitor (pip uninstall a veces deja RECORD parcial)."""
+    removed: list[str] = []
+    for name in ("varmonitor_plugins", "varmonitor_pro"):
+        p = site_pkgs / name
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+            removed.append(str(p))
+    for pat in (
+        "varmonitor_plugins-*.dist-info",
+        "varmonitor_pro-*.dist-info",
+        "varmonitor_plugins-*.egg-info",
+    ):
+        for p in site_pkgs.glob(pat):
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                removed.append(str(p))
+    return removed
+
+
+def _pip_uninstall_varmonitor_distributions(py: Path) -> tuple[int, str]:
+    """Desinstala todas las distribuciones pip conocidas que aportan `varmonitor_plugins`.
+
+    Usa `python -m pip` (no el ejecutable `pip`) para que el destino sea siempre el
+    site-packages del intérprete indicado; con venv duplicados por ruta, `pip` suelto
+    puede instalar en otro prefijo y el import falla aunque la wheel sea correcta.
+    """
+    chunks: list[str] = []
+    for name in _KNOWN_VARMON_PLUGIN_DIST_NAMES:
+        r = subprocess.run(
+            [str(py), "-m", "pip", "uninstall", "-y", name],
+            capture_output=True,
+            text=True,
+        )
+        chunks.append((r.stdout or "") + (r.stderr or ""))
+    return 0, "\n".join(chunks)
+
+
+def _prepare_web_monitor_venv() -> tuple[int, str]:
+    """Crea web_monitor/.venv si no existe e instala web_monitor/requirements.txt."""
+    wm = ROOT / "web_monitor"
+    req = wm / "requirements.txt"
+    if not req.is_file():
+        return 1, f"[gui_plugins_deploy] No existe {req}\n"
+    venv_dir = wm / ".venv"
+    py = venv_dir / "bin" / "python"
+    if not py.is_file():
+        r = subprocess.run(
+            ["python3", "-m", "venv", str(venv_dir)],
+            cwd=str(wm),
+            capture_output=True,
+            text=True,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            return r.returncode, f"[gui_plugins_deploy] python3 -m venv falló:\n{out[-4000:]}\n"
+    pip = venv_dir / "bin" / "pip"
+    if not pip.is_file():
+        return 1, f"[gui_plugins_deploy] No hay pip en {pip}\n"
+    _, tail_pre = _pip_uninstall_varmonitor_distributions(py)
+    sp0 = _site_packages_for_venv_python(py)
+    nuked_pre: list[str] = []
+    if sp0:
+        nuked_pre = _nuke_varmonitor_site_packages(sp0)
+    r = subprocess.run(
+        [str(py), "-m", "pip", "install", "-q", "-U", "pip"],
+        cwd=str(wm),
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        out = (r.stdout or "") + (r.stderr or "")
+        return r.returncode, f"[gui_plugins_deploy] pip -U falló:\n{out[-4000:]}\n"
+    r = subprocess.run(
+        [str(py), "-m", "pip", "install", "-r", str(req)],
+        cwd=str(wm),
+        capture_output=True,
+        text=True,
+    )
+    out = (r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")
+    tail = "\n".join(out.splitlines()[-50:])
+    if r.returncode == 0:
+        _, tail_un = _pip_uninstall_varmonitor_distributions(py)
+        nuked_post: list[str] = []
+        if sp0:
+            nuked_post = _nuke_varmonitor_site_packages(sp0)
+        tail = (
+            "[gui_plugins_deploy] Antes de requirements: pip uninstall + borrado site-packages:\n"
+            + tail_pre
+            + ("\nBorrado: " + "; ".join(nuked_pre) if nuked_pre else "")
+            + "\n\n"
+            + tail
+            + "\n\n[gui_plugins_deploy] Tras requirements: pip uninstall + borrado:\n"
+            + tail_un
+            + ("\nBorrado: " + "; ".join(nuked_post) if nuked_post else "")
+        )
+    else:
+        tail = (
+            "[gui_plugins_deploy] Antes de requirements: pip uninstall + borrado site-packages:\n"
+            + tail_pre
+            + ("\nBorrado: " + "; ".join(nuked_pre) if nuked_pre else "")
+            + "\n\n"
+            + tail
+        )
+    return r.returncode, tail
+
+
+def _reinstall_fresh_wheel_into_web_venv(wheel: Path) -> tuple[int, str]:
+    """Instala la wheel indicada en web_monitor/.venv (desarrollo: python app.py).
+
+    Desinstala antes varmonitor-plugins / varmonitor-pro y borra restos incompletos para evitar
+    dos distribuciones compitiendo por el mismo nombre de paquete.
+    """
+    py = ROOT / "web_monitor" / ".venv" / "bin" / "python"
+    if not py.is_file():
+        return (
+            1,
+            "[gui_plugins_deploy] ERROR: hace falta web_monitor/.venv (python) para reinstalar la wheel generada.\n"
+            "  cd web_monitor && python3 -m venv .venv && source .venv/bin/activate && python -m pip install -r requirements.txt\n",
+        )
+    wheel_abs = wheel.resolve()
+    if not wheel_abs.is_file():
+        return 1, f"[gui_plugins_deploy] Wheel inexistente: {wheel_abs}\n"
+
+    _, tail_un = _pip_uninstall_varmonitor_distributions(py)
+    sp = _site_packages_for_venv_python(py)
+    nuked: list[str] = []
+    if sp:
+        nuked = _nuke_varmonitor_site_packages(sp)
+
+    r = subprocess.run(
+        [
+            str(py),
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            "--no-cache-dir",
+            str(wheel_abs),
+        ],
+        cwd=str(ROOT / "web_monitor"),
+        capture_output=True,
+        text=True,
+    )
+    out = (r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")
+    tail = "\n".join(out.splitlines()[-40:])
+    full = (
+        "[gui_plugins_deploy] pip uninstall (varmonitor-plugins + varmonitor-pro):\n"
+        + tail_un
+        + ("\n[gui_plugins_deploy] Borrado físico en site-packages:\n" + "\n".join(nuked) if nuked else "")
+        + "\n\n[gui_plugins_deploy] pip install wheel:\n"
+        + tail
+    )
+    if r.returncode != 0:
+        return r.returncode, full
+
+    r2 = subprocess.run(
+        [
+            str(py),
+            "-c",
+            "import importlib.util as u; "
+            "raise SystemExit(0 if u.find_spec('varmonitor_plugins.recordings_parquet') else 1)",
+        ],
+        cwd=str(ROOT / "web_monitor"),
+        capture_output=True,
+        text=True,
+    )
+    if r2.returncode != 0:
+        return (
+            1,
+            full
+            + "\n\n[gui_plugins_deploy] ERROR: con el Python del venv, recordings_parquet no importa."
+            + "\nSi la wheel contiene recordings_parquet (unzip -l … | grep recordings_parquet), "
+            "suele quedar un site-packages corrupto: el script ya desinstala pip y borra "
+            "varmonitor_plugins/, varmonitor_pro/ y *.dist-info antes de instalar."
+            + "\nCompruebe: unzip -l "
+            + str(wheel_abs)
+            + " | grep recordings_parquet\n",
+        )
+    return 0, full
+
+
+def _ensure_shipped_conf_parquet_enabled() -> None:
+    """Si la entrega incluye Parquet, activa parquet_recording_allowed en data/varmon.conf empaquetado."""
+    cfg_path = ROOT / "web_monitor_version" / "data" / "varmon.conf"
+    if not cfg_path.is_file() or not _selection_wants_parquet():
+        return
+    text = cfg_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    out: list[str] = []
+    replaced = False
+    for ln in lines:
+        if re.match(r"^\s*parquet_recording_allowed\s*=", ln):
+            out.append("parquet_recording_allowed = true")
+            replaced = True
+        else:
+            out.append(ln)
+    if not replaced:
+        out.append("parquet_recording_allowed = true")
+    cfg_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def _clean_release_workspace() -> None:
@@ -218,7 +463,11 @@ def _write_probe_config(base_cfg: Path, port: int) -> Path:
     return Path(tmp.name)
 
 
-def _probe_packaged_features(timeout_s: float = 20.0) -> tuple[bool, str]:
+def _probe_packaged_features(
+    timeout_s: float = 20.0,
+    *,
+    require_parquet: bool = False,
+) -> tuple[bool, str]:
     exe = ROOT / "web_monitor_version" / "bin" / "varmonitor-web"
     cfg = ROOT / "web_monitor_version" / "data" / "varmon.conf"
     if not exe.is_file():
@@ -261,7 +510,27 @@ def _probe_packaged_features(timeout_s: float = 20.0) -> tuple[bool, str]:
                             "Release generada sin plugin file_edit en runtime. "
                             f"features={sorted(str(x) for x in feats)}"
                         )
-                    return True, f"OK runtime plugins en puerto {port}: {sorted(str(x) for x in feats)}"
+                    msg = f"OK runtime plugins en puerto {port}: {sorted(str(x) for x in feats)}"
+                    if require_parquet:
+                        if "parquet" not in feats:
+                            return False, (
+                                "Parquet estaba marcado en la GUI pero el plugin «parquet» no está registrado. "
+                                f"features={sorted(str(x) for x in feats)}"
+                            )
+                        pc = data.get("parquet_capability")
+                        if not isinstance(pc, dict):
+                            return False, (
+                                "Binario sin campo parquet_capability en /api/plugins/features "
+                                "(reconstruya con backend actualizado)."
+                            )
+                        if not pc.get("pyarrow_ok"):
+                            return False, f"Parquet: pyarrow no disponible en el binario: {pc}"
+                        if not pc.get("recordings_parquet_module"):
+                            return False, f"Parquet: módulo recordings_parquet no cargado: {pc}"
+                        bl = pc.get("blockers") or []
+                        if isinstance(bl, list) and bl:
+                            msg += f" | parquet aviso blockers: {bl}"
+                    return True, msg
             except urllib.error.URLError as e:
                 last_err = str(e)
                 time.sleep(0.25)
@@ -414,6 +683,19 @@ class App:
             style="Sub.TLabel",
         ).pack(anchor=tk.W, pady=(4, 0))
 
+        self._var_prepare_venv = tk.BooleanVar(value=True)
+        self._cb_prepare_venv = ttk.Checkbutton(
+            pkg_hint,
+            text="Preparar entorno Python (crear web_monitor/.venv si falta + pip install -r requirements.txt)",
+            variable=self._var_prepare_venv,
+        )
+        self._cb_prepare_venv.pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(
+            pkg_hint,
+            text="Activado por defecto (más lento, entorno reproducible). Desmarcar si el venv ya está listo y vas con prisa.",
+            style="Sub.TLabel",
+        ).pack(anchor=tk.W, pady=(4, 0))
+
         nb = ttk.Notebook(outer)
         nb.pack(fill=tk.BOTH, expand=True, pady=(14, 10))
 
@@ -473,9 +755,7 @@ class App:
         self._status = ttk.Label(outer, text="Listo.", style="Status.TLabel")
         self._status.pack(anchor=tk.W)
 
-        self._progress = ttk.Progressbar(outer, mode="determinate", maximum=4, length=400)
-        self._progress_full_max = 4
-        self._progress_local_max = 3
+        self._progress = ttk.Progressbar(outer, mode="determinate", maximum=6, length=400)
         self._progress.pack(fill=tk.X, pady=8)
         self._progress["value"] = 0
 
@@ -526,6 +806,7 @@ class App:
         self._btn_save.configure(state=state)
         self._btn_deploy.configure(state=state)
         self._cb_full_package.configure(state=state)
+        self._cb_prepare_venv.configure(state=state)
 
     def _deploy(self) -> None:
         if self._busy:
@@ -533,7 +814,12 @@ class App:
         self._set_busy(True)
         self._progress["value"] = 0
         do_full = self._var_full_package.get()
-        self._progress["maximum"] = self._progress_full_max if do_full else self._progress_local_max
+        prepare_venv = self._var_prepare_venv.get()
+        # Pasos advance(): full sin venv=5, con venv=6; local sin venv=3, con venv=4
+        if do_full:
+            self._progress["maximum"] = 6 if prepare_venv else 5
+        else:
+            self._progress["maximum"] = 4 if prepare_venv else 3
         self._status.configure(text="Trabajando…")
         self._append_log("")
 
@@ -542,54 +828,90 @@ class App:
         def worker() -> None:
             try:
                 doc = self._selection_dict()
+                p = 0
+
+                def advance() -> None:
+                    nonlocal p
+                    p += 1
+                    self._queue.put(("progress", p))
+
                 if do_full_package:
                     self._queue.put(("status", "Limpiando artefactos previos (release desde cero)…"))
                     _clean_release_workspace()
-                self._queue.put(("progress", 1))
+
+                if prepare_venv:
+                    self._queue.put(("status", "Preparando web_monitor/.venv (venv + requirements.txt)…"))
+                    code_venv, tail_venv = _prepare_web_monitor_venv()
+                    self._queue.put(("log", tail_venv))
+                    if code_venv != 0:
+                        self._queue.put(
+                            ("error", ("Entorno web_monitor/.venv", f"Código {code_venv}\n\n{tail_venv}")),
+                        )
+                        return
+                    advance()
+
                 self._queue.put(("status", "Escribiendo plugin-selection.json…"))
                 SELECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
                 SELECTION_PATH.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+                advance()
 
-                self._queue.put(("progress", 2))
                 self._queue.put(("status", "Ejecutando build_all.sh (puede tardar varios minutos)…"))
                 code, tail = run_bash("tool_plugins/scripts/build_all.sh")
                 self._queue.put(("log", tail))
                 if code != 0:
                     self._queue.put(("error", ("build_all.sh", f"Código {code}\n\n{tail}")))
                     return
+                advance()
+
+                want_pq = bool(doc.get("ids", {}).get("parquet"))
+                wheel, err = _latest_valid_dist_wheel(require_parquet=want_pq)
+                if wheel is None:
+                    self._queue.put(("error", ("Wheel Pro inválida", err)))
+                    return
+
+                self._queue.put(
+                    ("status", f"Reinstalando wheel en web_monitor/.venv: {wheel.name}…"),
+                )
+                code_pip, tail_pip = _reinstall_fresh_wheel_into_web_venv(wheel)
+                self._queue.put(("log", tail_pip))
+                if code_pip != 0:
+                    self._queue.put(
+                        ("error", ("pip install wheel → web_monitor/.venv", f"Código {code_pip}\n\n{tail_pip}")),
+                    )
+                    return
+                advance()
 
                 if not do_full_package:
-                    self._queue.put(("progress", 3))
                     self._queue.put(("status", "Hecho (solo build de plugins; sin web_monitor_version)."))
                     self._queue.put(("done_local", None))
                     return
 
-                self._queue.put(("progress", 3))
                 self._queue.put(("status", "Ejecutando generate_webmonitor_version.sh (CMake + PyInstaller)…"))
-                wheel, err = _latest_valid_dist_wheel()
-                if wheel is None:
-                    self._queue.put(("error", ("Wheel Pro inválida", err)))
-                    return
                 env = {
                     "VARMON_PLUGINS_RELEASE": "1",
                     "VARMON_RELEASE_CLEAN": "1",
-                    # Forzar la wheel recién generada en tool_plugins/dist; no usar vendor ni cachés.
-                    "VARMON_PLUGINS_WHEEL": str(wheel),
+                    # Ruta absoluta a la wheel recién validada (misma que se acaba de instalar en .venv).
+                    "VARMON_PLUGINS_WHEEL": str(wheel.resolve()),
                 }
                 code, tail = run_bash("scripts/varmon/generate_webmonitor_version.sh", extra_env=env)
                 self._queue.put(("log", tail))
                 if code != 0:
                     self._queue.put(("error", ("generate_webmonitor_version.sh", f"Código {code}\n\n{tail}")))
                     return
+                advance()
+
+                if want_pq:
+                    self._queue.put(("status", "Activando parquet_recording_allowed en la entrega data/varmon.conf…"))
+                    _ensure_shipped_conf_parquet_enabled()
 
                 self._queue.put(("status", "Validando runtime empaquetado (/api/plugins/features)…"))
-                ok_probe, msg_probe = _probe_packaged_features()
+                ok_probe, msg_probe = _probe_packaged_features(require_parquet=want_pq)
                 if not ok_probe:
                     self._queue.put(("error", ("Validación post-build", msg_probe)))
                     return
                 self._queue.put(("log", msg_probe))
 
-                self._queue.put(("progress", 4))
+                advance()
                 self._queue.put(("status", "Hecho. Salida: web_monitor_version/{bin,data,include}/"))
                 self._queue.put(("done", None))
             except Exception as ex:  # noqa: BLE001
@@ -619,6 +941,7 @@ class App:
                         "Build (local)",
                         "Completado: wheel, bundle JS y sincronización a web_monitor/static/plugins/\n"
                         "(copy_to_mit al final de build_all.sh).\n"
+                        "La wheel generada se ha reinstalado en web_monitor/.venv (python -m pip --force-reinstall --no-cache-dir).\n"
                         "No se ha ejecutado generate_webmonitor_version (sin CMake/PyInstaller ni carpeta web_monitor_version).",
                     )
                 elif kind == "done":

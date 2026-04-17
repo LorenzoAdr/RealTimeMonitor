@@ -3743,9 +3743,14 @@ async def api_connection_info(request: Request):
 
 
 def _api_plugins_features_payload():
+    try:
+        pq = parquet_capability_status()
+    except Exception:
+        pq = {"error": "unavailable"}
     return {
         "features": plugin_registry.get_registered_plugin_ids(),
         "hooks": plugin_registry.get_hooks(),
+        "parquet_capability": pq,
     }
 
 

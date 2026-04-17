@@ -43,7 +43,11 @@ def parquet_capability_status() -> dict[str, Any]:
         blockers.append("pyarrow no importable (pip install pyarrow)")
     rp = get_recordings_parquet()
     if rp is None:
-        blockers.append("varmonitor_plugins.recordings_parquet no importable (paquete Pro incompleto)")
+        blockers.append(
+            "Falta varmonitor_plugins.recordings_parquet. Suele haber dos pip (varmonitor-plugins + varmonitor-pro). "
+            "pip uninstall -y varmonitor-plugins varmonitor-pro && pip install -e ../tool_plugins/python "
+            "o reinstale la wheel desde la GUI (build)."
+        )
     gate = parquet_recording_enabled()
     return {
         "gate_enabled": gate,

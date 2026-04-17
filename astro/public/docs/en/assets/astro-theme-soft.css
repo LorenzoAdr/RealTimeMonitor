@@ -1,0 +1,26 @@
+@import url("./astro-theme.css");
+
+:root {
+  --astro-cyan: #38bdf8;
+  --astro-cyan-soft: #7dd3fc;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-accent-fg-color: #38bdf8;
+  --md-typeset-a-color: #7dd3fc;
+  --md-typeset-mark-color: rgba(56, 189, 248, 0.14);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.42);
+}
+
+[data-md-color-scheme="slate"] .md-main__inner {
+  background: radial-gradient(1200px 340px at 50% -90px, rgba(56, 189, 248, 0.055), transparent 56%);
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre,
+[data-md-color-scheme="slate"] .md-typeset code {
+  border-color: rgba(56, 189, 248, 0.14);
+}
