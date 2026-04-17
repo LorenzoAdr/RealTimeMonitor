@@ -33,12 +33,18 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query, Fil
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from queue import Empty, Queue
 
 from uds_client import UdsBridge
-from shm_reader import ShmReader, open_shm_rw, write_shm_import_row
+from shm_reader import (
+    HEADER_V2_SIZE,
+    TABLE_ROW_V2,
+    ShmReader,
+    open_shm_rw,
+    write_shm_import_row,
+)
 import perf_agg
 
 from varmon_web.settings import (
@@ -54,6 +60,7 @@ from varmon_web.paths import (
     ARINC_SQLITE_PATH,
     AVIONICS_REGISTRY_PATH,
     BROWSER_ROOT,
+    GIT_WORKSPACE_ROOT,
     M1553_SQLITE_PATH,
     RECORDINGS_DIR,
     SESSIONS_DIR,
@@ -68,12 +75,16 @@ from varmon_web.log_buffer import (
 )
 from varmon_web.uds_discovery import _first_uds_bridge, _list_uds_instances
 from varmon_web.parquet_dispatch import get_recordings_parquet, is_parquet_path
-from varmon_web.parquet_gate import parquet_recording_enabled
+from varmon_web.parquet_gate import parquet_capability_status, parquet_recording_enabled
 import plugin_registry
 
 install_stdio_tee()
 
 plugin_registry.discover_plugins()
+# Plugins Pro (git_ui, etc.): varios nombres de entorno por compatibilidad con wheels antiguos.
+_gwr = str(GIT_WORKSPACE_ROOT.resolve())
+os.environ["VARMON_GIT_WORKSPACE_ROOT"] = _gwr
+os.environ["GIT_WORKSPACE_ROOT"] = _gwr
 
 
 def _rp():
@@ -192,6 +203,65 @@ def _fetch_instance_info_from_web_port(web_port: int, timeout: float = 0.4) -> d
         return None
 
 
+def _app_has_exact_http_route(app: FastAPI, path: str, method: str = "GET") -> bool:
+    m = method.upper()
+    for r in app.router.routes:
+        rp = getattr(r, "path", None)
+        rm = getattr(r, "methods", None)
+        if rp == path and isinstance(rm, (set, list, tuple)) and m in rm:
+            return True
+    return False
+
+
+def _register_optional_status_fallback_routes(app: FastAPI) -> None:
+    """Evita 404 en UIs Pro cuando faltan plugins: devolver 200 + available=false."""
+
+    if not _app_has_exact_http_route(app, "/api/terminal/status", "GET"):
+        @app.get("/api/terminal/status")
+        async def _terminal_status_fallback():
+            return {
+                "ok": True,
+                "available": False,
+                "enabled": False,
+                "reason": "terminal_plugin_not_available",
+                "source": "core_fallback",
+            }
+
+    if not _app_has_exact_http_route(app, "/api/gdb_debug/status", "GET"):
+        @app.get("/api/gdb_debug/status")
+        async def _gdb_status_fallback():
+            return {
+                "ok": True,
+                "available": False,
+                "enabled": bool(_config.get("gdb_debug_enabled", False)),
+                "running": False,
+                "reason": "gdb_debug_plugin_not_available",
+                "source": "core_fallback",
+            }
+
+    if not _app_has_exact_http_route(app, "/api/arinc_db/status", "GET"):
+        @app.get("/api/arinc_db/status")
+        async def _arinc_db_status_fallback():
+            return {
+                "ok": True,
+                "available": False,
+                "db_path": str(ARINC_SQLITE_PATH),
+                "reason": "pro_http_not_available",
+                "source": "core_fallback",
+            }
+
+    if not _app_has_exact_http_route(app, "/api/m1553_db/status", "GET"):
+        @app.get("/api/m1553_db/status")
+        async def _m1553_db_status_fallback():
+            return {
+                "ok": True,
+                "available": False,
+                "db_path": str(M1553_SQLITE_PATH),
+                "reason": "pro_http_not_available",
+                "source": "core_fallback",
+            }
+
+
 # Cache para suggested_web_port (puerto con menor uptime): (valor, timestamp)
 _suggested_web_port_cache: tuple[int | None, float] | None = None
 SUGGESTED_WEB_PORT_CACHE_TTL = 20.0  # segundos
@@ -249,6 +319,8 @@ async def _memtrace_log_loop():
 async def lifespan(app: FastAPI):
     if not hasattr(app.state, "startup_time"):
         app.state.startup_time = time.monotonic()
+    app.state.browser_root = str(BROWSER_ROOT.resolve())
+    app.state.git_workspace_root = str(GIT_WORKSPACE_ROOT.resolve())
     if not hasattr(app.state, "shm_cycle_ms"):
         app.state.shm_cycle_ms = None
     if not hasattr(app.state, "ws_monitored_counts"):
@@ -268,6 +340,38 @@ async def lifespan(app: FastAPI):
                 pass
 
     plugin_registry.fire_hook("register_api_routes", app)
+    # Rutas Git UI en OSS: si varmonitor_plugins no está instalado, el hook anterior no registra nada.
+    try:
+        from varmon_web.git_ui_api import register_git_ui_routes
+
+        register_git_ui_routes(app)
+    except Exception:
+        logging.getLogger("varmon.web").debug(
+            "git_ui: no se registraron rutas /api/git_ui (¿import fallido?)",
+            exc_info=True,
+        )
+    # ARINC / MIL-STD-1553 (pro_http): mismo motivo que git_ui si el hook del plugin no corre.
+    try:
+        from varmonitor_plugins.pro_http import register_pro_routes
+
+        register_pro_routes(app)
+    except Exception:
+        logging.getLogger("varmon.web").debug(
+            "pro_http: no se registraron rutas /api/arinc_db ni /api/m1553_db (¿pip install -e tool_plugins/python?)",
+            exc_info=True,
+        )
+    _register_optional_status_fallback_routes(app)
+    if bool(_config.get("parquet_recording_allowed")):
+        try:
+            st = parquet_capability_status()
+            if st.get("blockers"):
+                print(
+                    "[VarMonitor Web] Parquet solicitado en config pero no disponible: "
+                    + "; ".join(st["blockers"]),
+                    flush=True,
+                )
+        except Exception:
+            pass
     asyncio.create_task(_perf_cpp_gc_loop())
     asyncio.create_task(_watchdog_no_cpp())
     asyncio.create_task(_startup_uds_hint())
@@ -319,6 +423,24 @@ async def log_requests_middleware(request: Request, call_next):
         status = getattr(response, "status_code", 0)
         print(f"[Req] {request.method} {path_display} -> {status} ({elapsed_ms:.0f}ms)")
     return response
+
+
+_M1553_LEGACY_MODULE_PATH = "/static/plugins/m1553/m1553-registry.mjs"
+
+
+@app.middleware("http")
+async def static_m1553_legacy_module_middleware(request: Request, call_next):
+    """Antes del router: import ES legacy a esta URL no debe acabar en 404 JSON del mount /static."""
+    if request.method == "GET" and (request.url.path or "") == _M1553_LEGACY_MODULE_PATH:
+        oss = os.path.join(STATIC_DIR, "js", "modules", "m1553-registry.mjs")
+        if os.path.isfile(oss):
+            return FileResponse(oss, media_type="text/javascript; charset=utf-8")
+        return Response(
+            "// VarMonitor: falta static/js/modules/m1553-registry.mjs; actualice static/ o reempaquete.\n",
+            status_code=404,
+            media_type="text/javascript; charset=utf-8",
+        )
+    return await call_next(request)
 
 
 # Marcador en index.html para inyectar la etiqueta del cliente (módulo ES o bundle IIFE vía VARMON_WEB_APP_JS).
@@ -598,23 +720,29 @@ def _merge_shm_and_telemetry_vars_updates(
     app_state,
     sig_cache: dict[str, tuple],
     force_full: bool,
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict], bool, dict[str, tuple]]:
     """
     vars_update en delta para variables SHM (evita JSON gigante con miles de vars estables).
     La telemetría (pocas filas) se anexa siempre si está monitorizada.
+
+    Las firmas nuevas van en el tercer valor; aplicar sig_cache.update(...) solo tras send_json
+    exitoso. Si la caché se adelantara al envío y el cliente no recibiera el mensaje, el delta
+    dejaría de reenviar y la UI podría quedar desincronizada (p. ej. 0 con SHM en 50).
     """
     telemetry_rows = _telemetry_snapshot_rows(name_set, app_state)
     shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
     _prune_vars_update_sig_cache(sig_cache, shm_only)
     cand = [v for v in (latest_snapshot or []) if (v.get("name") or "") in shm_only]
 
+    sig_updates: dict[str, tuple] = {}
+
     if force_full or not sig_cache:
         for v in cand:
             n = v.get("name")
             if n:
-                sig_cache[n] = _var_update_signature(v)
+                sig_updates[n] = _var_update_signature(v)
         out = cand + telemetry_rows
-        return out, len(out) > 0
+        return out, len(out) > 0, sig_updates
 
     shm_out: list[dict] = []
     for v in cand:
@@ -625,9 +753,99 @@ def _merge_shm_and_telemetry_vars_updates(
         old = sig_cache.get(n)
         if old is None or not _var_signature_equal(old, sig):
             shm_out.append(v)
-            sig_cache[n] = sig
+            sig_updates[n] = sig
     out = shm_out + telemetry_rows
-    return out, len(out) > 0
+    return out, len(out) > 0, sig_updates
+
+
+_VARS_UPDATE_DEBUG_LAST: float = 0.0
+
+
+def _vars_update_debug_enabled() -> bool:
+    v = (os.environ.get("VARMON_DEBUG_VARS_UPDATE") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _vars_update_debug_names() -> set[str] | None:
+    """Si está vacío: lista resumida de monitorizadas; si no: solo estos nombres (coma-separados)."""
+    raw = (os.environ.get("VARMON_DEBUG_VARS_UPDATE_NAMES") or "").strip()
+    if not raw:
+        return None
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
+def _maybe_log_vars_update_debug(
+    label: str,
+    monitored_names: set[str],
+    latest_snapshot: list[dict] | None,
+    pack: list[dict],
+    sig_cache: dict[str, tuple],
+    sig_updates: dict[str, tuple],
+    force_full: bool,
+    should_send: bool,
+) -> None:
+    """Traza por consola del backend: snapshot vs pack vs firmas (antes de aplicar sig_updates).
+
+    Activar: VARMON_DEBUG_VARS_UPDATE=1
+    Opcional: VARMON_DEBUG_VARS_UPDATE_NAMES=var1,var2  (recomendado para no spamear)
+    Periódico: como mucho 1 vez/s salvo label=set_monitored (siempre).
+    """
+    global _VARS_UPDATE_DEBUG_LAST
+    if not _vars_update_debug_enabled() or not should_send:
+        return
+    now = time.monotonic()
+    if label != "set_monitored" and (now - _VARS_UPDATE_DEBUG_LAST) < 1.0:
+        return
+    _VARS_UPDATE_DEBUG_LAST = now
+    want = _vars_update_debug_names()
+    snap_by = {v.get("name"): v for v in (latest_snapshot or []) if v.get("name")}
+    pack_by = {v.get("name"): v for v in pack if v.get("name")}
+    names_from_env = want is not None
+    if want is None:
+        shm_mon = [n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET]
+        want = set(sorted(shm_mon)[:16])
+    else:
+        bad = want - monitored_names
+        if bad:
+            lines_pre = [
+                f"[VarMonitor VARMON_DEBUG_VARS_UPDATE {label}] AVISO: "
+                f"VARMON_DEBUG_VARS_UPDATE_NAMES tiene nombres que no están monitorizados: "
+                f"{sorted(bad)!r}. Use el nombre exacto (p. ej. 11control.pid.ki)."
+            ]
+            print("\n".join(lines_pre), flush=True)
+        want = want & monitored_names
+    lines = [
+        f"[VarMonitor VARMON_DEBUG_VARS_UPDATE {label}] force_full={force_full} "
+        f"pack_rows={len(pack)} snap_rows={len(snap_by)} monitored={len(monitored_names)} "
+        f"shm_monitored_non_telemetry={len([n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET])} "
+        f"names_from_env={names_from_env}"
+    ]
+    detail_n = 0
+    for n in sorted(want):
+        if n not in monitored_names or n in VARMON_TELEMETRY_NAME_SET:
+            continue
+        sv = snap_by.get(n)
+        pv = pack_by.get(n)
+        sig_old = sig_cache.get(n)
+        sig_new = sig_updates.get(n) if n in sig_updates else None
+        snap_val = sv.get("value") if isinstance(sv, dict) else None
+        pack_val = pv.get("value") if isinstance(pv, dict) else None
+        in_pack = n in pack_by
+        lines.append(
+            f"  {n!r}: snap_val={snap_val!r} pack_val={pack_val!r} in_pack={in_pack} "
+            f"sig_old={sig_old!r} sig_new={sig_new!r}"
+        )
+        detail_n += 1
+    if detail_n == 0:
+        if names_from_env:
+            lines.append(
+                "  (NAMES no produjo líneas: ¿solo telemetría, o nombres mal tras intersección con "
+                "monitorizadas? Omita VARMON_DEBUG_VARS_UPDATE_NAMES para listar auto las primeras 16 SHM)"
+            )
+        else:
+            sm = sorted([n for n in monitored_names if n not in VARMON_TELEMETRY_NAME_SET])[:24]
+            lines.append(f"  (sin filas de detalle; monitorizadas SHM muestra: {sm!r})")
+    print("\n".join(lines), flush=True)
 
 
 # Índice ligero de tiempos por grabación TSV: path -> [(time_s, byte_offset), ...]
@@ -892,6 +1110,12 @@ def _resolve_sidecar_perf_json_path(state) -> str | None:
     return None
 
 
+def _shm_import_debug_enabled() -> bool:
+    """Depuración IMPORT SHM: `VARMON_DEBUG_SHM_IMPORT=1` en el entorno del backend."""
+    v = (os.environ.get("VARMON_DEBUG_SHM_IMPORT") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _set_var_uds_and_shm_import(
     bridge: UdsBridge,
     name: str,
@@ -910,26 +1134,46 @@ def _set_var_uds_and_shm_import(
     ):
         try:
             idx = shm_subscription_order.index(name)
-            write_shm_import_row(shm_write_mmap, idx, name, var_type, value)
-        except (OSError, TypeError, ValueError):
-            pass
+            row_off = HEADER_V2_SIZE + idx * TABLE_ROW_V2
+            ok_mmap = write_shm_import_row(shm_write_mmap, idx, name, var_type, value)
+            if _shm_import_debug_enabled():
+                print(
+                    f"[VarMonitor SHM-IMPORT] set_var+mmap name={name!r} idx={idx} row_off={row_off} "
+                    f"value={value!r} type={var_type!r} mmap_ok={ok_mmap}",
+                    flush=True,
+                )
+        except (OSError, TypeError, ValueError) as e:
+            if _shm_import_debug_enabled():
+                print(f"[VarMonitor SHM-IMPORT] set_var mmap falló: {name!r} err={e!r}", flush=True)
+    elif (
+        _shm_import_debug_enabled()
+        and name
+        and shm_write_mmap is not None
+        and int(shm_layout_ver) >= 2
+        and shm_subscription_order
+        and name not in shm_subscription_order
+    ):
+        print(
+            f"[VarMonitor SHM-IMPORT] set_var sin fila IMPORT: {name!r} no está en subscription "
+            f"({len(shm_subscription_order)} nombres) — el IMPORT por mmap se omite",
+            flush=True,
+        )
     return bridge.set_var(name, value, var_type)
 
 
-def _shm_write_import_rows_batch(
-    rows: list[dict],
+def _set_vars_uds_and_shm_import_batch(
+    bridge: UdsBridge,
+    rows: list,
     shm_write_mmap,
     shm_subscription_order: list[str] | None,
     shm_layout_ver: int,
 ) -> bool:
-    """
-    Solo mmap: marca filas MODE_IMPORT_SNAPSHOT (write_shm_import_row).
-    El C++ aplica el valor en el siguiente ciclo (apply_shm_import_values) y resetea el flag a export.
-    No UDS set_var — la inserción es solo por SHM.
+    """Misma semántica que varios `set_var` seguidos: UDS + fila IMPORT en SHM si la variable está suscrita.
+
+    El batch antiguo solo escribía mmap y **omitía** nombres fuera de `shm_subscription_order`, lo que dejaba
+    un eje del joystick a 0 si solo una variable estaba en el slice SHM.
     """
     if not isinstance(rows, list) or not rows:
-        return False
-    if shm_write_mmap is None or int(shm_layout_ver) < 2 or not shm_subscription_order:
         return False
     ok_any = False
     for r in rows:
@@ -938,15 +1182,92 @@ def _shm_write_import_rows_batch(
         sn = (r.get("name") or "").strip()
         if not sn or sn in VARMON_TELEMETRY_NAME_SET:
             continue
-        if sn not in shm_subscription_order:
+        try:
+            if _set_var_uds_and_shm_import(
+                bridge,
+                sn,
+                r.get("value"),
+                r.get("var_type", "double"),
+                shm_write_mmap,
+                shm_subscription_order,
+                shm_layout_ver,
+            ):
+                ok_any = True
+        except Exception:
             continue
-        val = r.get("value")
-        vt = r.get("var_type", "double")
+    return ok_any
+
+
+def _set_vars_shm_import_only_batch(
+    _bridge: UdsBridge,
+    rows: list,
+    shm_write_mmap,
+    shm_subscription_order: list[str] | None,
+    shm_layout_ver: int,
+) -> bool:
+    """Solo escribe filas SHM v2 en MODE_IMPORT_SNAPSHOT (sin mensajes UDS `set_var`).
+
+    El lazo C++ aplica `apply_shm_import_values` en cada publicación; el cliente debe reenviar
+    IMPORT con la frecuencia necesaria (p. ej. mando) para que el valor no quede solo en export.
+    """
+    if not isinstance(rows, list) or not rows:
+        return False
+    if shm_write_mmap is None or int(shm_layout_ver) < 2 or not shm_subscription_order:
+        if _shm_import_debug_enabled():
+            print(
+                f"[VarMonitor SHM-IMPORT] shm_import_only batch omitido: mmap={shm_write_mmap is not None} "
+                f"layout_ver={shm_layout_ver} n_sub={len(shm_subscription_order or [])}",
+                flush=True,
+            )
+        return False
+    ok_any = False
+    idx_seen: dict[int, str] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sn = (r.get("name") or "").strip()
+        if not sn or sn in VARMON_TELEMETRY_NAME_SET:
+            continue
+        if sn not in shm_subscription_order:
+            if _shm_import_debug_enabled():
+                print(
+                    f"[VarMonitor SHM-IMPORT] shm_import_only SKIP {sn!r} — no está en subscription_order "
+                    f"(revisar monitorización / set_monitored)",
+                    flush=True,
+                )
+            continue
         try:
             idx = shm_subscription_order.index(sn)
-            if write_shm_import_row(shm_write_mmap, idx, sn, vt, val):
+            if _shm_import_debug_enabled():
+                prev = idx_seen.get(idx)
+                if prev is not None and prev != sn:
+                    print(
+                        f"[VarMonitor SHM-IMPORT] AVISO: índice SHM {idx} compartido por {prev!r} y {sn!r} "
+                        f"(misma fila; el último write gana)",
+                        flush=True,
+                    )
+                idx_seen[idx] = sn
+            row_off = HEADER_V2_SIZE + idx * TABLE_ROW_V2
+            vt = str(r.get("var_type", "double") or "double")
+            val = r.get("value")
+            ok_mmap = write_shm_import_row(
+                shm_write_mmap,
+                idx,
+                sn,
+                vt,
+                val,
+            )
+            if _shm_import_debug_enabled():
+                print(
+                    f"[VarMonitor SHM-IMPORT] shm_import_only name={sn!r} idx={idx} row_off={row_off} "
+                    f"value={val!r} type={vt!r} mmap_ok={ok_mmap}",
+                    flush=True,
+                )
+            if ok_mmap:
                 ok_any = True
-        except (OSError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError) as e:
+            if _shm_import_debug_enabled():
+                print(f"[VarMonitor SHM-IMPORT] shm_import_only excepción {sn!r}: {e!r}", flush=True)
             continue
     return ok_any
 
@@ -3408,6 +3729,15 @@ async def api_connection_info(request: Request):
     except Exception:
         out["current_user"] = None
     out["plugin_features"] = plugin_registry.get_registered_plugin_ids()
+    out["layout_paths"] = {
+        "browser_root": getattr(state, "browser_root", str(BROWSER_ROOT.resolve())),
+        "git_workspace_root": getattr(state, "git_workspace_root", str(GIT_WORKSPACE_ROOT.resolve())),
+        "config_path": CONFIG_ABS_PATH or "",
+    }
+    try:
+        out["parquet_capability"] = parquet_capability_status()
+    except Exception:
+        out["parquet_capability"] = {"error": "unavailable"}
     out = plugin_registry.fire_hook_chain("extend_connection_info", out, request)
     return out
 
@@ -3815,12 +4145,13 @@ async def websocket_endpoint(ws: WebSocket):
                             except Exception:
                                 pass
                     else:
-                        # Un drenado de cola puede traer N instantáneas (asyncio más lento que el hilo SHM):
-                        # solo la última del batch representa un ciclo coherente para TSV/Parquet (1 fila ≈ 1 sem_wait del lector).
+                        # Un drenado de cola puede traer N instantáneas (asyncio más lento que el hilo SHM).
+                        # TSV en Python: solo la última muestra del batch (1 fila ≈ 1 ciclo coherente).
+                        # Parquet en cola: cada muestra del batch (el writer puede deduplicar por seq si hace falta).
                         skip_recording_row = False
                         if not recording_sample_tail:
                             skip_recording_row = True
-                        elif shm_seq_val is not None:
+                        elif recording_write_queue is None and shm_seq_val is not None:
                             if recording_last_shm_seq is not None and shm_seq_val == recording_last_shm_seq:
                                 skip_recording_row = True
                         if _recording_trace_enabled() and recording and recording_sidecar_proc is None:
@@ -3961,7 +4292,12 @@ async def websocket_endpoint(ws: WebSocket):
                 if bi > 0 and (bi & 31) == 0:
                     await asyncio.sleep(0)
                 # Grabación Python (TSV/Parquet): una fila por drenado de cola — solo la última muestra del batch.
-                rec_tail = (not recording) or (recording_sidecar_proc is not None) or (bi == n_batch - 1)
+                rec_tail = (
+                    (not recording)
+                    or (recording_sidecar_proc is not None)
+                    or (recording_write_queue is not None)
+                    or (bi == n_batch - 1)
+                )
                 await _handle_snapshot_item(
                     snapshot_item,
                     recording_sample_tail=rec_tail,
@@ -4454,7 +4790,7 @@ async def websocket_endpoint(ws: WebSocket):
                         name_set = set(monitored_names)
                         _t_vu = time.perf_counter()
                         try:
-                            pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                            pack, should_send, sig_updates = _merge_shm_and_telemetry_vars_updates(
                                 latest_snapshot,
                                 name_set,
                                 ws.app.state,
@@ -4462,7 +4798,18 @@ async def websocket_endpoint(ws: WebSocket):
                                 force_full_vars_update,
                             )
                             if should_send:
+                                _maybe_log_vars_update_debug(
+                                    "shm_periodic",
+                                    name_set,
+                                    latest_snapshot,
+                                    pack,
+                                    vars_update_sig_cache,
+                                    sig_updates,
+                                    force_full_vars_update,
+                                    True,
+                                )
                                 await ws.send_json({"type": "vars_update", "data": pack})
+                                vars_update_sig_cache.update(sig_updates)
                                 last_vars_update_at = now
                                 if force_full_vars_update:
                                     shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
@@ -4541,7 +4888,7 @@ async def websocket_endpoint(ws: WebSocket):
                         name_set = set(monitored_names)
                         _t_vu = time.perf_counter()
                         try:
-                            pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                            pack, should_send, sig_updates = _merge_shm_and_telemetry_vars_updates(
                                 latest_snapshot,
                                 name_set,
                                 ws.app.state,
@@ -4549,7 +4896,18 @@ async def websocket_endpoint(ws: WebSocket):
                                 force_full_vars_update,
                             )
                             if should_send:
+                                _maybe_log_vars_update_debug(
+                                    "uds_periodic",
+                                    name_set,
+                                    latest_snapshot,
+                                    pack,
+                                    vars_update_sig_cache,
+                                    sig_updates,
+                                    force_full_vars_update,
+                                    True,
+                                )
                                 await ws.send_json({"type": "vars_update", "data": pack})
+                                vars_update_sig_cache.update(sig_updates)
                                 last_vars_update_at = now
                                 if force_full_vars_update:
                                     shm_only = {n for n in name_set if n not in VARMON_TELEMETRY_NAME_SET}
@@ -4633,14 +4991,17 @@ async def websocket_endpoint(ws: WebSocket):
                             by_name = {v["name"]: v for v in boot if v.get("name")}
                             for v in latest_snapshot or []:
                                 nn = v.get("name")
-                                if nn and nn in monitored_names and nn not in by_name:
+                                # SHM gana sobre get_var: IMPORT / mmap puede llevar el valor bueno mientras
+                                # UDS aún devuelve 0 o un snapshot viejo; antes solo fusionábamos si nn not in
+                                # by_name y la UI podía quedar desincronizada hasta F5.
+                                if nn and nn in monitored_names:
                                     by_name[nn] = v
                             latest_snapshot = [by_name[n] for n in sorted(monitored_names) if n in by_name]
                         try:
                             name_set = set(monitored_names)
                             _t_vu = time.perf_counter()
                             try:
-                                pack, should_send = _merge_shm_and_telemetry_vars_updates(
+                                pack, should_send, sig_updates = _merge_shm_and_telemetry_vars_updates(
                                     latest_snapshot,
                                     name_set,
                                     ws.app.state,
@@ -4648,7 +5009,18 @@ async def websocket_endpoint(ws: WebSocket):
                                     force_full_vars_update,
                                 )
                                 if should_send:
+                                    _maybe_log_vars_update_debug(
+                                        "set_monitored",
+                                        name_set,
+                                        latest_snapshot,
+                                        pack,
+                                        vars_update_sig_cache,
+                                        sig_updates,
+                                        force_full_vars_update,
+                                        True,
+                                    )
                                     await ws.send_json({"type": "vars_update", "data": pack})
+                                    vars_update_sig_cache.update(sig_updates)
                                     # No reiniciar el reloj de envíos periódicos: si last=now, el siguiente vars_update
                                     # queda bloqueado todo update_ratio×ciclo (p. ej. 10 s con ratio 100).
                                     _iv = update_ratio * cycle_interval_sec
@@ -4688,15 +5060,44 @@ async def websocket_endpoint(ws: WebSocket):
                     if not isinstance(rows, list) or len(rows) == 0:
                         await ws.send_json({"type": "set_result", "success": False, "batch": True})
                     else:
-                        ok = await asyncio.to_thread(
-                            _shm_write_import_rows_batch,
-                            rows,
-                            shm_write_mmap,
-                            shm_subscription_order,
-                            shm_layout_ver,
-                        )
+                        if cmd.get("shm_import_only"):
+                            ok = await asyncio.to_thread(
+                                _set_vars_shm_import_only_batch,
+                                bridge,
+                                rows,
+                                shm_write_mmap,
+                                shm_subscription_order,
+                                shm_layout_ver,
+                            )
+                        else:
+                            ok = await asyncio.to_thread(
+                                _set_vars_uds_and_shm_import_batch,
+                                bridge,
+                                rows,
+                                shm_write_mmap,
+                                shm_subscription_order,
+                                shm_layout_ver,
+                            )
                         await ws.send_json(
                             {"type": "set_result", "success": ok, "batch": True, "count": len(rows)}
+                        )
+                elif action == "debug_shm_subscription":
+                    if _shm_import_debug_enabled():
+                        await ws.send_json(
+                            {
+                                "type": "shm_subscription_debug",
+                                "layout_ver": shm_layout_ver,
+                                "subscription_count": len(shm_subscription_order),
+                                "order": list(shm_subscription_order),
+                                "mmap_rw_open": shm_write_mmap is not None,
+                            }
+                        )
+                    else:
+                        await ws.send_json(
+                            {
+                                "type": "error",
+                                "message": "debug_shm_subscription: definir VARMON_DEBUG_SHM_IMPORT=1 en el backend",
+                            }
                         )
                 elif action == "set_array_element":
                     sn = cmd.get("name") or ""
@@ -4846,8 +5247,11 @@ async def websocket_endpoint(ws: WebSocket):
                     recording_tmp_path = None
                     await _refresh_server_info()
                     rb = (_config.get("recording_backend") or "python").strip().lower()
+                    fmt_req = (recording_format or "tsv").strip().lower()
+                    # Parquet solo en el writer Python: con formato Parquet nunca sidecar (TSV).
                     want_sidecar = (
-                        rb == "sidecar_cpp"
+                        fmt_req != "parquet"
+                        and rb == "sidecar_cpp"
                         and shm_reader is not None
                         and shm_queue is not None
                         and info
@@ -5057,23 +5461,35 @@ async def websocket_endpoint(ws: WebSocket):
                             (recording_format or "tsv").strip().lower() == "parquet"
                         )
                         if want_parquet:
-                            recording_tmp_path = os.path.join(
-                                RECORDINGS_DIR,
-                                f".recording_{int(time.time() * 1000)}.parquet.part",
-                            )
-                            recording_write_queue = Queue()
-                            recording_rows_written_ref = [0]
-                            recording_writer_thread = threading.Thread(
-                                target=_recording_writer_thread,
-                                args=(
-                                    recording_write_queue,
-                                    recording_tmp_path,
-                                    recording_var_names,
-                                    recording_rows_written_ref,
-                                ),
-                                daemon=True,
-                            )
-                            recording_writer_thread.start()
+                            if _rp() is None:
+                                recording = False
+                                recording_tmp_path = None
+                                await ws.send_json({
+                                    "type": "error",
+                                    "message": (
+                                        "Parquet: falta el módulo Pro `varmonitor_plugins.recordings_parquet`. "
+                                        "Instale el paquete Pro (p. ej. `pip install -e tool_plugins/python`) "
+                                        "con la extra `[parquet]` si hace falta pyarrow."
+                                    ),
+                                })
+                            else:
+                                recording_tmp_path = os.path.join(
+                                    RECORDINGS_DIR,
+                                    f".recording_{int(time.time() * 1000)}.parquet.part",
+                                )
+                                recording_write_queue = Queue()
+                                recording_rows_written_ref = [0]
+                                recording_writer_thread = threading.Thread(
+                                    target=_recording_writer_thread,
+                                    args=(
+                                        recording_write_queue,
+                                        recording_tmp_path,
+                                        recording_var_names,
+                                        recording_rows_written_ref,
+                                    ),
+                                    daemon=True,
+                                )
+                                recording_writer_thread.start()
                     if recording:
                         try:
                             await ws.send_json({"type": "recording_progress", "bytes": 0, "samples": 0})
@@ -5318,12 +5734,50 @@ async def websocket_endpoint(ws: WebSocket):
         print(f"[VarMonitor Web] WebSocket cerrado (C++ {connection_label}){suffix}", flush=True)
 
 
+def _gui_deploy_debug_enabled() -> bool:
+    v = (os.environ.get("VARMON_DEBUG_GUI_DEPLOY") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _log_gui_client_deploy_brief() -> None:
+    """Una línea siempre; lista de ficheros bajo static/ si VARMON_DEBUG_GUI_DEPLOY=1."""
+    web_js = (os.environ.get("VARMON_WEB_APP_JS") or "").strip()
+    wj_disp = repr(web_js) if web_js else "<no → /static/js/entry.mjs>"
+    tag = html_main_script_tag()
+    print(
+        "[VarMonitor Web] Despliegue GUI: "
+        f"VARMON_WEB_APP_JS={wj_disp} | "
+        f"script_inyectado={tag[:140]}{'…' if len(tag) > 140 else ''}",
+        flush=True,
+    )
+    if not _gui_deploy_debug_enabled():
+        return
+    probes = [
+        "js/entry.mjs",
+        "js/app-legacy.mjs",
+        "dist/app.bundle.min.js",
+        "plugins/build/plugins-loader.js",
+        "plugins/plugins-loader.mjs",
+        "plugins/m1553/m1553-registry.mjs",
+        "js/modules/m1553-registry.mjs",
+    ]
+    print(f"[VarMonitor Web] Despliegue GUI (VARMON_DEBUG_GUI_DEPLOY): STATIC_DIR={STATIC_DIR}", flush=True)
+    for rel in probes:
+        p = os.path.join(STATIC_DIR, rel)
+        st = "OK" if os.path.isfile(p) else "FALTA"
+        print(f"[VarMonitor Web]   static/{rel}: {st}", flush=True)
+
+
+_log_gui_client_deploy_brief()
+
+
 class StaticFilesWithMjsMime(StaticFiles):
-    """Evita application/octet-stream en .mjs (Chromium rechaza <script type="module">)."""
+    """Evita application/octet-stream en .mjs y en .js cargados vía import() (chunks ES bajo static/plugins/build/)."""
 
     def file_response(self, full_path, stat_result, scope, status_code=200):
         response = super().file_response(full_path, stat_result, scope, status_code=status_code)
-        if str(full_path).endswith(".mjs"):
+        fp = str(full_path)
+        if fp.endswith((".mjs", ".js")):
             ct = (response.headers.get("content-type") or "").lower()
             if "javascript" not in ct and "ecmascript" not in ct:
                 response.headers["content-type"] = "text/javascript; charset=utf-8"
@@ -5430,6 +5884,14 @@ if __name__ == "__main__":
     print(f"  http://localhost:{port}         (local)")
     if bind_host:
         print(f"  Escuchando solo en {bind_host} (bind_host)")
+        if bind_host not in ("127.0.0.1", "::1", "localhost"):
+            print(
+                "[VarMonitor Web] AVISO: con bind_host en una IP de red, abra la UI en "
+                f"http://{bind_host}:{port}/ (no use 127.0.0.1 salvo que esa IP sea la de escucha): "
+                "en 127.0.0.1 puede estar otro servicio en el mismo puerto y el navegador fallará "
+                "cargando módulos ES (.mjs / chunks .js) o verá application/json.",
+                flush=True,
+            )
     elif lan_ip:
         print(f"  http://{lan_ip}:{port}    (red)")
     uvicorn.run(app, host=listen_host, port=port)

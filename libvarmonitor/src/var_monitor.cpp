@@ -7,6 +7,7 @@
 #include <string>
 #include <variant>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 
 namespace varmon {
@@ -90,6 +91,34 @@ static double scalar_double_from_var_value(const VarValue& v) {
                 return 0.0;
         },
         v);
+}
+
+/** `VARMON_DEBUG_IMPORT=1` y opcionalmente `VARMON_DEBUG_IMPORT_NAMES=a,b` (coincidencia exacta por nombre). */
+static bool import_debug_env_enabled() {
+    const char* v = std::getenv("VARMON_DEBUG_IMPORT");
+    return v && v[0] != '\0' && !(v[0] == '0' && v[1] == '\0');
+}
+
+static bool import_debug_name_matches(const std::string& name) {
+    const char* list = std::getenv("VARMON_DEBUG_IMPORT_NAMES");
+    if (!list || !*list)
+        return true;
+    std::string s(list);
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t comma = s.find(',', pos);
+        std::string token = (comma == std::string::npos) ? s.substr(pos) : s.substr(pos, comma - pos);
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
+            token.erase(0, 1);
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
+            token.pop_back();
+        if (token == name)
+            return true;
+        if (comma == std::string::npos)
+            break;
+        pos = comma + 1;
+    }
+    return false;
 }
 
 } // namespace
@@ -522,6 +551,13 @@ void VarMonitor::apply_shm_import_values(const std::vector<std::pair<std::string
             continue;
         ent.setter(*coerced);
         mark_dirty(name);
+        if (import_debug_env_enabled() && import_debug_name_matches(name) && ent.type != VarType::Array &&
+            ent.type != VarType::String) {
+            const double applied = scalar_double_from_var_value(*coerced);
+            const double readback = scalar_double_from_var_value(ent.getter());
+            std::cerr << "[VarMonitor IMPORT apply] name=" << name << " applied=" << applied << " readback=" << readback
+                      << "\n";
+        }
     }
 }
 

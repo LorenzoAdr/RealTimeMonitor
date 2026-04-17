@@ -12,10 +12,12 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <cerrno>
+#include <cstdlib>
 #include <dirent.h>
 #include <atomic>
 #include <csignal>
 #include <mutex>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
@@ -114,6 +116,50 @@ static void resize_last_pub_row_cache() {
 
 static void invalidate_last_pub_row_cache() {
     std::fill(g_last_pub_valid.begin(), g_last_pub_valid.end(), 0);
+}
+
+/** Misma semántica que en var_monitor.cpp (solo depuración). */
+static bool import_debug_env_enabled() {
+    const char* v = std::getenv("VARMON_DEBUG_IMPORT");
+    return v && v[0] != '\0' && !(v[0] == '0' && v[1] == '\0');
+}
+
+static bool import_debug_name_matches(const std::string& name) {
+    const char* list = std::getenv("VARMON_DEBUG_IMPORT_NAMES");
+    if (!list || !*list)
+        return true;
+    std::string s(list);
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t comma = s.find(',', pos);
+        std::string token = (comma == std::string::npos) ? s.substr(pos) : s.substr(pos, comma - pos);
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
+            token.erase(0, 1);
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
+            token.pop_back();
+        if (token == name)
+            return true;
+        if (comma == std::string::npos)
+            break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+static double var_value_to_double(const VarValue& v) {
+    return std::visit(
+        [](const auto& arg) -> double {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, double>)
+                return static_cast<double>(arg);
+            else if constexpr (std::is_same_v<T, int32_t>)
+                return static_cast<double>(arg);
+            else if constexpr (std::is_same_v<T, bool>)
+                return arg ? 1.0 : 0.0;
+            else
+                return std::numeric_limits<double>::quiet_NaN();
+        },
+        v);
 }
 
 static std::string get_username() {
@@ -645,6 +691,19 @@ void write_snapshot(VarMonitor* mon) {
         uint32_t ph = g_slice_phase.load(std::memory_order_relaxed) % n_slice;
         ph = (ph + 1u) % n_slice;
         g_slice_phase.store(ph, std::memory_order_relaxed);
+    }
+
+    if (import_debug_env_enabled() && mon && !import_items.empty()) {
+        for (const auto& [name, vv] : import_items) {
+            if (!import_debug_name_matches(name))
+                continue;
+            std::optional<VarMonitor::VarSnapshot> snap = mon->get_var(name);
+            if (!snap.has_value())
+                continue;
+            const double g = var_value_to_double(snap->value);
+            std::cerr << "[VarMonitor IMPORT end_shm_publish] pub_c=" << pub_c << " name=" << name << " getter=" << g
+                      << "\n";
+        }
     }
 
     post_shm_readers();

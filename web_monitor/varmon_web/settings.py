@@ -81,6 +81,9 @@ DEFAULTS = {
     "terminal_scripts_dir": "",
     "terminal_timeout_sec": 30,
     "terminal_max_output_bytes": 262144,
+    # Raíz del explorador de archivos / edición (vacío = repo o directorio del ejecutable empaquetado).
+    # En despliegue «package» use una ruta absoluta, p. ej. browser_root = /opt/mi_proyecto
+    "browser_root": "",
     # Raíz para el modo Git (repos anidados). Vacío = misma que la raíz del explorador de proyecto.
     "git_workspace_root": "",
     # Tope de entradas en `git log` del modo Git (evita miles de commits). Máximo absoluto en código: 500.
@@ -101,12 +104,25 @@ def load_config() -> dict:
     cfg = dict(DEFAULTS)
     path = (os.environ.get("VARMON_CONFIG") or "").strip()
     if not path:
+        candidates: list[str] = []
+        # PyInstaller onefile: entrega típica INSTALL_DIR/bin/ejecutable + INSTALL_DIR/data/varmon.conf
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            candidates.extend(
+                [
+                    os.path.join(exe_dir, "varmon.conf"),
+                    os.path.abspath(os.path.join(exe_dir, "..", "data", "varmon.conf")),
+                ]
+            )
         _repo = os.path.abspath(os.path.join(_WM_ROOT, ".."))
-        for candidate in (
-            "varmon.conf",
-            os.path.join(_repo, "data", "varmon.conf"),
-            os.path.join(_repo, "varmon.conf"),
-        ):
+        candidates.extend(
+            [
+                "varmon.conf",
+                os.path.join(_repo, "data", "varmon.conf"),
+                os.path.join(_repo, "varmon.conf"),
+            ]
+        )
+        for candidate in candidates:
             abs_candidate = os.path.abspath(candidate)
             if os.path.isfile(abs_candidate):
                 path = abs_candidate
@@ -164,6 +180,8 @@ def load_config() -> dict:
                 elif key == "terminal_allowed_commands":
                     cfg[key] = val
                 elif key == "terminal_scripts_dir":
+                    cfg[key] = val
+                elif key == "browser_root":
                     cfg[key] = val
                 elif key == "git_workspace_root":
                     cfg[key] = val

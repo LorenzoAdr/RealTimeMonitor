@@ -16,9 +16,17 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
+import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import time
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +142,147 @@ def run_bash(script_rel: str, extra_env: dict[str, str] | None = None) -> tuple[
     out = (r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")
     tail = "\n".join(out.splitlines()[-50:])
     return r.returncode, tail
+
+
+def _wheel_has_required_modules(whl: Path) -> tuple[bool, list[str]]:
+    required = {
+        "varmonitor_plugins/gdb_debug.py",
+        "varmonitor_plugins/terminal_api.py",
+        "varmonitor_plugins/pro_http.py",
+    }
+    try:
+        with zipfile.ZipFile(whl) as zf:
+            names = set(zf.namelist())
+    except Exception:
+        return False, ["wheel_unreadable"]
+    missing = sorted(m for m in required if m not in names)
+    return (len(missing) == 0), missing
+
+
+def _latest_valid_dist_wheel() -> tuple[Path | None, str]:
+    dist = ROOT / "tool_plugins" / "dist"
+    cands = sorted(dist.glob("varmonitor_plugins-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not cands:
+        return None, f"No hay wheels en {dist}"
+    for whl in cands:
+        ok, missing = _wheel_has_required_modules(whl)
+        if ok:
+            return whl, ""
+        miss = ", ".join(missing)
+        print(f"[gui_plugins_deploy] wheel descartada (incompleta): {whl} | faltan: {miss}", file=sys.stderr)
+    return None, "Todas las wheels de tool_plugins/dist están incompletas para backend Pro (gdb/terminal/pro_http)."
+
+
+def _clean_release_workspace() -> None:
+    """Limpieza agresiva para release desde cero (sin reutilizar artefactos previos)."""
+    targets = [
+        ROOT / "web_monitor" / ".venv-build",
+        ROOT / "web_monitor" / "dist",
+        ROOT / "web_monitor" / "build",
+        ROOT / "web_monitor_version",
+        ROOT / "tool_plugins" / "dist",
+        ROOT / "tool_plugins" / "python" / ".venv-build",
+        ROOT / "tool_plugins" / "python" / "dist",
+        ROOT / "tool_plugins" / "js" / "dist",
+    ]
+    for p in targets:
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def _pick_free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return int(s.getsockname()[1])
+
+
+def _write_probe_config(base_cfg: Path, port: int) -> Path:
+    text = base_cfg.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    replaced = False
+    out_lines: list[str] = []
+    for ln in lines:
+        if re.match(r"^\s*web_port\s*=", ln):
+            out_lines.append(f"web_port = {port}")
+            replaced = True
+        else:
+            out_lines.append(ln)
+    if not replaced:
+        out_lines.append(f"web_port = {port}")
+    tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".conf", encoding="utf-8")
+    try:
+        tmp.write("\n".join(out_lines) + "\n")
+    finally:
+        tmp.close()
+    return Path(tmp.name)
+
+
+def _probe_packaged_features(timeout_s: float = 20.0) -> tuple[bool, str]:
+    exe = ROOT / "web_monitor_version" / "bin" / "varmonitor-web"
+    cfg = ROOT / "web_monitor_version" / "data" / "varmon.conf"
+    if not exe.is_file():
+        return False, f"No existe binario empaquetado: {exe}"
+    if not cfg.is_file():
+        return False, f"No existe config empaquetada: {cfg}"
+
+    port = _pick_free_local_port()
+    probe_cfg = _write_probe_config(cfg, port)
+    env = os.environ.copy()
+    env["VARMON_CONFIG"] = str(probe_cfg)
+    proc: subprocess.Popen[str] | None = None
+    url = f"http://127.0.0.1:{port}/api/plugins/features"
+    deadline = time.time() + timeout_s
+    last_err = "sin respuesta"
+    try:
+        proc = subprocess.Popen(
+            [str(exe)],
+            cwd=str(ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+        )
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return False, f"El binario terminó prematuramente durante la validación (código {proc.returncode})."
+            try:
+                with urllib.request.urlopen(url, timeout=1.5) as resp:
+                    if resp.status != 200:
+                        last_err = f"HTTP {resp.status}"
+                        time.sleep(0.2)
+                        continue
+                    data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+                    feats = data.get("features")
+                    if not isinstance(feats, list):
+                        return False, "Respuesta inválida en /api/plugins/features (sin lista features)."
+                    if "file_edit" not in feats:
+                        return False, (
+                            "Release generada sin plugin file_edit en runtime. "
+                            f"features={sorted(str(x) for x in feats)}"
+                        )
+                    return True, f"OK runtime plugins en puerto {port}: {sorted(str(x) for x in feats)}"
+            except urllib.error.URLError as e:
+                last_err = str(e)
+                time.sleep(0.25)
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                time.sleep(0.25)
+        return False, f"Timeout validando /api/plugins/features en {url}: {last_err}"
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        try:
+            probe_cfg.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _setup_ttk_style() -> ttk.Style:
@@ -393,6 +542,9 @@ class App:
         def worker() -> None:
             try:
                 doc = self._selection_dict()
+                if do_full_package:
+                    self._queue.put(("status", "Limpiando artefactos previos (release desde cero)…"))
+                    _clean_release_workspace()
                 self._queue.put(("progress", 1))
                 self._queue.put(("status", "Escribiendo plugin-selection.json…"))
                 SELECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -414,12 +566,28 @@ class App:
 
                 self._queue.put(("progress", 3))
                 self._queue.put(("status", "Ejecutando generate_webmonitor_version.sh (CMake + PyInstaller)…"))
-                env = {"VARMON_PLUGINS_RELEASE": "1"}
+                wheel, err = _latest_valid_dist_wheel()
+                if wheel is None:
+                    self._queue.put(("error", ("Wheel Pro inválida", err)))
+                    return
+                env = {
+                    "VARMON_PLUGINS_RELEASE": "1",
+                    "VARMON_RELEASE_CLEAN": "1",
+                    # Forzar la wheel recién generada en tool_plugins/dist; no usar vendor ni cachés.
+                    "VARMON_PLUGINS_WHEEL": str(wheel),
+                }
                 code, tail = run_bash("scripts/varmon/generate_webmonitor_version.sh", extra_env=env)
                 self._queue.put(("log", tail))
                 if code != 0:
                     self._queue.put(("error", ("generate_webmonitor_version.sh", f"Código {code}\n\n{tail}")))
                     return
+
+                self._queue.put(("status", "Validando runtime empaquetado (/api/plugins/features)…"))
+                ok_probe, msg_probe = _probe_packaged_features()
+                if not ok_probe:
+                    self._queue.put(("error", ("Validación post-build", msg_probe)))
+                    return
+                self._queue.put(("log", msg_probe))
 
                 self._queue.put(("progress", 4))
                 self._queue.put(("status", "Hecho. Salida: web_monitor_version/{bin,data,include}/"))

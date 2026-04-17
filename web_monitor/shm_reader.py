@@ -95,6 +95,10 @@ MODE_EXPORT_SNAPSHOT = 0
 MODE_IMPORT_SNAPSHOT = 1
 MODE_EXPORT_RING = 2
 
+# El backend escribe IMPORT desde el hilo WS mientras ShmReader parsea snapshots en otro hilo.
+# Este lock evita leer filas a medio escribir dentro del mismo proceso Python.
+_SHM_RW_LOCK = threading.Lock()
+
 TYPE_STR = ["double", "int32", "bool", "string", "array"]
 
 
@@ -145,22 +149,29 @@ def write_shm_import_row(
     if buf.size() < HEADER_V2_SIZE + (row_index + 1) * row_stride:
         return False
     off = table_off + row_index * row_stride
-    row = bytearray(row_stride)
-    nb = name.encode("utf-8", errors="replace")[:NAME_MAX_LEN]
-    row[0 : len(nb)] = nb
-    row[ROW_MODE_OFF] = MODE_IMPORT_SNAPSHOT
-    tb = _type_str_to_byte(var_type)
-    row[ROW_TYPE_OFF] = tb
-    if tb == 2:
-        dv = 1.0 if value else 0.0
-    elif tb == 1:
-        dv = float(int(value))
-    else:
-        dv = float(value)
-    struct.pack_into("<d", row, ROW_VALUE_OFF, dv)
-    buf.seek(off)
-    buf.write(bytes(row))
-    buf.flush()
+    with _SHM_RW_LOCK:
+        # Preservar metadatos de fila (mirror, índices ring...) y solo actualizar campos IMPORT.
+        buf.seek(off)
+        raw_prev = buf.read(row_stride)
+        row = bytearray(raw_prev if len(raw_prev) == row_stride else (b"\x00" * row_stride))
+        row[0:NAME_MAX_LEN] = b"\x00" * NAME_MAX_LEN
+        nb = name.encode("utf-8", errors="replace")[:NAME_MAX_LEN]
+        row[0 : len(nb)] = nb
+        row[ROW_MODE_OFF] = MODE_IMPORT_SNAPSHOT
+        tb = _type_str_to_byte(var_type)
+        row[ROW_TYPE_OFF] = tb
+        if tb == 2:
+            dv = 1.0 if value else 0.0
+        elif tb == 1:
+            dv = float(int(value))
+        else:
+            dv = float(value)
+        struct.pack_into("<d", row, ROW_VALUE_OFF, dv)
+        # Fuerza al parser incremental a releer la fila tras IMPORT.
+        struct.pack_into("<I", row, ROW_PUB_SEQ_OFF, 0)
+        buf.seek(off)
+        buf.write(bytes(row))
+        buf.flush()
     return True
 
 
@@ -313,82 +324,83 @@ def read_snapshot(
 
     Devuelve {"timestamp", "data", "seq", "shm_version"?} o None si magic inválido.
     """
-    cap = max_vars if max_vars is not None else MAX_VARS
-    if buf.size() < HEADER_V1_SIZE:
-        return None
-    buf.seek(0)
-    need = min(HEADER_V2_SIZE, buf.size())
-    raw = buf.read(need)
-    if len(raw) < HEADER_V1_SIZE:
-        return None
-    magic, version, seq, count = struct.unpack(HEADER_FMT, raw[:20])
-    if len(raw) >= TIMESTAMP_OFF + 8:
-        timestamp, = struct.unpack("<d", raw[TIMESTAMP_OFF : TIMESTAMP_OFF + 8])
-    else:
-        timestamp = 0.0
-    if magic != MAGIC:
-        return None
-    if count > cap:
-        count = cap
-
-    if version == VERSION_V1:
-        buf.seek(HEADER_V1_SIZE)
-        result = []
-        for _ in range(count):
-            if buf.tell() + ENTRY_SIZE_V1 > buf.size():
-                break
-            raw_ent = buf.read(ENTRY_SIZE_V1)
-            if len(raw_ent) < ENTRY_SIZE_V1:
-                break
-            name_b = raw_ent[:NAME_MAX_LEN]
-            type_byte = raw_ent[NAME_MAX_LEN]
-            value, = struct.unpack_from("<d", raw_ent, NAME_MAX_LEN + 1)
-            name = name_b.split(b"\x00")[0].decode("utf-8", errors="replace").strip()
-            if not name:
-                continue
-            type_str, val_out = _decode_scalar_row(type_byte, value)
-            result.append({"name": name, "type": type_str, "value": val_out})
-        return {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V1}
-
-    if version >= VERSION_V2:
-        if buf.size() < HEADER_V2_SIZE or len(raw) < HEADER_V2_SIZE:
+    with _SHM_RW_LOCK:
+        cap = max_vars if max_vars is not None else MAX_VARS
+        if buf.size() < HEADER_V1_SIZE:
             return None
-        publish_period_sec: float | None = None
-        if len(raw) >= HEADER_PUBLISH_PERIOD_SEC_OFF + 8:
-            pp, = struct.unpack_from("<d", raw, HEADER_PUBLISH_PERIOD_SEC_OFF)
-            if pp > 0.0 and pp < 3600.0:
-                publish_period_sec = float(pp)
-        table_off, stride = struct.unpack_from("<II", raw, 32)
-        if stride < TABLE_ROW_V2:
-            stride = TABLE_ROW_V2
-        if row_parse_state is not None:
-            return _read_snapshot_v2_incremental(
-                buf,
-                cap,
-                seq,
-                count,
-                timestamp,
-                table_off,
-                stride,
-                row_parse_state,
-                publish_period_sec=publish_period_sec,
-            )
-        result = []
-        for i in range(count):
-            off = table_off + i * stride
-            if off + stride > buf.size():
-                break
-            buf.seek(off)
-            raw_ent = buf.read(stride)
-            ent = _decode_v2_row_entry(raw_ent)
-            if ent:
-                result.append(ent)
-        out_v2 = {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V2}
-        if publish_period_sec is not None:
-            out_v2["publish_period_sec"] = publish_period_sec
-        return out_v2
+        buf.seek(0)
+        need = min(HEADER_V2_SIZE, buf.size())
+        raw = buf.read(need)
+        if len(raw) < HEADER_V1_SIZE:
+            return None
+        magic, version, seq, count = struct.unpack(HEADER_FMT, raw[:20])
+        if len(raw) >= TIMESTAMP_OFF + 8:
+            timestamp, = struct.unpack("<d", raw[TIMESTAMP_OFF : TIMESTAMP_OFF + 8])
+        else:
+            timestamp = 0.0
+        if magic != MAGIC:
+            return None
+        if count > cap:
+            count = cap
 
-    return None
+        if version == VERSION_V1:
+            buf.seek(HEADER_V1_SIZE)
+            result = []
+            for _ in range(count):
+                if buf.tell() + ENTRY_SIZE_V1 > buf.size():
+                    break
+                raw_ent = buf.read(ENTRY_SIZE_V1)
+                if len(raw_ent) < ENTRY_SIZE_V1:
+                    break
+                name_b = raw_ent[:NAME_MAX_LEN]
+                type_byte = raw_ent[NAME_MAX_LEN]
+                value, = struct.unpack_from("<d", raw_ent, NAME_MAX_LEN + 1)
+                name = name_b.split(b"\x00")[0].decode("utf-8", errors="replace").strip()
+                if not name:
+                    continue
+                type_str, val_out = _decode_scalar_row(type_byte, value)
+                result.append({"name": name, "type": type_str, "value": val_out})
+            return {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V1}
+
+        if version >= VERSION_V2:
+            if buf.size() < HEADER_V2_SIZE or len(raw) < HEADER_V2_SIZE:
+                return None
+            publish_period_sec: float | None = None
+            if len(raw) >= HEADER_PUBLISH_PERIOD_SEC_OFF + 8:
+                pp, = struct.unpack_from("<d", raw, HEADER_PUBLISH_PERIOD_SEC_OFF)
+                if pp > 0.0 and pp < 3600.0:
+                    publish_period_sec = float(pp)
+            table_off, stride = struct.unpack_from("<II", raw, 32)
+            if stride < TABLE_ROW_V2:
+                stride = TABLE_ROW_V2
+            if row_parse_state is not None:
+                return _read_snapshot_v2_incremental(
+                    buf,
+                    cap,
+                    seq,
+                    count,
+                    timestamp,
+                    table_off,
+                    stride,
+                    row_parse_state,
+                    publish_period_sec=publish_period_sec,
+                )
+            result = []
+            for i in range(count):
+                off = table_off + i * stride
+                if off + stride > buf.size():
+                    break
+                buf.seek(off)
+                raw_ent = buf.read(stride)
+                ent = _decode_v2_row_entry(raw_ent)
+                if ent:
+                    result.append(ent)
+            out_v2 = {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V2}
+            if publish_period_sec is not None:
+                out_v2["publish_period_sec"] = publish_period_sec
+            return out_v2
+
+        return None
 
 
 def sync_v2_ring_read_idx(buf: mmap.mmap, max_vars: int | None) -> bool:

@@ -8,6 +8,7 @@
 #include <random>
 #include <mutex>
 #include <cstdint>
+#include <cstdlib>
 
 static std::atomic<bool> g_running{true};
 
@@ -802,6 +803,15 @@ int main() {
         }
 
         t += 0.01;
+        if (const char* cyc = std::getenv("VARMON_DEBUG_IMPORT_CYCLE_END")) {
+            if (cyc[0] != '\0' && !(cyc[0] == '0' && cyc[1] == '\0')) {
+                static uint64_t demo_import_dbg_n;
+                if (++demo_import_dbg_n % 50ull == 0ull) {
+                    std::cerr << "[demo pre_shm] pid_kp=" << pid_kp << " pid_ki=" << pid_ki << " pid_kd=" << pid_kd
+                              << "\n";
+                }
+            }
+        }
         monitor.write_shm_snapshot(); /* Publicar snapshot en SHM para lectores (ej. Python) */
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

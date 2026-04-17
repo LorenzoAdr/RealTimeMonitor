@@ -21,7 +21,12 @@ def _repo_root() -> str:
 
 def _install_dir() -> str | None:
     if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
+        exe = os.path.abspath(sys.executable)
+        bindir = os.path.dirname(exe)
+        # Entrega generate_webmonitor_version: INSTALL_DIR/bin/varmonitor-web → raíz = INSTALL_DIR (hermano de data/)
+        if os.path.basename(bindir) == "bin":
+            return os.path.abspath(os.path.join(bindir, ".."))
+        return bindir
     return None
 
 
@@ -86,7 +91,25 @@ def _resolve_data_layout(cfg: dict) -> tuple[str, str, str]:
 
 RECORDINGS_DIR, STATE_ROOT_DIR, ARINC_DATA_DIR = _resolve_data_layout(CONFIG)
 _inst = _install_dir()
-BROWSER_ROOT = Path(_inst) if _inst else Path(__file__).resolve().parent.parent.parent
+
+
+def _default_browser_root() -> Path:
+    return Path(_inst) if _inst else Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_browser_root() -> Path:
+    """Raíz del explorador de archivos / modo edición. Override: `browser_root` en varmon.conf (absoluta recomendada)."""
+    raw = (CONFIG.get("browser_root") or "").strip()
+    if not raw:
+        return _default_browser_root()
+    cfg_base = os.path.dirname(os.path.abspath(CONFIG_ABS_PATH)) if CONFIG_ABS_PATH else _repo_root()
+    exp = os.path.expanduser(raw)
+    if os.path.isabs(exp):
+        return Path(os.path.abspath(exp))
+    return Path(os.path.abspath(os.path.join(cfg_base, exp)))
+
+
+BROWSER_ROOT = _resolve_browser_root()
 
 
 def _resolve_git_workspace_root() -> Path:
@@ -115,6 +138,6 @@ print(
     flush=True,
 )
 print(
-    f"[VarMonitor Web] Explorador proyecto={BROWSER_ROOT.resolve()} | Git (git_workspace_root)={GIT_WORKSPACE_ROOT.resolve()}",
+    f"[VarMonitor Web] Explorador proyecto (browser_root)={BROWSER_ROOT.resolve()} | Git (git_workspace_root)={GIT_WORKSPACE_ROOT.resolve()}",
     flush=True,
 )

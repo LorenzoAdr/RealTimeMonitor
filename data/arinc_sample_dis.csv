@@ -1,0 +1,6 @@
+label_oct,name,encoding,bits,lsb,scale,signed,units,min,max,ssm,dis_bit_index,dis_bit_name
+350,STATUS_DIS,discrete,19,,1,false,,,,,,
+350,,,,,,,,,,,0,ON_GROUND
+350,,,,,,,,,,,1,IN_FLIGHT
+350,,,,,,,,,,,2,OVERSPEED_WARN
+350,,,,,,,,,,,3,MAINT_REQ

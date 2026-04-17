@@ -19,6 +19,30 @@ _ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WM="$_ROOT/web_monitor"
 TP="$_ROOT/tool_plugins"
 
+_wheel_has_required_modules() {
+  # Comprueba en el .whl la presencia de módulos backend Pro críticos.
+  local whl="$1"
+  python3 - "$whl" <<'PY'
+import sys, zipfile
+w = sys.argv[1]
+required = {
+    "varmonitor_plugins/gdb_debug.py",
+    "varmonitor_plugins/terminal_api.py",
+    "varmonitor_plugins/pro_http.py",
+}
+try:
+    with zipfile.ZipFile(w) as z:
+        names = set(z.namelist())
+except Exception:
+    raise SystemExit(2)
+missing = [m for m in sorted(required) if m not in names]
+if missing:
+    print(",".join(missing))
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
 # Rellenar web_monitor/static/plugins/ (fuentes .mjs + build/) desde tool_plugins si hay artefactos JS.
 # Sin esto, PyInstaller empaqueta una carpeta vacía si el usuario borró static/plugins.
 if [[ -f "$TP/scripts/copy_to_mit.sh" ]] && [[ -d "$TP/js/dist/plugins" ]]; then
@@ -29,17 +53,30 @@ fi
 
 if [[ -n "${VARMON_PLUGINS_WHEEL:-}" && -f "$VARMON_PLUGINS_WHEEL" ]]; then
   VARMON_PLUGINS_WHEEL="$(cd "$(dirname "$VARMON_PLUGINS_WHEEL")" && pwd)/$(basename "$VARMON_PLUGINS_WHEEL")"
+  if ! _miss="$(_wheel_has_required_modules "$VARMON_PLUGINS_WHEEL" 2>/dev/null)"; then
+    echo "[prepare_plugins_release_artifacts] ERROR: wheel explícita sin módulos Pro requeridos: $VARMON_PLUGINS_WHEEL" >&2
+    [[ -n "${_miss:-}" ]] && echo "  Faltan: ${_miss}" >&2
+    exit 1
+  fi
 else
   _w=""
-  shopt -s nullglob
-  _cands=( "$WM/vendor"/varmonitor_plugins-*.whl "$TP/dist"/varmonitor_plugins-*.whl )
-  shopt -u nullglob
+  # Preferir wheel más reciente y válida; evita escoger una vendor antigua con misma versión.
+  mapfile -t _cands < <(ls -1t "$TP/dist"/varmonitor_plugins-*.whl "$WM/vendor"/varmonitor_plugins-*.whl 2>/dev/null || true)
   if [[ ${#_cands[@]} -gt 0 ]]; then
-    _w="$(printf '%s\n' "${_cands[@]}" | sort -V | tail -n1)"
+    for _cand in "${_cands[@]}"; do
+      if _miss="$(_wheel_has_required_modules "$_cand" 2>/dev/null)"; then
+        _w="$_cand"
+        break
+      else
+        echo "[prepare_plugins_release_artifacts] AVISO: wheel descartada (incompleta): $_cand" >&2
+        [[ -n "${_miss:-}" ]] && echo "  faltan: ${_miss}" >&2
+      fi
+    done
   fi
   if [[ -z "$_w" ]]; then
     echo "[prepare_plugins_release_artifacts] ERROR: no se encontró varmonitor_plugins-*.whl." >&2
-    echo "  Coloque el wheel en web_monitor/vendor/ o tool_plugins/dist/, o exporte VARMON_PLUGINS_WHEEL=" >&2
+    echo "  Coloque una wheel válida en web_monitor/vendor/ o tool_plugins/dist/, o exporte VARMON_PLUGINS_WHEEL=" >&2
+    echo "  Debe incluir: varmonitor_plugins.gdb_debug, terminal_api y pro_http." >&2
     exit 1
   fi
   VARMON_PLUGINS_WHEEL="$(cd "$(dirname "$_w")" && pwd)/$(basename "$_w")"

@@ -12,7 +12,7 @@
 
 # --- Usuario: edita debajo ---
 # Modo de ejecución: code | package
-VARMON_RUN_MODE="${VARMON_RUN_MODE:-package}"
+VARMON_RUN_MODE="${VARMON_RUN_MODE:-code}"
 
 # Con package: directorio INSTALL_DIR con bin/, data/, include/ (entrega generate_webmonitor_version.sh).
 # Déjalo vacío para usar por defecto: <repo>/web_monitor_version/
@@ -26,6 +26,8 @@ VARMON_RUN_MODE="${VARMON_RUN_MODE:-package}"
 #export VARMON_SIDECAR_BIN=
 #export VARMON_DATA_DIR=
 #export VARMON_WEB_APP_JS=
+# Trazas despliegue GUI en consola del backend (ficheros bajo static/, script inyectado):
+#export VARMON_DEBUG_GUI_DEPLOY=1
 
 # --- Fin usuario ---
 
