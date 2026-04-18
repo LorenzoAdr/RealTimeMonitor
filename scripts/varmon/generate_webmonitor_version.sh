@@ -33,6 +33,17 @@ mkdir -p "$BUILD"
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DVARMON_LIB_SHARED=ON
 cmake --build "$BUILD" --target varmon_sidecar varmonitor -j"$(nproc 2>/dev/null || echo 4)"
 
+if [[ "${VARMON_BUILD_DEMO_SERVER:-0}" == "1" ]]; then
+  echo "[generate_webmonitor_version] VARMON_BUILD_DEMO_SERVER=1: compilando demo_server…" >&2
+  cmake --build "$BUILD" --target demo_server -j"$(nproc 2>/dev/null || echo 4)"
+fi
+
+if [[ "${VARMON_BUILD_CORENEXUS:-0}" == "1" ]]; then
+  echo "[generate_webmonitor_version] VARMON_BUILD_CORENEXUS=1: compilando corenexus…" >&2
+  export CORENEXUS_BUILD="${CORENEXUS_BUILD:-$ROOT/CoreNexus/build}"
+  bash "$ROOT/scripts/varmon/build_corenexus.sh"
+fi
+
 if [[ "${VARMON_PLUGINS_RELEASE:-0}" == "1" ]]; then
   # shellcheck disable=SC1091
   source "$ROOT/scripts/varmon/prepare_plugins_release_artifacts.sh"
@@ -63,6 +74,43 @@ cp -a "$WM/dist/varmonitor-web" "$OUT/bin/"
 cp -a "$SIDECAR" "$OUT/bin/varmon_sidecar"
 cp -a "$LIBVM_DIR"/libvarmonitor.so* "$OUT/bin/"
 
+if [[ "${VARMON_BUILD_DEMO_SERVER:-0}" == "1" ]]; then
+  DEMO=$(find "$BUILD" -path "*/demo_server" -type f -executable 2>/dev/null | head -1 || true)
+  if [[ -n "${DEMO}" ]]; then
+    cp -a "$DEMO" "$OUT/bin/demo_server"
+    echo "[generate_webmonitor_version] Copiado demo_server → $OUT/bin/demo_server" >&2
+  else
+    echo "[generate_webmonitor_version] AVISO: no se encontró demo_server bajo $BUILD" >&2
+  fi
+fi
+
+CORENEXUS_BIN="$ROOT/CoreNexus/build/corenexus"
+CORENEXUS_SO="$ROOT/CoreNexus/build/libcorenexus_core.so"
+CORENEXUS_ING_SO="$ROOT/CoreNexus/build/libcorenexus_ingestor_mavlink.so"
+if [[ "${VARMON_BUILD_CORENEXUS:-0}" == "1" ]]; then
+  if [[ -x "$CORENEXUS_BIN" ]]; then
+    cp -a "$CORENEXUS_BIN" "$OUT/bin/corenexus"
+    echo "[generate_webmonitor_version] Copiado corenexus → $OUT/bin/corenexus" >&2
+  else
+    echo "[generate_webmonitor_version] AVISO: no ejecutable: $CORENEXUS_BIN" >&2
+  fi
+  if [[ -f "$CORENEXUS_SO" ]]; then
+    cp -a "$CORENEXUS_SO" "$OUT/bin/"
+    echo "[generate_webmonitor_version] Copiado libcorenexus_core.so → $OUT/bin/" >&2
+  else
+    echo "[generate_webmonitor_version] AVISO: no se encontró $CORENEXUS_SO (enlace dinámico)" >&2
+  fi
+  if [[ -f "$CORENEXUS_ING_SO" ]]; then
+    cp -a "$CORENEXUS_ING_SO" "$OUT/bin/"
+    echo "[generate_webmonitor_version] Copiado libcorenexus_ingestor_mavlink.so → $OUT/bin/" >&2
+  fi
+  if [[ -d "$ROOT/CoreNexus/testing" ]]; then
+    mkdir -p "$OUT/testing"
+    cp -a "$ROOT/CoreNexus/testing/." "$OUT/testing/"
+    echo "[generate_webmonitor_version] Copiado CoreNexus/testing → $OUT/testing/" >&2
+  fi
+fi
+
 cp -a "$ROOT/libvarmonitor/include/"*.hpp "$OUT/include/"
 
 if [[ -f "$ROOT/data/varmon.conf" ]]; then
@@ -84,6 +132,9 @@ VarMonitor — paquete de entrega (generado con scripts/varmon/generate_webmonit
 ${_README_PLUGINS_NOTE}
 Estructura:
   bin/             varmonitor-web (PyInstaller), varmon_sidecar, libvarmonitor.so*
+                   (opcional) demo_server; corenexus + libcorenexus_core.so + libcorenexus_ingestor_mavlink.so
+                   — si se compilaron con la GUI o VARMON_BUILD_*=1
+  testing/         (opcional, si VARMON_BUILD_CORENEXUS=1) scripts MAVLink de prueba (launch_mavlink_*.sh, emisor Python)
   data/            varmon.conf (ejemplo)
   include/         Cabeceras C++ para enlazar frente a libvarmonitor.so (SDK)
   VERSION          git describe
@@ -102,7 +153,9 @@ Grabación Parquet (opcional, si el wheel incluye el plugin parquet + pyarrow):
 Variables de entorno útiles:
   VARMON_CONFIG=/ruta/absoluta/data/varmon.conf
   VARMON_SIDECAR_BIN=/ruta/a/bin/varmon_sidecar
+  VARMON_CORENEXUS_BIN=/ruta/a/bin/corenexus   (modo package; launch_corenexus.sh)
   VARMON_DATA_DIR=/ruta/a/data   (opcional; por defecto INSTALL_DIR/data con el backend empaquetado)
+  VARMON_BUILD_CORENEXUS=1 / VARMON_BUILD_DEMO_SERVER=1   (entrega: añaden bin/corenexus y/o bin/demo_server)
 
 SDK C++ (otro CMake que consuma esta entrega): añade
   -IINSTALL_DIR/include -LINSTALL_DIR/bin -lvarmonitor -Wl,-rpath,INSTALL_DIR/bin

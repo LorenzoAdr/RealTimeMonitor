@@ -75,7 +75,9 @@ public:
     bool start(int sample_interval_ms = 100);
     void stop();
     bool is_running() const { return running_.load(); }
-    int sample_interval_ms() const { return sample_interval_ms_; }
+    int sample_interval_ms() const { return sample_interval_ms_.load(std::memory_order_relaxed); }
+    /** Ajusta el periodo reportado en server_info y el sleep del hilo interno sample_loop (p. ej. alinear con cycle_interval_ms). */
+    void set_sample_interval_ms(int ms);
 
     struct VarSnapshot {
         std::string name;
@@ -159,7 +161,7 @@ private:
     std::thread sample_thread_;
     std::thread rpc_thread_;
     std::thread shm_publish_thread_;
-    int sample_interval_ms_ = 100;
+    std::atomic<int> sample_interval_ms_{100};
 
     bool async_shm_publish_ = false;
     std::mutex shm_publish_mtx_;

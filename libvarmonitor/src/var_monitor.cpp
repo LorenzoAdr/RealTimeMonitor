@@ -353,9 +353,17 @@ void VarMonitor::unregister_all() {
     shm_clear_all_dirty();
 }
 
+void VarMonitor::set_sample_interval_ms(int ms) {
+    if (ms < 1)
+        ms = 1;
+    else if (ms > 3'600'000)
+        ms = 3'600'000;
+    sample_interval_ms_.store(ms, std::memory_order_relaxed);
+}
+
 bool VarMonitor::start(int sample_interval_ms) {
     if (running_.exchange(true)) return false;
-    sample_interval_ms_ = sample_interval_ms;
+    set_sample_interval_ms(sample_interval_ms);
     set_global_instance(this);
 
     load_config();
@@ -615,7 +623,8 @@ void VarMonitor::client_disconnected() {
 
 void VarMonitor::sample_loop() {
     while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(sample_interval_ms_));
+        const int ms = sample_interval_ms_.load(std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
     }
 }
 

@@ -9,6 +9,14 @@ varmonitor_plugins antiguo de site-packages.
 Opción «Generar entrega final»: si está desmarcada, solo se ejecuta build_all.sh (wheel + JS);
 no se llama a generate_webmonitor_version.sh (CMake, PyInstaller, carpeta web_monitor_version/).
 
+Checkboxes opcionales «Compilar demo_server / corenexus»: solo aplican a la entrega final;
+activan VARMON_BUILD_DEMO_SERVER / VARMON_BUILD_CORENEXUS en generate_webmonitor_version.sh
+(binarios en web_monitor_version/bin/).
+
+Si «Compilar corenexus» está marcado, antes del build se ejecuta
+`pip install -r CoreNexus/requirements-mavlink.txt` en el mismo Python que `web_monitor/.venv`
+(si existe) o en `python3`, para que mavgen (CMake) encuentre pymavlink.
+
 Requisito en muchos Linux: paquete del sistema `python3-tk` (p. ej. apt install python3-tk).
 
 Uso:
@@ -89,6 +97,10 @@ DEFAULTS: dict[str, dict[str, bool]] = {
         "flightViz": True,
         "protocolRegistry": True,
     },
+    "build": {
+        "demo_server": False,
+        "corenexus": False,
+    },
 }
 
 LABELS: dict[str, str] = {
@@ -109,6 +121,8 @@ LABELS: dict[str, str] = {
     "terminal": "Terminal embebida",
     "flightViz": "Visualización de vuelo",
     "protocolRegistry": "BD protocolos (ARINC / 1553)",
+    "demo_server": "Compilar demo_server (CMake → web_monitor_version/bin/)",
+    "corenexus": "Compilar corenexus (CMake → web_monitor_version/bin/; instala pymavlink/lxml en el venv)",
 }
 
 TAB_TITLES = {"ids": "Módulos (ids)", "hooks": "Hooks", "ui": "UI"}
@@ -122,7 +136,7 @@ def load_selection() -> dict[str, dict[str, bool]]:
     except (OSError, json.JSONDecodeError):
         return json.loads(json.dumps(DEFAULTS))
     out = json.loads(json.dumps(DEFAULTS))
-    for sec in ("ids", "hooks", "ui"):
+    for sec in ("ids", "hooks", "ui", "build"):
         if isinstance(data.get(sec), dict):
             for k, v in data[sec].items():
                 if k in out[sec] and isinstance(v, bool):
@@ -321,6 +335,42 @@ def _prepare_web_monitor_venv() -> tuple[int, str]:
             + tail
         )
     return r.returncode, tail
+
+
+def _python_for_corenexus_mavlink_deps() -> Path | None:
+    """Preferir web_monitor/.venv; si no hay, python3 del PATH."""
+    v = ROOT / "web_monitor" / ".venv" / "bin" / "python"
+    if v.is_file():
+        return v
+    w = shutil.which("python3")
+    return Path(w) if w else None
+
+
+def _install_corenexus_mavlink_deps() -> tuple[int, str]:
+    """Instala pymavlink/lxml para generar cabeceras MAVLink en CMake (CoreNexus)."""
+    req = ROOT / "CoreNexus" / "requirements-mavlink.txt"
+    if not req.is_file():
+        return 1, f"[gui_plugins_deploy] No existe {req}\n"
+    py = _python_for_corenexus_mavlink_deps()
+    if py is None:
+        return 1, "[gui_plugins_deploy] No hay python3 en PATH ni web_monitor/.venv/bin/python\n"
+    r = subprocess.run(
+        [str(py), "-m", "pip", "install", "-q", "-r", str(req)],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+    )
+    out = (r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")
+    tail = "\n".join(out.splitlines()[-40:])
+    if r.returncode != 0:
+        return r.returncode, (
+            f"[gui_plugins_deploy] pip install CoreNexus/requirements-mavlink.txt falló ({py}):\n{tail}\n"
+        )
+    return 0, (
+        f"[gui_plugins_deploy] Dependencias MAVLink (pymavlink/lxml) instaladas con:\n  {py}\n"
+        f"  ({req.name})\n\n"
+        + tail
+    )
 
 
 def _reinstall_fresh_wheel_into_web_venv(wheel: Path) -> tuple[int, str]:
@@ -643,6 +693,7 @@ class App:
             "ids": {},
             "hooks": {},
             "ui": {},
+            "build": {},
         }
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._busy = False
@@ -695,6 +746,19 @@ class App:
             text="Activado por defecto (más lento, entorno reproducible). Desmarcar si el venv ya está listo y vas con prisa.",
             style="Sub.TLabel",
         ).pack(anchor=tk.W, pady=(4, 0))
+
+        sel_build = load_selection()
+        build_frame = ttk.Frame(outer, style="App.TFrame")
+        build_frame.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(
+            build_frame,
+            text="Compilación C++ (solo con «Generar entrega final»; copia a web_monitor_version/bin/)",
+            style="Sub.TLabel",
+        ).pack(anchor=tk.W)
+        for key in DEFAULTS["build"]:
+            var = tk.BooleanVar(value=bool(sel_build.get("build", {}).get(key, DEFAULTS["build"][key])))
+            self._vars["build"][key] = var
+            _add_option_row(build_frame, LABELS.get(key, key), var)
 
         nb = ttk.Notebook(outer)
         nb.pack(fill=tk.BOTH, expand=True, pady=(14, 10))
@@ -787,6 +851,7 @@ class App:
             "ids": {k: self._vars["ids"][k].get() for k in DEFAULTS["ids"]},
             "hooks": {k: self._vars["hooks"][k].get() for k in DEFAULTS["hooks"]},
             "ui": {k: self._vars["ui"][k].get() for k in DEFAULTS["ui"]},
+            "build": {k: self._vars["build"][k].get() for k in DEFAULTS["build"]},
         }
 
     def _save_only(self) -> None:
@@ -815,11 +880,16 @@ class App:
         self._progress["value"] = 0
         do_full = self._var_full_package.get()
         prepare_venv = self._var_prepare_venv.get()
-        # Pasos advance(): full sin venv=5, con venv=6; local sin venv=3, con venv=4
+        want_cnx = self._vars["build"]["corenexus"].get()
+        # Pasos advance(): full sin venv=5, con venv=6; local sin venv=3, con venv=4;
+        # +1 si instalar deps MAVLink para corenexus.
         if do_full:
-            self._progress["maximum"] = 6 if prepare_venv else 5
+            base_max = 6 if prepare_venv else 5
         else:
-            self._progress["maximum"] = 4 if prepare_venv else 3
+            base_max = 4 if prepare_venv else 3
+        if want_cnx:
+            base_max += 1
+        self._progress["maximum"] = base_max
         self._status.configure(text="Trabajando…")
         self._append_log("")
 
@@ -846,6 +916,25 @@ class App:
                     if code_venv != 0:
                         self._queue.put(
                             ("error", ("Entorno web_monitor/.venv", f"Código {code_venv}\n\n{tail_venv}")),
+                        )
+                        return
+                    advance()
+
+                if isinstance(doc.get("build"), dict) and doc["build"].get("corenexus"):
+                    self._queue.put(
+                        ("status", "Instalando dependencias MAVLink (pymavlink/lxml) para CoreNexus…"),
+                    )
+                    code_mx, tail_mx = _install_corenexus_mavlink_deps()
+                    self._queue.put(("log", tail_mx))
+                    if code_mx != 0:
+                        self._queue.put(
+                            (
+                                "error",
+                                (
+                                    "Dependencias CoreNexus (MAVLink)",
+                                    f"Código {code_mx}\n\n{tail_mx}",
+                                ),
+                            ),
                         )
                         return
                     advance()
@@ -893,6 +982,15 @@ class App:
                     # Ruta absoluta a la wheel recién validada (misma que se acaba de instalar en .venv).
                     "VARMON_PLUGINS_WHEEL": str(wheel.resolve()),
                 }
+                bsel = doc.get("build")
+                if isinstance(bsel, dict):
+                    if bsel.get("demo_server"):
+                        env["VARMON_BUILD_DEMO_SERVER"] = "1"
+                    if bsel.get("corenexus"):
+                        env["VARMON_BUILD_CORENEXUS"] = "1"
+                        py_cnx = _python_for_corenexus_mavlink_deps()
+                        if py_cnx is not None:
+                            env["VARMON_PYTHON3"] = str(py_cnx.resolve())
                 code, tail = run_bash("scripts/varmon/generate_webmonitor_version.sh", extra_env=env)
                 self._queue.put(("log", tail))
                 if code != 0:

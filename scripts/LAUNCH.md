@@ -1,6 +1,6 @@
 # Lanzadores (VarMonitor)
 
-En **`scripts/`** solo hay **cinco** scripts ejecutables en la raíz; el código Python y el resto de utilidades están en **`scripts/varmon/`** (excepto este `LAUNCH.md`).
+En **`scripts/`** hay varios scripts ejecutables en la raíz; el código Python y el resto de utilidades están en **`scripts/varmon/`** (excepto este `LAUNCH.md`).
 
 ## `scripts/simple_config.sh` (modo y rutas)
 
@@ -15,15 +15,16 @@ Un solo sitio para elegir **desarrollo** (`code`) o **binarios generados** (`pac
 | Script | Rol |
 |--------|-----|
 | `./scripts/launch_demo.sh` | Solo el binario **demo_server** (C++). Implementación: `scripts/varmon/launch_demo.py`. |
+| `./scripts/launch_corenexus.sh` | **corenexus** (hub VarMonitor / SHM+UDS). Opción `--build` para compilar antes (`scripts/varmon/build_corenexus.sh`). En otra terminal: `launch_web.sh`. Modo `package`: **`VARMON_CORENEXUS_BIN`**. Pruebas MAVLink sin hardware: [`CoreNexus/testing/`](../CoreNexus/testing/README.md) (`launch_mavlink_udp.sh`, `launch_mavlink_serie.sh`). |
 | `./scripts/launch_web.sh` | Solo el **backend web**: `web_monitor/.venv` + `app.py`, o **`VARMON_PACKAGED_WEB_BIN`** (PyInstaller). Implementación: `scripts/varmon/launch_web.py`. Opción `--web-app-js` (o env **`VARMON_WEB_APP_JS`**) para servir el JS minificado generado por `build_web_static_js.sh`. |
 | `./scripts/launch_ui.sh` | Solo la **interfaz** (puerto más alto del rango en `varmon.conf` que responda). `scripts/varmon/launch_ui.py`. Acepta el mismo `--web-app-js` (solo alinea el entorno; el backend debe haberse arrancado con el mismo valor). |
-| `./scripts/stop_varmonitor.sh` | Detiene procesos VarMonitor del **usuario actual** (patrones acotados). |
+| `./scripts/stop_varmonitor.sh` | Detiene procesos VarMonitor del **usuario actual** (demo_server, **corenexus**, backend web, varmonitor-web, sidecar, emisores de prueba MAVLink en `CoreNexus/testing/` o `web_monitor_version/testing/`; patrones acotados). |
 | `./scripts/build_docs_pdf.sh` | PDF desde el nav de MkDocs. `scripts/varmon/build_docs_pdf.py`. |
 | `./scripts/run_tests.sh` | Ejecuta todos los **tests unitarios** (Python, C++, JS). Opciones: `--python`, `--cpp`, `--js` (solo esa capa), `--coverage` (cobertura Python con `pytest-cov`: `perf_agg`, `uds_client`, `shm_reader`, `varmonitor_plugins`, `app`). Instala `pip install -e tool_plugins/python` antes de pytest. |
 
 ## `scripts/varmon/` (auxiliar)
 
-Incluye: `simple_config.sh` (modo `code`/`package` y exports), `setup.sh`, `docker-run.sh`, `build_varmonitor_web.sh`, `build_web_static_js.sh` (minifica `static/app.js` con esbuild/npx), `generate_webmonitor_version.sh` (empaqueta `web_monitor_version/` con sidecar + PyInstaller + opcionalmente JS), `gui_plugins_deploy.py` (GUI tkinter: checkboxes de plugins, `build_all.sh` + `generate_webmonitor_version.sh`; requiere `python3-tk` en muchos Linux), `patch_pywebview_qt.py`, módulos `varmon_*.py`, `launch_*.py`, `build_docs_pdf.py`.
+Incluye: `simple_config.sh` (modo `code`/`package` y exports), `setup.sh`, `docker-run.sh`, `build_varmonitor_web.sh`, `build_web_static_js.sh` (minifica `static/app.js` con esbuild/npx), `build_corenexus.sh`, `generate_webmonitor_version.sh` (empaqueta `web_monitor_version/` con sidecar + PyInstaller + opcionalmente JS y binarios demo/corenexus si se piden), `gui_plugins_deploy.py` (GUI tkinter: plugins + opciones **Compilar demo_server / corenexus** en entrega final; requiere `python3-tk` en muchos Linux), `patch_pywebview_qt.py`, módulos `varmon_*.py`, `launch_*.py`, `build_docs_pdf.py`.
 
 Ejemplos:
 

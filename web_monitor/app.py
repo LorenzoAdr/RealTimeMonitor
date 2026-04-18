@@ -1531,7 +1531,14 @@ def _json_path(base_dir: str, name: str) -> str | None:
 
 def _save_runtime_config_overrides(updates: dict) -> None:
     """Persist selected runtime config keys into varmon.conf."""
-    allowed = {"web_port", "web_port_scan_max", "server_state_dir", "recordings_write_tsv"}
+    allowed = {
+        "web_port",
+        "web_port_scan_max",
+        "server_state_dir",
+        "recordings_write_tsv",
+        "cycle_interval_ms",
+        "update_ratio_max",
+    }
     clean = {k: updates[k] for k in updates.keys() if k in allowed}
     if not clean:
         return
@@ -1551,6 +1558,8 @@ def _save_runtime_config_overrides(updates: dict) -> None:
     for k, v in clean.items():
         if k == "recordings_write_tsv":
             existing[k] = "1" if v else "0"
+        elif k in ("cycle_interval_ms", "update_ratio_max"):
+            existing[k] = str(int(v))
         else:
             existing[k] = str(v)
     output: list[str] = []
@@ -3425,6 +3434,18 @@ async def api_admin_runtime_config(request: Request):
         if "recordings_write_tsv" in payload:
             _config["recordings_write_tsv"] = bool(payload.get("recordings_write_tsv"))
             updates["recordings_write_tsv"] = bool(_config["recordings_write_tsv"])
+        if "cycle_interval_ms" in payload:
+            v = int(payload.get("cycle_interval_ms"))
+            if v < 1 or v > 3_600_000:
+                return JSONResponse({"error": "cycle_interval_ms inválido (1–3600000)"}, status_code=400)
+            _config["cycle_interval_ms"] = v
+            updates["cycle_interval_ms"] = v
+        if "update_ratio_max" in payload:
+            v = int(payload.get("update_ratio_max"))
+            if v < 1 or v > 8192:
+                return JSONResponse({"error": "update_ratio_max inválido (1–8192)"}, status_code=400)
+            _config["update_ratio_max"] = v
+            updates["update_ratio_max"] = v
         if hasattr(request.app.state, "max_web_port_in_range"):
             request.app.state.max_web_port_in_range = None
         _save_runtime_config_overrides(updates)
@@ -3434,6 +3455,8 @@ async def api_admin_runtime_config(request: Request):
                 "web_port": int(_config.get("web_port", 8080)),
                 "web_port_scan_max": int(_config.get("web_port_scan_max", 10)),
                 "recordings_write_tsv": bool(_config.get("recordings_write_tsv")),
+                "cycle_interval_ms": int(_config.get("cycle_interval_ms", 100)),
+                "update_ratio_max": int(_config.get("update_ratio_max", 512)),
             },
         }
     except Exception as e:

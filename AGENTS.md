@@ -10,6 +10,7 @@
 
 - `libvarmonitor/` — C++ library (por defecto estática; `-DVARMON_LIB_SHARED=ON` genera `libvarmonitor.so` para la entrega `web_monitor_version/`)
 - `demo_app/` — C++ demo application for development/testing
+- `CoreNexus/` — ejecutable **corenexus** + **libcorenexus_core.so** + **libcorenexus_ingestor_mavlink.so** (MAVLink v2: cabeceras generadas con pymavlink desde el repo oficial). Build: `scripts/varmon/build_corenexus.sh` (requiere `pip install -r CoreNexus/requirements-mavlink.txt` o pymavlink en el `python3` del PATH). Entrega: también `libcorenexus_ingestor_mavlink.so` si se empaqueta corenexus. Ver `CoreNexus/docs/MAVLINK.md`.
 - `varmon_sidecar/` — Optional native C++ recorder/alarm worker
 - `web_monitor/` — Python FastAPI backend + browser frontend (HTML/JS/CSS)
 - `data/varmon.conf` — Central configuration file
@@ -49,7 +50,7 @@ All three services must point to the config. Set `export VARMON_CONFIG=/workspac
    - Serves UI at `http://localhost:8080`
 3. **Browser / UI**: open `http://localhost:8080` or use `./scripts/launch_ui.sh`
 
-Alternatively, use the launch scripts: `./scripts/launch_demo.sh`, `./scripts/launch_web.sh`, `./scripts/launch_ui.sh` (these source `scripts/simple_config.sh` automatically).
+Alternatively, use the launch scripts: `./scripts/launch_demo.sh`, `./scripts/launch_corenexus.sh`, `./scripts/launch_web.sh`, `./scripts/launch_ui.sh` (these source `scripts/simple_config.sh` automatically).
 
 ### Linting and testing
 

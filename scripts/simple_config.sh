@@ -46,11 +46,13 @@ _apply_simple_config() {
       export VARMON_CONFIG="${VARMON_CONFIG:-$VARMON_REPO_ROOT/data/varmon.conf}"
       unset VARMON_PACKAGED_WEB_BIN 2>/dev/null || true
       unset VARMON_SIDECAR_BIN 2>/dev/null || true
+      unset VARMON_CORENEXUS_BIN 2>/dev/null || true
       ;;
     package)
       export VARMON_CONFIG="${VARMON_CONFIG:-$VARMON_INSTALL_DIR/data/varmon.conf}"
       export VARMON_PACKAGED_WEB_BIN="${VARMON_PACKAGED_WEB_BIN:-$VARMON_INSTALL_DIR/bin/varmonitor-web}"
       export VARMON_SIDECAR_BIN="${VARMON_SIDECAR_BIN:-$VARMON_INSTALL_DIR/bin/varmon_sidecar}"
+      export VARMON_CORENEXUS_BIN="${VARMON_CORENEXUS_BIN:-$VARMON_INSTALL_DIR/bin/corenexus}"
       export VARMON_DATA_DIR="${VARMON_DATA_DIR:-$VARMON_INSTALL_DIR/data}"
       ;;
     *)
@@ -70,6 +72,7 @@ if [[ "${VARMON_CONFIG_VERBOSE:-0}" =~ ^(1|true|yes)$ ]]; then
     echo "[simple_config] VARMON_INSTALL_DIR=${VARMON_INSTALL_DIR}" >&2
     echo "[simple_config] VARMON_PACKAGED_WEB_BIN=${VARMON_PACKAGED_WEB_BIN:-}" >&2
     echo "[simple_config] VARMON_SIDECAR_BIN=${VARMON_SIDECAR_BIN:-}" >&2
+    echo "[simple_config] VARMON_CORENEXUS_BIN=${VARMON_CORENEXUS_BIN:-}" >&2
     echo "[simple_config] VARMON_DATA_DIR=${VARMON_DATA_DIR:-}" >&2
   fi
   echo "[simple_config] VARMON_WEB_APP_JS=${VARMON_WEB_APP_JS:-<no>}" >&2
