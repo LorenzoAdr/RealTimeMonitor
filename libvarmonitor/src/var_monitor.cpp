@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <chrono>
 
 namespace varmon {
 
@@ -459,9 +460,18 @@ bool VarMonitor::set_var(const std::string& name, const VarValue& value) {
     return true;
 }
 
+void VarMonitor::mark_dirty_at(const std::string& name, double event_time_sec) {
+    {
+        std::lock_guard<std::mutex> lock(dirty_mutex_);
+        dirty_names_.insert(name);
+    }
+    if (running_.load() && shm_publisher::is_active() && shm_publisher::layout_version() >= 3u)
+        (void)append_shm_event_from_current(name, event_time_sec);
+}
+
 void VarMonitor::mark_dirty(const std::string& name) {
-    std::lock_guard<std::mutex> lock(dirty_mutex_);
-    dirty_names_.insert(name);
+    const double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    mark_dirty_at(name, ts);
 }
 
 bool VarMonitor::shm_should_fetch_for_publish(const std::string& name, bool full_refresh) {
@@ -655,6 +665,29 @@ void VarMonitor::write_shm_snapshot() {
         return;
     }
     shm_publisher::write_snapshot(this);
+}
+
+bool VarMonitor::append_shm_event(const std::string& name, double event_time_sec, const VarValue& value) {
+    if (!running_.load())
+        return false;
+    std::optional<VarSnapshot> snap = get_var(name);
+    if (!snap.has_value())
+        return false;
+    std::optional<VarValue> coerced = coerce_var_value_for_type(snap->type, value);
+    if (!coerced)
+        return false;
+    const double vd = scalar_double_from_var_value(*coerced);
+    const uint8_t type_byte = static_cast<uint8_t>(static_cast<int>(snap->type));
+    return shm_publisher::append_scalar_event(this, name, event_time_sec, vd, type_byte);
+}
+
+bool VarMonitor::append_shm_event_from_current(const std::string& name, double event_time_sec) {
+    if (!running_.load())
+        return false;
+    std::optional<VarSnapshot> snap = get_var(name);
+    if (!snap.has_value())
+        return false;
+    return append_shm_event(name, event_time_sec, snap->value);
 }
 
 } // namespace varmon

@@ -24,6 +24,16 @@ void shutdown();
 /** Escribe snapshot de variables escalares en SHM y hace sem_post(). La aplicación RT debe llamar esto cada ciclo (ej. 10 ms). */
 void write_snapshot(struct VarMonitor* mon);
 
+/**
+ * SHM v3 (shm_layout_version >= 3): append por evento en el anillo de la fila (timestamp + valor, luego índice con release).
+ * Requiere que `name` esté en la suscripción SHM actual. type_byte: 0 double, 1 int32, 2 bool (mismo que v2).
+ */
+bool append_scalar_event(struct VarMonitor* mon, const std::string& name, double event_time_sec, double value_as_double,
+                         uint8_t type_byte);
+
+/** Versión de layout del segmento activo (2 o 3). */
+uint32_t layout_version();
+
 /** Nombre del segmento (para server_info; ej. "varmon-juan-12345"). */
 std::string get_shm_name();
 

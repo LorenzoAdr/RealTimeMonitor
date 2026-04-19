@@ -1,0 +1,135 @@
+[launch_corenexus] VARMON_CONFIG=/opt/workspace/monitor/data/varmon.conf
+[launch_corenexus] Binario: /opt/workspace/monitor/CoreNexus/build/corenexus
+[launch_corenexus] En otra terminal (backend web): /opt/workspace/monitor/script
+s/launch_web.sh
+2026/04/19 12:27:34 socat[24582] N PTY is /dev/pts/4
+2026/04/19 12:27:34 socat[24582] N PTY is /dev/pts/5
+2026/04/19 12:27:34 socat[24582] N starting data transfer loop with FDs [5,5] an
+d [7,7]
+
+[launch_corenexus] --mavlink-both: ingestores UDP + serie activos.
+[launch_corenexus]   Serie — LEER: corenexus → /tmp/corenexus_mavlink_test_a_245
+73 | ESCRIBE emisor → /tmp/corenexus_mavlink_test_b_24573 (mismo baud 57600)
+[launch_corenexus]   No arranque scripts/launch_mavlink_serie.sh: crearía OTRO p
+ar PTY y el emisor no llegaría a este corenexus.
+[launch_corenexus]   Ej.: /opt/workspace/monitor/scripts/mavlink_test_emitter.py
+ --mode serial --serial /tmp/corenexus_mavlink_test_b_24573 --baud 57600
+[launch_corenexus]   UDP: emisor hacia el puerto que escucha corenexus (por defe
+cto 14550), p. ej. /opt/workspace/monitor/scripts/launch_mavlink_udp.sh
+
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] SHM v2 listo: /dev/shm/varmon-lorenzo-24584 sem /varmon-lorenzo-245
+84 sidecar_sem /varmon-lorenzo-24584-sc (32768 vars, ring_depth=5, layout=2, 819
+2 KiB)
+[VarMonitor] Publicacion SHM en hilo dedicado (shm_async_publish=1)
+[VarMonitor] Servidor UDS iniciado
+[corenexus] VarMonitor activo (config=/opt/workspace/monitor/data/varmon.conf, p
+ublicación SHM cada 100 ms [cycle_interval_ms; releer ~1 Hz si se edita varmon.c
+onf]). Ctrl+C para salir.
+[VarMonitor] UDS escuchando en /tmp/varmon-lorenzo-24584.sock
+[mavlink][debug] (udp) trazas activas en stderr. Variables: CORENEXUS_MAVLINK_DE
+BUG=1 y/o CORENEXUS_MAVLINK_DEBUG_HEX=N (N>0 implica debug; solo DEBUG=1 → hex p
+or defecto 48; DEBUG_HEX=0 sin hex).
+[mavlink] UDP escuchando 0.0.0.0:14550
+[mavlink][debug] (serial) trazas activas en stderr. Variables: CORENEXUS_MAVLINK
+_DEBUG=1 y/o CORENEXUS_MAVLINK_DEBUG_HEX=N (N>0 implica debug; solo DEBUG=1 → he
+x por defecto 48; DEBUG_HEX=0 sin hex).
+[mavlink] serie abierta /tmp/corenexus_mavlink_test_a_24573 @ [VarMonitor] Confi
+g cargada desde 57600 baud (esperando bytes del emisor en el otro extremo del PT
+Y/cable)
+/opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+[VarMonitor] Config cargada desde /opt/workspace/monitor/data/varmon.conf
+

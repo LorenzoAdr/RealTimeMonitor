@@ -314,7 +314,7 @@ static void handle_client(int client_fd, std::atomic<bool>& running) {
                 ss << ",\"sem_name\":\"" << json_escape(varmon::shm_publisher::get_sem_name()) << "\"";
                 ss << ",\"sem_sidecar_name\":\"" << json_escape(varmon::shm_publisher::get_sem_sidecar_name())
                    << "\"";
-                ss << ",\"shm_layout_version\":2";
+                ss << ",\"shm_layout_version\":" << varmon::shm_publisher::layout_version();
                 const uint32_t sn = varmon::shm_publisher::get_shm_publish_slice_count();
                 const bool sff = varmon::shm_publisher::get_shm_publish_slice_force_full();
                 ss << ",\"shm_publish_slice_n\":" << sn;

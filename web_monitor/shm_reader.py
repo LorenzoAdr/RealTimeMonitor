@@ -71,6 +71,7 @@ MAX_VARS = 2048
 MAGIC = 0x4D524156  # VARM little-endian
 VERSION_V1 = 1
 VERSION_V2 = 2
+VERSION_V3 = 3
 HEADER_V1_SIZE = 32  # magic, version, seq, count, pad, timestamp
 HEADER_V2_SIZE = 64  # + table_off, stride, cap, ring_off, slot_b, depth, pad
 NAME_MAX_LEN = 128
@@ -270,6 +271,7 @@ def _read_snapshot_v2_incremental(
     stride: int,
     state: dict,
     publish_period_sec: float | None = None,
+    shm_version: int = VERSION_V2,
 ) -> dict | None:
     """Reutiliza filas cuyo ROW_PUB_SEQ_OFF no cambió (misma semántica que lectura completa)."""
     stamps: list = state.setdefault("stamps", [])
@@ -311,7 +313,7 @@ def _read_snapshot_v2_incremental(
             ent = rows[i]
         if ent and ent.get("name"):
             result.append(ent)
-    out = {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V2}
+    out = {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": int(shm_version)}
     if publish_period_sec is not None and publish_period_sec > 0.0:
         out["publish_period_sec"] = float(publish_period_sec)
     return out
@@ -363,6 +365,7 @@ def read_snapshot(
             return {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V1}
 
         if version >= VERSION_V2:
+            # v3: mismo layout de tabla/anillo que v2; mirror y ROW_PUB_SEQ se actualizan en cada append.
             if buf.size() < HEADER_V2_SIZE or len(raw) < HEADER_V2_SIZE:
                 return None
             publish_period_sec: float | None = None
@@ -384,6 +387,7 @@ def read_snapshot(
                     stride,
                     row_parse_state,
                     publish_period_sec=publish_period_sec,
+                    shm_version=version,
                 )
             result = []
             for i in range(count):
@@ -395,7 +399,7 @@ def read_snapshot(
                 ent = _decode_v2_row_entry(raw_ent)
                 if ent:
                     result.append(ent)
-            out_v2 = {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": VERSION_V2}
+            out_v2 = {"timestamp": float(timestamp), "data": result, "seq": seq, "shm_version": int(version)}
             if publish_period_sec is not None:
                 out_v2["publish_period_sec"] = publish_period_sec
             return out_v2
@@ -406,6 +410,7 @@ def read_snapshot(
 def sync_v2_ring_read_idx(buf: mmap.mmap, max_vars: int | None) -> bool:
     """Actualiza read_idx = write_idx en filas modo anillo (v2). Requiere mmap PROT_WRITE.
 
+    SHM v3: sin escritura en el mmap (Python solo lectura); no hace nada.
     Devuelve True si en alguna fila write_idx - read_idx superó ring_capacity (muestras sobrescritas).
     """
     cap_m = max_vars if max_vars is not None else MAX_VARS
@@ -417,6 +422,8 @@ def sync_v2_ring_read_idx(buf: mmap.mmap, max_vars: int | None) -> bool:
         return False
     magic, version, _seq, count = struct.unpack(HEADER_FMT, raw[:20])
     if magic != MAGIC or version < VERSION_V2:
+        return False
+    if version >= VERSION_V3:
         return False
     if count > cap_m:
         count = cap_m
@@ -538,10 +545,20 @@ class ShmReader:
     def start(self) -> bool:
         """Abre SHM (y sem si es posible), arranca hilo. False solo si SHM no se pudo abrir. Ver last_error."""
         self._last_error = None
-        # RW: avanzar read_idx en filas anillo v2 sin segundo mmap.
-        fd, buf = _open_shm(self.shm_name, write=True)
+        path = f"/dev/shm/{self.shm_name}"
+        write_mode = True
+        try:
+            with open(path, "rb") as fh:
+                hdr = fh.read(8)
+            if len(hdr) >= 8:
+                magic, ver = struct.unpack_from("<II", hdr, 0)
+                if magic == MAGIC and ver >= VERSION_V3:
+                    write_mode = False
+        except OSError:
+            pass
+        # v2: RW para avanzar read_idx en anillo; v3: solo lectura.
+        fd, buf = _open_shm(self.shm_name, write=write_mode)
         if fd is None or buf is None:
-            path = f"/dev/shm/{self.shm_name}"
             try:
                 exists = os.path.exists(path)
             except OSError:

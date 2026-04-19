@@ -104,10 +104,16 @@ if [[ "${VARMON_BUILD_CORENEXUS:-0}" == "1" ]]; then
     cp -a "$CORENEXUS_ING_SO" "$OUT/bin/"
     echo "[generate_webmonitor_version] Copiado libcorenexus_ingestor_mavlink.so → $OUT/bin/" >&2
   fi
-  if [[ -d "$ROOT/CoreNexus/testing" ]]; then
+  if [[ -f "$ROOT/scripts/mavlink_test_emitter.py" ]]; then
     mkdir -p "$OUT/testing"
-    cp -a "$ROOT/CoreNexus/testing/." "$OUT/testing/"
-    echo "[generate_webmonitor_version] Copiado CoreNexus/testing → $OUT/testing/" >&2
+    cp -a \
+      "$ROOT/scripts/mavlink_test_emitter.py" \
+      "$ROOT/scripts/launch_mavlink_udp.sh" \
+      "$ROOT/scripts/launch_mavlink_serie.sh" \
+      "$ROOT/scripts/launch_mavlink_emitter_serial.sh" \
+      "$ROOT/scripts/launch_corenexus_both.sh" \
+      "$OUT/testing/"
+    echo "[generate_webmonitor_version] Copiado scripts MAVLink de prueba → $OUT/testing/" >&2
   fi
 fi
 

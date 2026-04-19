@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Detiene procesos VarMonitor del USUARIO ACTUAL únicamente (no toca otros UID).
 # Patrones: demo_server, corenexus (hub VarMonitor), web_monitor/app.py, varmonitor-web (PyInstaller), varmon_sidecar,
-# pruebas MAVLink (CoreNexus/testing o web_monitor_version/testing, emisor pymavlink, socat de PTY de prueba).
+# pruebas MAVLink (scripts/launch_mavlink_*.sh o web_monitor_version/testing/, emisor pymavlink, socat de PTY de prueba).
 #
 # Opcional: VARMON_STOP_DRY_RUN=1  → solo lista PIDs, no envía señales.
 # Opcional: VARMON_STOP_FORCE=1    → tras SIGTERM, SIGKILL a los que sigan vivos.
@@ -29,7 +29,7 @@ PATTERNS=(
   'web_monitor[/]app\.py'
   'varmonitor-web'
   'varmon_sidecar'
-  '(CoreNexus|web_monitor_version)[/]testing[/].*launch_mavlink_(udp|serie)\.sh|mavlink_test_emitter\.py|corenexus_mavlink_test_[ab]_|VARMON_MAVLINK_TEST=socat'
+  'scripts[/]launch_mavlink_(udp|serie)\.sh|(CoreNexus|web_monitor_version)[/]testing[/].*launch_mavlink_(udp|serie)\.sh|mavlink_test_emitter\.py|corenexus_mavlink_test_[ab]_|VARMON_MAVLINK_TEST=socat'
 )
 
 collect_pids() {

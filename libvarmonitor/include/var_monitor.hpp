@@ -72,6 +72,14 @@ public:
     bool unregister_var(const std::string& name);
     void unregister_all();
 
+    /**
+     * Marca variable para publicación SHM incremental v2 (`shm_publish_dirty_mode`).
+     * Con SHM v3 activo también hace `append_shm_event` (tiempo wall-clock Unix s).
+     */
+    void mark_dirty(const std::string& name);
+    /** Como mark_dirty pero con instante explícito para v3 (p. ej. un `event_time_sec` por mensaje MAVLink). */
+    void mark_dirty_at(const std::string& name, double event_time_sec);
+
     bool start(int sample_interval_ms = 100);
     void stop();
     bool is_running() const { return running_.load(); }
@@ -110,9 +118,6 @@ public:
     /** Actualiza snapshot de suscripción para caché de export SHM (llama el publisher antes de leer valores). */
     void shm_prepare_export_cache(const std::vector<std::string>& sub, uint64_t subscription_generation);
 
-    /** Marca variable para publicación SHM en modo incremental (`shm_publish_dirty_mode`). Idempotente. */
-    void mark_dirty(const std::string& name);
-
     /** Usado por el publisher SHM: si full_refresh, siempre true; si no, consume una marca dirty. */
     bool shm_should_fetch_for_publish(const std::string& name, bool full_refresh);
 
@@ -131,6 +136,14 @@ public:
 
     /** Escribe snapshot de variables escalares en SHM y señala al lector (sem_post). Llamar desde el lazo RT cada ciclo (ej. 10 ms). */
     void write_shm_snapshot();
+
+    /**
+     * SHM v3 (`shm_layout_version` >= 3): un append por variable al anillo (timestamp + valor, luego índice atómico).
+     * `name` debe estar en la suscripción SHM. `event_time_sec`: mismo reloj que la cabecera SHM (p. ej. Unix desde epoch).
+     */
+    bool append_shm_event(const std::string& name, double event_time_sec, const VarValue& value);
+    /** Lee el valor vía getter y publica un evento v3 (equivale a append_shm_event con el estado actual). */
+    bool append_shm_event_from_current(const std::string& name, double event_time_sec);
 
 private:
     void sample_loop();

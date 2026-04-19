@@ -31,7 +31,10 @@ namespace varmon {
 namespace shm_publisher {
 
 static constexpr uint32_t MAGIC = 0x4D524156u; /* "VARM" little-endian */
-static constexpr uint32_t VERSION = 2u;
+static constexpr uint32_t VERSION_V2 = 2u;
+static constexpr uint32_t VERSION_V3 = 3u;
+/** 2 = snapshot/troceo v2; 3 = append por evento en anillo (misma tabla/arena que v2). */
+static uint32_t g_layout_version = 2u;
 static constexpr size_t NAME_MAX_LEN = 128u;
 /* v2 */
 static constexpr size_t HEADER_V2_SIZE = 64u;
@@ -239,6 +242,14 @@ bool init(size_t max_vars) {
     else
         g_default_export_mode = MODE_EXPORT_SNAPSHOT;
 
+    g_layout_version = get_config_uint("shm_layout_version", 2);
+    if (g_layout_version < 2u)
+        g_layout_version = 2u;
+    if (g_layout_version > 3u)
+        g_layout_version = 3u;
+    if (g_layout_version >= 3u)
+        g_default_export_mode = MODE_EXPORT_RING;
+
     g_ring_arena_offset = HEADER_V2_SIZE + g_max_vars * TABLE_ROW_SIZE;
     const size_t ring_arena_size = g_max_vars * g_ring_depth * RING_SLOT_BYTES;
     if (g_ring_arena_offset > SIZE_MAX - ring_arena_size) {
@@ -305,8 +316,9 @@ bool init(size_t max_vars) {
     std::memset(g_shm_ptr, 0, g_segment_size);
 
     char* h = static_cast<char*>(g_shm_ptr);
+    const uint32_t file_ver = (g_layout_version >= 3u) ? VERSION_V3 : VERSION_V2;
     memcpy(h, &MAGIC, 4);
-    memcpy(h + 4, &VERSION, 4);
+    memcpy(h + 4, &file_ver, 4);
     uint64_t zero64 = 0;
     uint32_t zero32 = 0;
     memcpy(h + 8, &zero64, 8);
@@ -326,9 +338,10 @@ bool init(size_t max_vars) {
     }
 
     g_active = true;
-    std::cout << "[VarMonitor] SHM v2 listo: /dev/shm/" << g_shm_name << " sem " << g_sem_name
-              << " sidecar_sem " << g_sem_sidecar_name << " (" << g_max_vars << " vars, ring_depth=" << g_ring_depth
-              << ", " << (g_segment_size / 1024) << " KiB)\n";
+    std::cout << "[VarMonitor] SHM v" << (g_layout_version >= 3u ? 3 : 2) << " listo: /dev/shm/" << g_shm_name
+              << " sem " << g_sem_name << " sidecar_sem " << g_sem_sidecar_name << " (" << g_max_vars
+              << " vars, ring_depth=" << g_ring_depth << ", layout=" << g_layout_version << ", "
+              << (g_segment_size / 1024) << " KiB)\n";
     return true;
 }
 
@@ -363,6 +376,7 @@ void shutdown() {
     g_last_pub_valid.clear();
     g_last_pub_type.clear();
     g_last_pub_val.clear();
+    g_layout_version = 2u;
 }
 
 static std::string row_name_cstr(const char* row) {
@@ -433,8 +447,30 @@ static void push_ring_sample(char* arena_base, char* row, double ts, double val)
     std::memcpy(row + ROW_MIRROR_OFF, &val, 8);
 }
 
+/** v3: escribe ts+valor en la ranura w%cap y recién entonces incrementa write_idx con release. */
+static void push_ring_sample_event_atomic(char* arena_base, char* row, double ts, double val) {
+    uint32_t cap = 0;
+    std::memcpy(&cap, row + ROW_RING_CAP_OFF, 4);
+    if (cap == 0)
+        return;
+    uint32_t rel = 0;
+    std::memcpy(&rel, row + ROW_RING_REL_OFF, 4);
+    std::atomic_ref<uint64_t> wref(*reinterpret_cast<uint64_t*>(row + ROW_WRITE_IDX_OFF));
+    const uint64_t w = wref.load(std::memory_order_relaxed);
+    const size_t slot = static_cast<size_t>(w % cap);
+    char* slot_ptr = arena_base + rel + slot * RING_SLOT_BYTES;
+    std::memcpy(slot_ptr, &ts, 8);
+    std::memcpy(slot_ptr + 8, &val, 8);
+    wref.fetch_add(1, std::memory_order_release);
+    std::memcpy(row + ROW_MIRROR_OFF, &val, 8);
+}
+
 void write_snapshot(VarMonitor* mon) {
     if (!g_active || !g_shm_ptr || !mon || !g_sem) return;
+    if (g_layout_version >= 3u) {
+        /* v3: publicación por append_scalar_event; write_snapshot no hace barrido. */
+        return;
+    }
 
     const bool perf_on = g_perf_collect.load(std::memory_order_relaxed);
     auto perf_pt = std::chrono::steady_clock::now();
@@ -779,6 +815,57 @@ void append_perf_json(std::ostringstream& ss) {
         ss << "{\"id\":\"" << ids[i] << "\",\"last_us\":" << g_perf_us[i].load(std::memory_order_relaxed) << "}";
     }
     ss << "]";
+}
+
+bool append_scalar_event(VarMonitor* mon, const std::string& name, double event_time_sec, double value_as_double,
+                         uint8_t type_byte) {
+    if (!g_active || !g_shm_ptr || name.empty())
+        return false;
+    if (g_layout_version < 3u)
+        return false;
+    if (mon) {
+        if (!mon->get_var(name).has_value())
+            return false;
+    }
+
+    uint32_t row_index = UINT32_MAX;
+    std::lock_guard<std::mutex> lock(g_subscription_mutex);
+    for (uint32_t i = 0; i < g_subscription.size(); ++i) {
+        if (g_subscription[i] == name) {
+            row_index = i;
+            break;
+        }
+    }
+    if (row_index == UINT32_MAX || static_cast<size_t>(row_index) >= g_max_vars)
+        return false;
+
+    char* h = static_cast<char*>(g_shm_ptr);
+    char* arena = h + g_ring_arena_offset;
+    const uint32_t nrows = static_cast<uint32_t>(std::min(g_subscription.size(), g_max_vars));
+    std::memcpy(h + 16, &nrows, 4);
+
+    char* row = h + HEADER_V2_SIZE + static_cast<size_t>(row_index) * TABLE_ROW_SIZE;
+    std::memset(row, 0, NAME_MAX_LEN);
+    const size_t nl = std::min(name.size(), NAME_MAX_LEN);
+    std::memcpy(row, name.c_str(), nl);
+    row[ROW_MODE_OFF] = MODE_EXPORT_RING;
+    row[ROW_TYPE_OFF] = type_byte;
+    std::memcpy(row + ROW_VALUE_OFF, &value_as_double, 8);
+    ensure_ring_meta(row, row_index);
+
+    push_ring_sample_event_atomic(arena, row, event_time_sec, value_as_double);
+
+    const uint64_t seq =
+        std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t*>(h + 8)).fetch_add(1, std::memory_order_relaxed) + 1;
+    std::memcpy(h + 24, &event_time_sec, 8);
+    row_write_pub_seq(row, seq);
+
+    post_shm_readers();
+    return true;
+}
+
+uint32_t layout_version() {
+    return g_layout_version;
 }
 
 } // namespace shm_publisher

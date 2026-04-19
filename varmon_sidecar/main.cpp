@@ -40,6 +40,7 @@ namespace {
 constexpr uint32_t kMagic = 0x4D524156u;
 constexpr uint32_t kVersionV1 = 1u;
 constexpr uint32_t kVersionV2 = 2u;
+constexpr uint32_t kVersionV3 = 3u;
 constexpr size_t kNameMaxLen = 128u;
 constexpr size_t kEntrySizeV1 = kNameMaxLen + 1 + 8;
 constexpr size_t kHeaderV1Size = 32u;
@@ -962,6 +963,72 @@ static bool read_ring_slot_at(const uint8_t* arena, size_t arena_size, uint32_t 
 }
 
 /**
+ * SHM v3: drenaje por variable (eventos no alineados entre columnas). TSV largo: time_s \\t name \\t value.
+ */
+static int v3_drain_ring_events(uint8_t* base, size_t map_size, uint32_t max_vars, const std::vector<std::string>& col_names,
+                                RecordingLayoutCache& layout_cache, std::vector<uint64_t>& last_w_per_col,
+                                const std::function<double(double)>& row_time_fn, FILE* out, ShmHealthEmitter& health) {
+    if (!layout_cache.valid ||
+        !recording_layout_verify_names(base, col_names, layout_cache)) {
+        if (!recording_layout_rebuild(base, map_size, max_vars, col_names, layout_cache)) {
+            recording_layout_invalidate(layout_cache);
+            return 0;
+        }
+    }
+    if (last_w_per_col.size() != col_names.size())
+        last_w_per_col.assign(col_names.size(), 0u);
+    uint32_t ring_arena_off = 0;
+    std::memcpy(&ring_arena_off, base + kHeaderRingArenaOff, 4);
+    if (static_cast<size_t>(ring_arena_off) >= map_size) return 0;
+    const uint8_t* arena = base + ring_arena_off;
+    const size_t arena_size = map_size - static_cast<size_t>(ring_arena_off);
+
+    int emitted = 0;
+    for (size_t ci = 0; ci < col_names.size(); ++ci) {
+        const auto it = layout_cache.name_to_row_off.find(col_names[ci]);
+        if (it == layout_cache.name_to_row_off.end() || it->second == kRecordingBadOff) continue;
+        const size_t off = it->second;
+        if (off + kTableRowV2 > map_size) continue;
+        const uint8_t* row = base + off;
+        if (row[kRowModeOff] != kModeExportRing) continue;
+        uint32_t cap = 0;
+        uint32_t rel = 0;
+        std::memcpy(&rel, row + kRowRingRelOff, 4);
+        std::memcpy(&cap, row + kRowRingCapOff, 4);
+        if (cap == 0) continue;
+        uint64_t w = 0;
+        std::memcpy(&w, row + kRowWriteIdxOff, 8);
+        uint64_t lw = last_w_per_col[ci];
+        if (w <= lw) continue;
+        if (w - lw > cap) {
+            health.emit_ring_loss();
+            lw = w - cap;
+        }
+        const uint8_t type_byte = row[kRowTypeOff];
+        for (uint64_t k = lw; k < w; ++k) {
+            double ts = 0;
+            double val = 0;
+            if (!read_ring_slot_at(arena, arena_size, rel, cap, k, ts, val)) break;
+            const double t_rel = row_time_fn(ts);
+            std::string line;
+            line.reserve(96);
+            char tbuf[32];
+            const int tn = std::snprintf(tbuf, sizeof(tbuf), "%.6f", t_rel);
+            if (tn > 0) line.append(tbuf, static_cast<size_t>(tn));
+            line.push_back('\t');
+            line += col_names[ci];
+            line.push_back('\t');
+            append_tsv_cell(line, type_byte, val);
+            line.push_back('\n');
+            if (std::fwrite(line.data(), 1, line.size(), out) != line.size()) return emitted;
+            ++emitted;
+        }
+        last_w_per_col[ci] = w;
+    }
+    return emitted;
+}
+
+/**
  * Núcleo replay anillo v2: con mapa nombre→offset precargado (grabación) la fase 20 es O(k); con líneas TSV no hay
  * SnapMap por muestra. out_snap XOR out_lines debe estar activo.
  */
@@ -1573,6 +1640,11 @@ int main(int argc, char** argv) {
     }
     close(fd);
 
+    uint32_t shm_file_ver = 0;
+    if (map_size >= 8)
+        std::memcpy(&shm_file_ver, static_cast<const uint8_t*>(p) + 4, 4);
+    const bool recording_v3 = (shm_file_ver >= kVersionV3);
+
     sem_t* sem = sem_open(sem_name.c_str(), O_RDWR);
     if (sem == SEM_FAILED) {
         std::fprintf(stderr, "sem_open %s: %s (modo polling)\n", sem_name.c_str(), std::strerror(errno));
@@ -1594,11 +1666,15 @@ int main(int argc, char** argv) {
     }
     setvbuf(out, nullptr, _IOFBF, 1024 * 1024);
 
-    /* Cabecera TSV: time_s + columnas (solo escalares desde SHM) */
+    /* Cabecera TSV: ancho (v2) o largo time_s+name+value (v3 eventos). */
     std::ostringstream hdr;
-    hdr << "time_s";
-    for (const auto& n : col_names) hdr << '\t' << n;
-    hdr << '\n';
+    if (recording_v3)
+        hdr << "time_s\tname\tvalue\n";
+    else {
+        hdr << "time_s";
+        for (const auto& n : col_names) hdr << '\t' << n;
+        hdr << '\n';
+    }
     std::string hdr_line = hdr.str();
     if (std::fwrite(hdr_line.data(), 1, hdr_line.size(), out) != hdr_line.size()) {
         std::fprintf(stderr, "escritura cabecera falló\n");
@@ -1631,6 +1707,7 @@ int main(int argc, char** argv) {
     for (const auto& cn : col_names) {
         if (!cn.empty()) rec_column_set.insert(cn);
     }
+    std::vector<uint64_t> v3_last_w;
 
     auto write_status = [&]() {
         if (status_path.empty()) return;
@@ -1672,6 +1749,62 @@ int main(int argc, char** argv) {
     while (!g_stop.load()) {
         const auto* base = static_cast<const uint8_t*>(p);
         using sc_clock = std::chrono::steady_clock;
+        uint32_t shm_ver_loop = 0;
+        if (map_size >= 8)
+            std::memcpy(&shm_ver_loop, base + 4, 4);
+
+        if (recording_v3 && shm_ver_loop >= kVersionV3) {
+            if (sem) {
+                auto t_sem_a = sc_clock::now();
+                (void)sem_timedwait_secs(sem, 0.01);
+                if (sc_perf) sc_perf->record(0, SidecarPerf::micros(t_sem_a, sc_clock::now()));
+                drain_sem_accumulated_posts(sem);
+            } else {
+                usleep(10000);
+            }
+            if (g_stop.load()) break;
+
+            auto row_time_s_v3 = [&](double ts_sample) -> double {
+                if (!std::isfinite(ts_sample)) return 0.0;
+                if (!std::isfinite(t_epoch)) {
+                    t_epoch = ts_sample;
+                    last_t_rel_written = 0.0;
+                    return 0.0;
+                }
+                double x = ts_sample - t_epoch;
+                if (!std::isfinite(x) || x < 0.0) x = 0.0;
+                if (last_t_rel_written >= 0.0 && x <= last_t_rel_written) x = last_t_rel_written + 1e-6;
+                last_t_rel_written = x;
+                return x;
+            };
+            const std::function<double(double)> row_time_fn_v3 = [&](double ts_sample) {
+                return row_time_s_v3(ts_sample);
+            };
+
+            uint64_t cur_seq_v3 = 0;
+            if (!read_shm_seq(base, map_size, cur_seq_v3)) continue;
+            if (v2_any_ring_overflow(base, map_size, max_vars)) health.emit_ring_loss();
+
+            uint8_t* mbase_v3 = static_cast<uint8_t*>(p);
+            if (!recording_shm_header_matches_cache(layout_cache, base, map_size) ||
+                !recording_layout_verify_names(base, col_names, layout_cache)) {
+                if (!recording_layout_rebuild(base, map_size, max_vars, col_names, layout_cache))
+                    recording_layout_invalidate(layout_cache);
+            }
+            const int n_em = v3_drain_ring_events(mbase_v3, map_size, max_vars, col_names, layout_cache, v3_last_w,
+                                                  row_time_fn_v3, out, health);
+            if (n_em > 0) {
+                rows += static_cast<uint64_t>(n_em);
+                last_seq = cur_seq_v3;
+                have_seq = true;
+                if (!status_path.empty() && (rows - last_status_rows >= 64 || rows == 1)) {
+                    last_status_rows = rows;
+                    write_status();
+                }
+            }
+            continue;
+        }
+
         if (sem) {
             auto t_sem_a = sc_clock::now();
             bool got = sem_timedwait_secs(sem, 1.0);

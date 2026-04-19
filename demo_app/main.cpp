@@ -1,4 +1,5 @@
 #include "var_monitor.hpp"
+#include "shm_publisher.hpp"
 #include <iostream>
 #include <cmath>
 #include <csignal>
@@ -812,7 +813,15 @@ int main() {
                 }
             }
         }
-        monitor.write_shm_snapshot(); /* Publicar snapshot en SHM para lectores (ej. Python) */
+        /* v2: snapshot periódico; v3: un append por variable con el mismo instante (demo actualiza punteros sin mark_dirty). */
+        const double ts_wall =
+            std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        if (varmon::shm_publisher::layout_version() < 3u)
+            monitor.write_shm_snapshot();
+        else {
+            for (const auto& nm : monitor.list_var_names())
+                (void)monitor.append_shm_event_from_current(nm, ts_wall);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
