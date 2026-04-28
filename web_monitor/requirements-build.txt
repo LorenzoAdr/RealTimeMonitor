@@ -1,0 +1,2 @@
+# Solo para empaquetar el binario (máquina de build). No hace falta en runtime del destino.
+pyinstaller>=6.0

@@ -1,0 +1,31 @@
+{
+  "ids": {
+    "arinc": false,
+    "m1553": false,
+    "replay_alias": false,
+    "anomaly": false,
+    "segments": false,
+    "parquet": false,
+    "replay_ref_alarms": false,
+    "analysis_report": false,
+    "mavlink_scan": false
+  },
+  "hooks": {
+    "arincImportValidation": false,
+    "replayAlias": false,
+    "m1553Api": false,
+    "arincFormatExtras": false
+  },
+  "ui": {
+    "fileEdit": false,
+    "gitWorkspace": false,
+    "terminal": false,
+    "flightViz": false,
+    "mavlinkScan": false,
+    "protocolRegistry": false
+  },
+  "build": {
+    "demo_server": true,
+    "corenexus": false
+  }
+}

@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <!--VARMON_HEAD_INJECT-->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VarMonitor</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/style.css?v=50">
+</head>
+<body class="theme-light">
+    <div id="authOverlay" class="auth-overlay" style="display:none">
+        <div class="auth-modal">
+            <h2 id="authTitle">Contraseña</h2>
+            <p id="authPrompt" class="auth-prompt">El monitor requiere contraseña para conectar.</p>
+            <input type="password" id="authPasswordInput" class="auth-input" placeholder="Contraseña" autocomplete="current-password">
+            <button type="button" id="authSubmitBtn" class="btn-primary">Entrar</button>
+        </div>
+    </div>
+    <div id="sensitiveAuthOverlay" class="auth-overlay" style="display:none" aria-modal="true" role="dialog" aria-labelledby="sensitiveAuthTitle">
+        <div class="auth-modal auth-modal--sensitive">
+            <div class="auth-modal-row auth-modal-row--title">
+                <h2 id="sensitiveAuthTitle">Acceso restringido</h2>
+            </div>
+            <div class="auth-modal-row auth-modal-row--input">
+                <label class="visually-hidden" for="sensitivePasswordInput">Contraseña de ingeniería</label>
+                <input type="password" id="sensitivePasswordInput" class="auth-input auth-input--sensitive" placeholder="Contraseña" autocomplete="current-password">
+            </div>
+            <div class="auth-modal-row auth-modal-row--actions">
+                <button type="button" id="sensitiveAuthCancelBtn" class="btn-small">Cancelar</button>
+                <button type="button" id="sensitiveAuthSubmitBtn" class="btn-primary">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="modePickerOverlay" class="mode-picker-overlay" style="display:none" aria-hidden="true">
+        <div id="modePickerBackdrop" class="mode-picker-backdrop" role="presentation"></div>
+        <div class="mode-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="modePickerTitle">
+            <h2 id="modePickerTitle" class="mode-picker-title">Elegir modo</h2>
+            <div id="modePickerGrid" class="mode-picker-grid"></div>
+            <button type="button" id="modePickerCloseBtn" class="btn-small mode-picker-close">Cerrar</button>
+        </div>
+    </div>
+
+    <header>
+        <div class="header-left">
+            <h1>VarMonitor</h1>
+            <span id="connectionStatus" class="status disconnected">Desconectado</span>
+            <div id="headerModeControls" class="header-mode-controls mode-prominent">
+                <div class="mode-header-inline">
+                    <button type="button" id="modeMenuBtn" class="btn-mode-menu">Modo</button>
+                    <span id="modeCurrentLabel" class="mode-current-label" aria-live="polite"></span>
+                </div>
+            </div>
+            <span id="varCount" class="var-count"></span>
+        </div>
+        <div id="advancedStatsStrip" class="advanced-stats-strip" style="display:none" aria-hidden="true">
+            <div class="adv-block" title="RAM: Py/C++ son procesos aparte. «HTML» aquí es solo el heap JS (V8), no la RAM total del proceso del navegador que ves en el monitor del portátil (GPU, WebGL/Plotly, cachés nativas, fragmentación; Chromium a menudo no devuelve páginas al SO).">
+                <span class="adv-label">RAM</span>
+                <span id="advRamHtml" class="adv-val" title="Solo heap JavaScript (V8) de esta pestaña. El monitor del sistema muestra todo el proceso del navegador, suele ser mucho mayor.">HTML: —</span>
+                <span id="advRamPython" class="adv-val" title="RSS del proceso Python (FastAPI/uvicorn). Independiente del navegador (launch_ui).">Py: —</span>
+                <span id="advRamCpp" class="adv-val" title="RAM del proceso C++ (vía UDS), si está disponible">C++: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">Mon.</span>
+                <span id="advMonCount" class="adv-val" title="Variables en la lista de monitorización (backend; varias pestañas → máximo entre sesiones WS)">vars: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">CPU</span>
+                <span id="advCpuPython" class="adv-val" title="Backend Python">Py: —</span>
+                <span id="advCpuCpp" class="adv-val" title="Proceso C++">C++: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">Red</span>
+                <span id="advNetMbMsg" class="adv-val">MB/msg: —</span>
+                <span id="advNetMsgS" class="adv-val">msg/s: —</span>
+                <span id="advNetMbS" class="adv-val">MB/s: —</span>
+            </div>
+            <div class="adv-block">
+                <span class="adv-label">UI</span>
+                <span id="advUiRenderMs" class="adv-val">render: —</span>
+                <span id="advUiFps" class="adv-val">fps: —</span>
+                <span id="advUiPts" class="adv-val">pts: —</span>
+                <span id="advShmCycle" class="adv-val" title="">ciclo SHM: —</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <button id="arincDbLiveIndicator" class="btn-small arinc-db-live-indicator" type="button" title="BD ARINC">ARINC BD</button>
+            <div id="mavlinkScanSplitBtn" class="header-scan-split" title="Escaneo MAVLink">
+                <button class="btn-small" type="button" data-vm-mavlink-scan-main title="Abrir último escaneo / lanzar escaneo">SCAN</button>
+                <button class="btn-small" type="button" data-vm-mavlink-scan-rescan title="Repetir escaneo">&#8635;</button>
+            </div>
+            <button id="docsBtn" class="btn-small" type="button" title="Documentación">Docs</button>
+            <button id="logBtn" class="btn-small" type="button" title="Registro del servidor (Python y opcionalmente C++)">Log</button>
+            <button id="perfBtn" class="btn-small" type="button" title="Rendimiento por fases (activa medición al abrir; también con estadísticas avanzadas)">Perf</button>
+            <button id="helpBtn" class="btn-help" title="Ayuda">?</button>
+            <div id="offlineControls" class="offline-controls" style="display:none">
+                <div class="offline-controls-line offline-controls-line--recordings">
+                <button id="loadLocalTsvBtn" class="btn-small" title="Cargar archivo TSV o Parquet local en Run A">Cargar</button>
+                <input type="file" id="localTsvInput" accept=".tsv,.csv,.txt,.parquet,text/tab-separated-values,text/csv,text/plain,application/vnd.apache.parquet" style="display:none">
+                <label id="recordingSelectLabel">Run A:
+                    <select id="recordingSelectA">
+                        <option value="">(sin grabaciones)</option>
+                    </select>
+                </label>
+                <button id="openRemoteBrowserForAnalysisBtn" class="btn-small btn-folder" type="button" title="Abrir explorador de archivos del servidor">&#128193;</button>
+                <button id="loadServerRecordingBtn" class="btn-small" title="Cargar grabación seleccionada del servidor">Cargar</button>
+                <button id="loadServerRecordingsMultiBtn" class="btn-small" type="button" title="Seleccionar varias grabaciones para análisis comparativo">Cargar varias…</button>
+                <span id="offlineDatasetStatus" class="offline-dataset-status offline-empty">Sin archivo cargado</span>
+                <span id="replayAliasLoadBadge" class="replay-alias-load-badge" style="display:none"></span>
+                <button type="button" id="replayAliasBtn" class="btn-small" style="display:none">Alias replay</button>
+                <button id="offlineSafeModeBadge" class="offline-safe-badge" style="display:none" type="button">Modo seguro</button>
+                <span id="offlinePluginMount" class="offline-plugin-mount" aria-live="polite"></span>
+                </div>
+                <div class="unitary-test-row">
+                    <span id="unitaryTestLabel">Test unitario</span>
+                    <input type="text" id="unitaryTestNameInput" maxlength="64" placeholder="nombre" class="unitary-test-name-input" pattern="[a-zA-Z0-9_-]+" title="Nombre del paquete (letras, números, _ y -)">
+                    <button type="button" id="unitaryTestExportBtn" class="btn-small" title="Copiar la grabación seleccionada en Run A y el layout actual a recordings/unitary_test/">Exportar</button>
+                    <select id="unitaryTestSelect" class="unitary-test-select"><option value="">—</option></select>
+                    <button type="button" id="unitaryTestLoadBtn" class="btn-small" title="Aplicar plantilla y cargar la referencia del paquete">Cargar</button>
+                </div>
+            </div>
+            <span class="monitor-cols-label">Cols:</span>
+            <button id="monitorColsAddBtn" class="btn-small" title="Añadir columna">+</button>
+            <button id="monitorColsRemoveBtn" class="btn-small" title="Quitar columna">-</button>
+            <button id="settingsBtn" class="btn-settings" title="Ajustes">&#9881;</button>
+            <div id="settingsPanel" class="settings-panel" style="display:none">
+                <div class="settings-group">
+                    <div class="settings-section-title">Plantillas de estado</div>
+                    <div class="monitor-menu-row template-row">
+                        <select id="dashboardTemplateSelect" title="Plantillas dashboard"></select>
+                        <button id="templateSaveBtn" class="btn-small" title="Guardar layout actual como plantilla">💾 Guardar</button>
+                        <button id="templateLoadBtn" class="btn-small" title="Cargar plantilla seleccionada">📂 Cargar</button>
+                    </div>
+
+                    <div class="settings-section-title">General</div>
+                    <div id="portControl" class="port-control">
+                        <label id="instanceLabel">Instancia:
+                            <select id="portSelect" class="port-select"></select>
+                        </label>
+                        <button id="reconnectBtn" class="btn-small" title="Reconectar con la instancia seleccionada">Conectar</button>
+                    </div>
+                    <label id="pollLabel">Rel act:
+                        <input type="number" id="intervalInput" value="5" min="1" max="100" step="1" title="Actualizar interfaz cada N ciclos (1 = cada ciclo, 5 = por defecto)">
+                    </label>
+                    <label><span id="langLabel">Idioma:</span>
+                        <select id="langSelect">
+                            <option value="es">Español</option>
+                            <option value="en">English</option>
+                        </select>
+                    </label>
+                    <label><span id="themeLabel">Tema:</span>
+                        <select id="themeSelect">
+                            <option value="light" selected>Claro</option>
+                            <option value="dark">Oscuro</option>
+                        </select>
+                    </label>
+                    <div class="notification-permission-row">
+                        <button type="button" id="notificationPermissionBtn" class="btn-small">Notificaciones…</button>
+                        <span id="notificationPermissionStatus" class="notification-permission-status"></span>
+                    </div>
+                    <label id="visualBufferLabel">Buffer visual:
+                        <select id="timeWindow">
+                            <option value="10" selected>10s</option>
+                            <option value="30">30s</option>
+                            <option value="60">1 min</option>
+                            <option value="120">2 min</option>
+                        </select>
+                    </label>
+                    <div class="settings-section-title">Layout y rendimiento</div>
+                    <div class="monitor-menu-row">
+                        <button id="layoutUndoBtn" class="btn-small" title="Deshacer cambios de layout">↶ Undo</button>
+                        <button id="layoutRedoBtn" class="btn-small" title="Rehacer cambios de layout">↷ Redo</button>
+                    </div>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="adaptiveLoadCheckbox" checked>
+                        <span>Carga adaptativa</span>
+                    </label>
+                    <label class="settings-adv-checkbox">Snapshot frames:
+                        <input type="number" id="snapshotFramesInput" min="2" step="1" value="40">
+                    </label>
+
+                    <div class="settings-section-title" id="recordingFormatTitle">Formato de grabación</div>
+                    <label id="recordingFormatLabel">Formato:
+                        <select id="recordingFormatSelect" title="Formato de archivo para grabación de variables">
+                            <option value="tsv">TSV</option>
+                        </select>
+                    </label>
+                    <span id="recordingFormatInfo" class="settings-hint">Formato tabular (TSV) compatible con cualquier hoja de cálculo.</span>
+
+                    <!-- Botón de gestión avanzada al final -->
+                    <button id="adminStorageBtn" class="btn-small" title="Abrir gestión avanzada de archivos y puertos">Gestión avanzada…</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div id="recordPathToast" class="record-path-toast" style="display:none" role="status">
+        <span id="recordPathLabel">Guardado en:</span>
+        <code id="recordPathText"></code>
+        <button id="recordPathAnalyzeBtn" class="btn-small record-path-analyze-btn" style="display:none" title="Abrir este archivo en modo análisis manteniendo el layout">Analizar este archivo</button>
+    </div>
+    <div id="adminStorageOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal" style="max-width:920px; width:min(92vw,920px)">
+            <h3>Gestión avanzada de archivos</h3>
+            <div class="help-body">
+                <div class="settings-group" style="grid-template-columns: 1fr 1fr;">
+                    <div class="settings-section-title" style="grid-column: span 2;">UI y análisis (global)</div>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="sendFileOnFinishCheckbox" title="Al terminar grabación o alarma, enviar fichero al navegador para descarga">
+                        <span id="sendFileOnFinishLabel">Enviar fichero al terminar</span>
+                    </label>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="advInfoCheckbox" title="Mostrar RAM y carga de red en el header">
+                        <span id="advInfoLabel">Adv info</span>
+                    </label>
+                    <label class="settings-adv-checkbox" id="offlineWindowSpanLabel" style="display:none">
+                        <span>Ventana análisis (s):</span>
+                        <input type="number" id="offlineWindowSpanInput" min="1" max="20" step="1" value="3" title="Ancho de cada ventana de lectura desde TSV en modo análisis (solo monitorización)">
+                    </label>
+                    <label class="settings-adv-checkbox">Buffer visual por defecto (s):
+                        <input type="number" id="defaultVisualBufferInput" min="1" max="7200" step="1" value="10" title="Valores altos aumentan RAM del navegador; use con cuidado. varmon.conf: visual_buffer_sec">
+                    </label>
+                    <label class="settings-adv-checkbox">Umbral carga completa (MB):
+                        <input type="number" id="offlineFullLoadMaxMbInput" min="5" step="1" value="100">
+                    </label>
+                    <label class="settings-adv-checkbox">Preview máximo (MB):
+                        <input type="number" id="offlinePreviewMbInput" min="1" max="8" step="1" value="2">
+                    </label>
+                    <label class="settings-adv-checkbox">Filas preview:
+                        <input type="number" id="offlinePreviewRowsInput" min="500" step="500" value="10000">
+                    </label>
+                    <label class="settings-adv-checkbox">Rango preview (s):
+                        <input type="number" id="offlinePreviewSpanSecInput" min="5" step="5" value="45">
+                    </label>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="offlineAllowForceFullLoadCheckbox">
+                        <span>Permitir forzar carga completa</span>
+                    </label>
+                    <label class="admin-full-row">Config:
+                        <input id="adminConfigPath" type="text" readonly>
+                        <button id="adminConfigPathBrowseBtn" class="btn-small btn-folder" type="button" title="Abrir explorador">&#128193;</button>
+                    </label>
+                    <label class="admin-full-row">Recordings:
+                        <input id="adminRecordingsPath" type="text" readonly>
+                        <button id="adminRecordingsPathBrowseBtn" class="btn-small btn-folder" type="button" title="Abrir explorador">&#128193;</button>
+                    </label>
+                    <label class="admin-full-row">Estado servidor:
+                        <input id="adminStatePath" type="text" readonly>
+                        <button id="adminStatePathBrowseBtn" class="btn-small btn-folder" type="button" title="Abrir explorador">&#128193;</button>
+                    </label>
+                    <div class="admin-runtime-row">
+                        <label>Puerto base Python:
+                            <input id="adminBasePortInput" type="number" min="1" max="65535" step="1" value="8080">
+                        </label>
+                        <label>Incremento puertos:
+                            <input id="adminPortRangeInput" type="number" min="0" max="100" step="1" value="10">
+                        </label>
+                        <button id="adminApplyRuntimeBtn" class="btn-small" title="Guardar cambios de configuración avanzada">Guardar cambios</button>
+                    </div>
+                    <label class="settings-adv-checkbox">
+                        <input type="checkbox" id="adminRecordingsWriteTsvCheckbox" title="Además del Parquet canónico, escribir TSV para interoperabilidad externa (varmon.conf: recordings_write_tsv)">
+                        <span id="recordingsWriteTsvLabel">Generar también TSV</span>
+                    </label>
+                    <div class="settings-section-title admin-plugin-section-title" style="grid-column: span 2;" id="adminPluginSectionTitle">Módulos y plugins</div>
+                    <div id="adminPluginDiagnostics" class="admin-plugin-diagnostics" style="grid-column: span 2;" aria-live="polite"></div>
+                </div>
+                <h4>Recordings / Snapshots / Segmentos</h4>
+                <div class="monitor-menu-row">
+                    <button id="adminDeleteAllRecordingsBtn" class="btn-small" title="Borrar todos los recordings/snapshots/segmentos">🗑 Borrar todos (recordings)</button>
+                </div>
+                <div id="adminRecordingsList" class="notes-list"></div>
+                <h4>Plantillas</h4>
+                <div class="monitor-menu-row">
+                    <button id="adminDeleteAllTemplatesBtn" class="btn-small" title="Borrar todas las plantillas">🗑 Borrar todas (plantillas)</button>
+                </div>
+                <div id="adminTemplatesList" class="notes-list"></div>
+            </div>
+            <div class="help-actions">
+                <button id="adminStorageCloseBtn" class="btn-small">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="remoteFileBrowserOverlay" class="help-overlay" style="display:none" role="dialog" aria-label="Explorador de archivos">
+        <div class="help-modal remote-browser-modal">
+            <h3 id="remoteBrowserOverlayTitle">Explorador de archivos</h3>
+            <div class="remote-browser-toolbar">
+                <button id="remoteBrowserOverlayUpBtn" class="btn-small" type="button" title="Subir">&#8593; Subir</button>
+                <button id="remoteBrowserOverlayMkdirBtn" class="btn-small" type="button" title="Nueva carpeta">&#128193; Nueva carpeta</button>
+                <input id="remoteBrowserOverlayPathInput" type="text" readonly class="remote-browser-path" title="Ruta actual">
+                <button id="remoteBrowserOverlayCloseBtn" class="btn-small" type="button">Cerrar</button>
+            </div>
+            <div id="remoteFileListOverlay" class="remote-file-list"></div>
+            <div id="remoteBrowserSelectFooter" class="remote-browser-select-footer" style="display:none">
+                <span id="remoteBrowserSelectedPathLabel" class="remote-browser-selected-path"></span>
+                <button id="remoteBrowserConfirmSelectBtn" class="btn-small" type="button">Usar esta ruta</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="multiInstanceWarning" class="warning-banner" style="display:none" role="alert">
+        <span id="multiInstanceWarningText"></span>
+        <span id="multiInstanceWarningSuggestedWrap" class="warning-banner-suggested" style="display:none"><span id="multiInstanceWarningSuggestedPrefix"></span><a id="multiInstanceWarningLink" href="#"></a><span id="multiInstanceWarningSuggestedSuffix"></span>.</span>
+        <button type="button" id="multiInstanceWarningClose" class="warning-banner-close" title="Cerrar aviso" aria-label="Cerrar">×</button>
+    </div>
+
+    <div id="varDrawer" class="var-drawer" style="display:none">
+        <div class="var-drawer-inner">
+            <div class="col-header">
+                <h2 id="colBrowserTitle">Variables disponibles</h2>
+                <div class="drawer-actions">
+                    <button id="refreshNames" class="btn-small" title="Refrescar lista de variables">&#8635;</button>
+                    <button id="browserCloseBtn" class="btn-small" title="Cerrar">&times;</button>
+                </div>
+            </div>
+            <div class="search-box">
+                <input type="text" id="varFilter" placeholder="Filtrar variables..." title="Escriba «tsv» para ver solo variables de la grabación TSV cargada">
+            </div>
+            <div class="select-actions">
+                <label class="drawer-agrupar-label" title="Mostrar variables agrupadas por categorías o en lista plana">
+                    <input type="checkbox" id="groupVarsCheckbox"> <span id="groupVarsLabel">Agrupar</span>
+                </label>
+                <button id="collapseAll" class="btn-small" title="Colapsar todo">&#9660;</button>
+                <button id="expandAll" class="btn-small" title="Expandir todo">&#9654;</button>
+                <button id="selectAll" class="btn-small">Sel. todo</button>
+                <button id="selectNone" class="btn-small">Ninguno</button>
+                <button id="addToMonitor" class="btn-primary">+ Monitorizar</button>
+            </div>
+            <div id="varBrowserList" class="var-list"></div>
+        </div>
+    </div>
+
+    <div id="logOverlay" class="help-overlay" style="display:none">
+        <div class="log-modal">
+            <div class="help-modal-header">
+                <h2 id="logPanelTitle">Registro del servidor</h2>
+                <button id="logCloseBtn" class="help-close" type="button">&times;</button>
+            </div>
+            <div class="log-modal-toolbar">
+                <button id="logRefreshBtn" class="btn-small" type="button" title="Actualizar">&#8635; Actualizar</button>
+                <label class="log-auto-refresh-label">
+                    <input type="checkbox" id="logAutoRefreshCheckbox" title="Actualizar cada pocos segundos"> Auto-actualizar
+                </label>
+                <select id="logSourceSelect" title="Fuente del log">
+                    <option value="python">Python</option>
+                    <option value="cpp">C++</option>
+                    <option value="all">Ambos</option>
+                </select>
+                <label class="log-filter-label">
+                    <span id="logFilterLabel">Filtro:</span>
+                    <input type="text" id="logFilterInput" class="log-filter-input" placeholder="Filtrar por texto..." title="Filtrar líneas que contengan este texto">
+                </label>
+                <button id="logSaveBtn" class="btn-small" type="button" title="Descargar registro">&#128190; Guardar</button>
+            </div>
+            <div class="log-viewer-frame">
+                <pre id="logViewerContent" class="log-viewer-content"></pre>
+            </div>
+        </div>
+    </div>
+
+    <div id="perfOverlay" class="help-overlay" style="display:none">
+        <div class="perf-modal">
+            <div class="help-modal-header">
+                <h2 id="perfPanelTitle">Rendimiento (fases)</h2>
+                <button id="perfCloseBtn" class="help-close" type="button">&times;</button>
+            </div>
+            <p class="perf-intro" id="perfIntro">
+                La medición está <strong>desactivada por defecto</strong> y solo corre mientras este panel está abierto o la tira de estadísticas avanzadas está visible.
+                C++ / Python: tiempos por ciclo reciente; navegador: render de gráficos en esta pestaña.
+            </p>
+            <div id="perfPanelBody" class="perf-panel-body"></div>
+        </div>
+    </div>
+
+    <div id="mavlinkScanOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal" style="max-width:min(99vw, 1440px); width:min(99vw, 1440px); max-height:92vh;">
+            <div class="help-modal-header">
+                <h2 id="mavlinkScanTitle">SCAN MAVLink</h2>
+                <button id="mavlinkScanCloseBtn" class="help-close" type="button">&times;</button>
+            </div>
+            <div id="mavlinkScanModalBody" class="help-modal-body"></div>
+        </div>
+    </div>
+
+    <div id="helpOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal">
+            <div class="help-modal-header">
+                <h2 id="helpModalTitle"></h2>
+                <button id="helpCloseBtn" class="help-close">&times;</button>
+            </div>
+            <div id="helpModalBody" class="help-modal-body"></div>
+        </div>
+    </div>
+
+    <div id="docsLangOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal docs-lang-modal">
+            <div class="help-modal-header">
+                <h2 id="docsLangModalTitle"></h2>
+                <button type="button" id="docsLangCloseBtn" class="help-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="docs-lang-body">
+                <p id="docsLangChoose" class="help-intro"></p>
+                <div class="docs-lang-buttons">
+                    <button type="button" id="docsOpenEsBtn" class="btn-primary">Español</button>
+                    <button type="button" id="docsOpenEnBtn" class="btn-primary">English</button>
+                </div>
+                <p id="docsLangNotBuilt" class="docs-lang-not-built" style="display:none"></p>
+            </div>
+        </div>
+    </div>
+
+    <div id="offlineMultiRecordingsOverlay" class="help-overlay" style="display:none">
+        <div class="help-modal" style="max-width:min(92vw, 860px); width:min(92vw, 860px); max-height:88vh;">
+            <div class="help-modal-header">
+                <h2 id="offlineMultiRecordingsTitle">Cargar múltiples grabaciones</h2>
+                <button id="offlineMultiRecordingsCloseBtn" class="help-close" type="button">&times;</button>
+            </div>
+            <div class="help-modal-body">
+                <div class="monitor-menu-row" style="gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+                    <input id="offlineMultiRecordingsFilter" class="analysis-report-input" type="text" placeholder="Filtrar..." style="min-width:260px;flex:1 1 260px;">
+                    <label style="display:inline-flex;align-items:center;gap:6px;">
+                        <input id="offlineMultiUnifyTimeCheckbox" type="checkbox">
+                        <span id="offlineMultiUnifyTimeLabel">Unificar tiempos</span>
+                    </label>
+                    <label id="offlineMultiDeltaWrap" style="display:none;align-items:center;gap:6px;">
+                        <span id="offlineMultiDeltaLabel">Delta t (s)</span>
+                        <input id="offlineMultiDeltaInput" class="analysis-report-input" type="number" min="0.000001" step="0.001" value="0.01" style="width:100px;">
+                    </label>
+                </div>
+                <div id="offlineMultiRecordingsList" style="max-height:52vh;overflow:auto;border:1px solid rgba(0,0,0,0.15);border-radius:8px;padding:8px;"></div>
+                <div class="monitor-menu-row" style="justify-content:flex-end;gap:8px;margin-top:12px;">
+                    <button id="offlineMultiRecordingsCancelBtn" class="btn-small" type="button">Cancelar</button>
+                    <button id="offlineMultiRecordingsLoadBtn" class="btn-small" type="button">Abrir overlay</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="alarmBanner" class="alarm-banner" style="display:none">
+        <div class="alarm-banner-content">
+            <span class="alarm-banner-icon">&#9888;</span>
+            <span id="alarmBannerText" class="alarm-banner-text"></span>
+            <button id="alarmBannerDismiss" class="alarm-banner-dismiss">&times; Cerrar</button>
+        </div>
+    </div>
+
+    <main>
+        <section id="arincRegistryWorkspace" class="arinc-registry-workspace" aria-label="Base de datos de protocolos">
+            <div class="arinc-registry-inner">
+                <div class="protocol-registry-tabs" role="tablist" aria-label="Protocolo">
+                    <button type="button" id="protocolTabArinc" class="protocol-registry-tab protocol-registry-tab--active" role="tab" aria-selected="true" aria-controls="protocolPanelArinc">ARINC 429</button>
+                    <button type="button" id="protocolTabM1553" class="protocol-registry-tab" role="tab" aria-selected="false" aria-controls="protocolPanelM1553">MIL-STD-1553</button>
+                </div>
+                <div id="protocolPanelArinc" class="protocol-registry-panel protocol-registry-panel--active" role="tabpanel" aria-labelledby="protocolTabArinc">
+                <div id="arincDbStatusRow" class="arinc-db-status-row">
+                    <span id="arincDbStatusBadge" class="arinc-db-status-badge arinc-db-status-badge-empty">No hay base de datos cargada</span>
+                    <button type="button" id="arincDbImportBtn" class="btn-small">Importar base de datos</button>
+                    <button type="button" id="arincDbCreateBtn" class="btn-small">Crear nueva</button>
+                    <button type="button" id="arincDbUnloadBtn" class="btn-small btn-danger">Unload BD</button>
+                </div>
+                <div id="arincRegistryMetadataPanel" class="arinc-registry-metadata-panel" style="display:none" aria-label="Metadatos registro ARINC">
+                    <div class="arinc-meta-top-row">
+                        <label class="arinc-meta-field arinc-meta-aircraft-field"><span id="arincMetaAircraftLabel">Proyecto</span>
+                            <input type="text" id="arincMetaAircraftInput" class="arinc-meta-input arinc-meta-aircraft" maxlength="24" autocomplete="off" placeholder="p. ej. A330">
+                        </label>
+                        <label class="arinc-meta-field arinc-meta-notes-wrap"><span id="arincMetaNotesLabel">Notas</span>
+                            <textarea id="arincMetaNotesInput" class="arinc-meta-notes" rows="2"></textarea>
+                        </label>
+                        <button type="button" id="arincMetaSaveBtn" class="btn-small arinc-meta-save-btn">Guardar metadatos</button>
+                    </div>
+                    <div class="arinc-meta-import-line" id="arincMetaImportLine" style="display:none"></div>
+                </div>
+                <div id="arincRegistryBulkBarOuter" class="arinc-registry-bulk-outer" style="display:none;">
+                    <div class="arinc-bulk-toolbar-row">
+                        <button type="button" id="arincBulkToggleBtn" class="btn-small arinc-bulk-toggle-btn" aria-expanded="false" aria-controls="arincRegistryBulkBar">▸ Edición masiva</button>
+                        <button type="button" id="arincBulkSelectFilteredBtn" class="btn-small" title="Marcar todas las entradas que coinciden con el filtro de texto">Seleccionar filtradas</button>
+                        <button type="button" id="arincBulkDeselectAllBtn" class="btn-small" title="Quitar la marca de todas las filas">Deseleccionar todas</button>
+                        <button type="button" id="arincRegistryUndoBtn" class="btn-small" title="Deshacer último cambio en el registro">↶ Deshacer</button>
+                        <button type="button" id="arincRegistryRedoBtn" class="btn-small" title="Rehacer">↷ Rehacer</button>
+                    </div>
+                    <div id="arincRegistryBulkBar" class="arinc-registry-bulk-bar" style="display:none;">
+                    <span class="arinc-bulk-title" id="arincBulkBarTitle">Edición masiva (filas marcadas)</span>
+                    <label class="arinc-bulk-label"><span id="arincBulkGroupLabel">Grupo destino</span>
+                        <select id="arincBulkGroupSelect" class="arinc-bulk-select"></select>
+                    </label>
+                    <button type="button" id="arincBulkMoveBtn" class="btn-small" title="Mover las filas marcadas al grupo elegido">Mover seleccionadas</button>
+                    <span class="arinc-bulk-sep" aria-hidden="true">|</span>
+                    <input type="text" id="arincBulkNamePrefix" class="arinc-bulk-inp" size="8" placeholder="Prefijo" title="Añadir al nombre de la variable">
+                    <input type="text" id="arincBulkNameStripPrefix" class="arinc-bulk-inp" size="8" placeholder="Quitar prefijo" title="Quitar este prefijo del nombre si coincide">
+                    <input type="text" id="arincBulkNameSuffix" class="arinc-bulk-inp" size="8" placeholder="Sufijo" title="Añadir al final del nombre">
+                    <input type="text" id="arincBulkNameFind" class="arinc-bulk-inp" size="10" placeholder="Buscar en nombre" title="Reemplazar en nombre">
+                    <input type="text" id="arincBulkNameReplace" class="arinc-bulk-inp" size="10" placeholder="Reemplazar por" title="Sustituto">
+                    <button type="button" id="arincBulkNameApplyBtn" class="btn-small" title="Aplicar transformaciones de nombre a las filas marcadas">Aplicar a selección</button>
+                    </div>
+                </div>
+                <div id="arincDbImportMenu" class="arinc-db-import-menu" style="display:none">
+                    <button type="button" id="arincDbImportServerBtn" class="btn-small btn-folder" title="Importar .sqlite/.db desde servidor">&#128193; Servidor</button>
+                    <button type="button" id="arincDbImportLocalBtn" class="btn-small">Local</button>
+                    <button type="button" id="arincDbImportCancelBtn" class="btn-small">Cancelar</button>
+                </div>
+                <input type="file" id="arincDbLocalInput" accept=".sqlite,.db,application/vnd.sqlite3,application/octet-stream" style="display:none">
+                <div id="arincRegistryLoadedArea" class="arinc-registry-loaded-area" style="display:none">
+                <div class="arinc-registry-toolbar">
+                    <h2 id="arincRegistryTitle" class="arinc-registry-title">BD aviónica</h2>
+                    <button type="button" id="arincRegistryToggleTableBtn" class="btn-registry-table-toggle">Mostrar registros</button>
+                    <input type="search" id="arincRegistryFilter" class="arinc-registry-filter" placeholder="Filtrar por octal o nombre…">
+                    <span id="arincRegistryCount" class="arinc-registry-count"></span>
+                    <button type="button" id="arincRegistryImportBtn" class="btn-small">Importar CSV/XML…</button>
+                    <button type="button" id="arincRegistryTemplateBtn" class="btn-small">Plantilla CSV</button>
+                    <button type="button" id="arincRegistryToggleDisColBtn" class="btn-small" title="Mostrar u ocultar la columna de bits DIS (por defecto oculta; use «Más» en la fila para ver el detalle)">Col. DIS</button>
+                    <button type="button" id="arincRegistrySaveDbBtn" class="btn-small">Guardar BD</button>
+                    <button type="button" id="arincRegistryClearBtn" class="btn-small btn-danger">Vaciar registro</button>
+                    <label class="arinc-registry-page-size-label"><span id="arincRegistryPageSizeLabel">Filas/pág.</span>
+                        <select id="arincRegistryPageSizeSelect" class="arinc-registry-page-size-select" title="Rendimiento con registros grandes">
+                            <option value="100">100</option>
+                            <option value="200" selected>200</option>
+                            <option value="500">500</option>
+                            <option value="1000">1000</option>
+                            <option value="5000">5000</option>
+                        </select>
+                    </label>
+                    <span id="arincRegistryPager" class="arinc-registry-pager" aria-live="polite"></span>
+                </div>
+                <div class="arinc-registry-server-row" id="arincRegistryServerRow"></div>
+                <input type="file" id="arincRegistryFileInput" accept=".csv,.tsv,.txt,.xml,text/csv,application/xml,text/xml" style="display:none">
+                <input type="file" id="arincRegistryJsonInput" accept=".json,application/json" style="display:none">
+                <div class="arinc-registry-table-wrap arinc-hide-dis-col" id="arincRegistryTableWrap">
+                    <table class="arinc-registry-table" id="arincRegistryTable">
+                        <thead>
+                            <tr>
+                                <th class="arinc-registry-th-cb" title="Selección para edición masiva"><input type="checkbox" id="arincRegistryHeaderSelectCb" aria-label="Seleccionar filas visibles en esta página"></th>
+                                <th>Grupo</th>
+                                <th>Label <button type="button" id="arincRegistrySortOctBtn" class="arinc-sort-header-btn" title="Ordenar por label">▿</button></th>
+                                <th>Nombre <button type="button" id="arincRegistrySortNameBtn" class="arinc-sort-header-btn" title="Ordenar por nombre">▿</button></th>
+                                <th>Enc <button type="button" id="arincRegistrySortEncBtn" class="arinc-sort-header-btn" title="Ordenar por codificación">▿</button></th>
+                                <th>Bits</th>
+                                <th>LSB</th>
+                                <th>Scale</th>
+                                <th>Signed</th>
+                                <th>Units</th>
+                                <th>Min</th>
+                                <th>Max</th>
+                                <th>SSM</th>
+                                <th class="arinc-registry-th-dis" id="arincRegistryThDis">DIS bits</th>
+                                <th id="arincRegistryThActions"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="arincRegistryTableBody"></tbody>
+                    </table>
+                </div>
+                </div>
+                </div>
+                <div id="protocolPanelM1553" class="protocol-registry-panel" role="tabpanel" aria-labelledby="protocolTabM1553">
+                <div id="m1553DbStatusRow" class="arinc-db-status-row">
+                    <span id="m1553DbStatusBadge" class="arinc-db-status-badge arinc-db-status-badge-empty">—</span>
+                    <button type="button" id="m1553DbImportBtn" class="btn-small">Importar base de datos</button>
+                    <button type="button" id="m1553DbCreateBtn" class="btn-small">Crear nueva</button>
+                    <button type="button" id="m1553DbUnloadBtn" class="btn-small btn-danger">Unload BD</button>
+                </div>
+                <div id="m1553RegistryMetadataPanel" class="arinc-registry-metadata-panel" style="display:none" aria-label="Metadatos registro 1553">
+                    <div class="arinc-meta-top-row">
+                        <label class="arinc-meta-field arinc-meta-aircraft-field"><span id="m1553MetaAircraftLabel">Proyecto</span>
+                            <input type="text" id="m1553MetaAircraftInput" class="arinc-meta-input arinc-meta-aircraft" maxlength="24" autocomplete="off">
+                        </label>
+                        <label class="arinc-meta-field arinc-meta-notes-wrap"><span id="m1553MetaNotesLabel">Notas</span>
+                            <textarea id="m1553MetaNotesInput" class="arinc-meta-notes" rows="2"></textarea>
+                        </label>
+                        <button type="button" id="m1553MetaSaveBtn" class="btn-small arinc-meta-save-btn">Guardar metadatos</button>
+                    </div>
+                    <div class="arinc-meta-import-line" id="m1553MetaImportLine" style="display:none"></div>
+                </div>
+                <div id="m1553RegistryBulkBarOuter" class="arinc-registry-bulk-outer" style="display:none;">
+                    <div class="arinc-bulk-toolbar-row">
+                        <button type="button" id="m1553BulkToggleBtn" class="btn-small arinc-bulk-toggle-btn" aria-expanded="false" aria-controls="m1553RegistryBulkBar">▸ Edición masiva</button>
+                        <button type="button" id="m1553BulkSelectFilteredBtn" class="btn-small" title="Marcar entradas que coinciden con el filtro">Seleccionar filtradas</button>
+                        <button type="button" id="m1553BulkDeselectAllBtn" class="btn-small" title="Quitar la marca de todas las filas">Deseleccionar todas</button>
+                        <button type="button" id="m1553RegistryUndoBtn" class="btn-small" title="Deshacer último cambio en el registro">↶ Deshacer</button>
+                        <button type="button" id="m1553RegistryRedoBtn" class="btn-small" title="Rehacer">↷ Rehacer</button>
+                    </div>
+                    <div id="m1553RegistryBulkBar" class="arinc-registry-bulk-bar" style="display:none;">
+                        <span class="arinc-bulk-title" id="m1553BulkBarTitle">Edición masiva (filas marcadas)</span>
+                        <label class="arinc-bulk-label"><span id="m1553BulkRtDeltaLabel">Δ RT</span>
+                            <input type="number" id="m1553BulkRtDelta" class="arinc-bulk-inp" size="4" value="0" min="-31" max="31" title="Sumar al RT de cada fila seleccionada">
+                        </label>
+                        <label class="arinc-bulk-label"><span id="m1553BulkWkDeltaLabel">Δ W (tipo)</span>
+                            <input type="number" id="m1553BulkWkDelta" class="arinc-bulk-inp" size="4" value="0" min="-31" max="31" title="Sumar al tipo de palabra (W) de cada fila">
+                        </label>
+                        <button type="button" id="m1553BulkRtWkApplyBtn" class="btn-small" title="Aplicar Δ RT y Δ W a las filas marcadas (reubica la clave si cambia)">Aplicar Δ RT/W</button>
+                        <span class="arinc-bulk-sep" aria-hidden="true">|</span>
+                        <input type="text" id="m1553BulkNamePrefix" class="arinc-bulk-inp" size="8" placeholder="Prefijo" title="Añadir al nombre ICD">
+                        <input type="text" id="m1553BulkNameStripPrefix" class="arinc-bulk-inp" size="8" placeholder="Quitar prefijo" title="Quitar este prefijo del nombre si coincide">
+                        <input type="text" id="m1553BulkNameSuffix" class="arinc-bulk-inp" size="8" placeholder="Sufijo" title="Añadir al final del nombre">
+                        <input type="text" id="m1553BulkNameFind" class="arinc-bulk-inp" size="10" placeholder="Buscar en nombre" title="Reemplazar en nombre">
+                        <input type="text" id="m1553BulkNameReplace" class="arinc-bulk-inp" size="10" placeholder="Reemplazar por" title="Sustituto">
+                        <button type="button" id="m1553BulkNameApplyBtn" class="btn-small" title="Aplicar transformaciones de nombre a las filas marcadas">Aplicar a selección</button>
+                    </div>
+                </div>
+                <div id="m1553DbImportMenu" class="arinc-db-import-menu" style="display:none">
+                    <button type="button" id="m1553DbImportServerBtn" class="btn-small btn-folder" title="Importar .sqlite/.db desde servidor">&#128193; Servidor</button>
+                    <button type="button" id="m1553DbImportLocalBtn" class="btn-small">Local</button>
+                    <button type="button" id="m1553DbImportCancelBtn" class="btn-small">Cancelar</button>
+                </div>
+                <input type="file" id="m1553DbLocalInput" accept=".sqlite,.db,application/vnd.sqlite3,application/octet-stream" style="display:none">
+                <div id="m1553RegistryLoadedArea" class="arinc-registry-loaded-area" style="display:none">
+                    <div class="arinc-registry-toolbar">
+                        <h2 id="m1553RegistryTitle" class="arinc-registry-title">MIL-STD-1553</h2>
+                        <button type="button" id="m1553RegistryToggleTableBtn" class="btn-registry-table-toggle">Mostrar registros</button>
+                        <input type="search" id="m1553RegistryFilter" class="arinc-registry-filter" placeholder="Filtrar…">
+                        <span id="m1553RegistryCount" class="arinc-registry-count"></span>
+                        <button type="button" id="m1553RegistryImportCsvBtn" class="btn-small">Importar CSV</button>
+                        <button type="button" id="m1553RegistryImportJsonBtn" class="btn-small">Importar JSON</button>
+                        <button type="button" id="m1553RegistryAddRowBtn" class="btn-small">Añadir fila</button>
+                        <button type="button" id="m1553RegistrySaveDbBtn" class="btn-small">Guardar BD</button>
+                        <button type="button" id="m1553RegistryClearBtn" class="btn-small btn-danger">Vaciar registro</button>
+                    </div>
+                    <input type="file" id="m1553RegistryCsvInput" accept=".csv,text/csv" style="display:none">
+                    <input type="file" id="m1553RegistryJsonInput" accept=".json,application/json" style="display:none">
+                    <div class="arinc-registry-table-wrap" id="m1553RegistryTableWrap">
+                        <table class="arinc-registry-table" id="m1553RegistryTable">
+                            <thead>
+                                <tr>
+                                    <th class="arinc-registry-th-cb" title="Selección para edición masiva"><input type="checkbox" id="m1553RegistryHeaderSelectCb" aria-label="Seleccionar filas visibles en esta lista"></th>
+                                    <th>RT</th>
+                                    <th>W</th>
+                                    <th>Sufijo</th>
+                                    <th>Nombre</th>
+                                    <th>Enc</th>
+                                    <th>Bits</th>
+                                    <th>Scale</th>
+                                    <th>Signed</th>
+                                    <th>Unidades</th>
+                                    <th id="m1553RegistryThDis">DIS</th>
+                                    <th id="m1553RegistryThActions"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="m1553RegistryTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                </div>
+            </div>
+        </section>
+        <section id="pluginModeWorkspace" class="plugin-mode-workspace" aria-label="Modo plugin"></section>
+        <div id="defaultMainWorkspace" class="default-main-workspace">
+        <section class="col col-monitor">
+            <div class="col-header col-monitor-header">
+                <div class="col-monitor-header-top">
+                    <h2 id="colMonitorTitle">Monitorizando</h2>
+                    <button id="recordBtn" class="btn-small btn-record" title="Grabar valores a TSV">&#9679; REC</button>
+                    <button id="snapshotBtn" class="btn-small btn-snapshot" title="Crear snapshot TSV (usa el valor de 'Snapshot frames' en Ajustes)">&#128247;</button>
+                    <button id="browserToggleBtn" class="btn-small" title="Añadir variables a monitorizar">+</button>
+                    <button type="button" id="monitorFilterMenuBtn" class="btn-small btn-monitor-filter-toggle" title="Filtro y selección de monitorización" aria-expanded="false" aria-controls="monitorFilterPanel">&#9776;</button>
+                    <button type="button" id="monitorLiveReplayBtn" class="btn-small btn-monitor-replay" title="Replay en vivo (referencia + imposición)">Replay</button>
+                    <span id="recordTimer" class="record-timer" style="display:none">00:00</span>
+                    <span id="monitorLoadingIndicator" class="monitor-loading-indicator" style="display:none">Cargando datos…</span>
+                    <button id="monitorMenuBtn" class="btn-small btn-monitor-menu" title="Más opciones">&#9881;</button>
+                    <div id="monitorMenuPanel" class="monitor-menu-panel" style="display:none">
+                        <div class="monitor-menu-row">
+                            <button id="addComputedBtn" class="btn-small btn-computed" title="Añadir variable computada (expresion)">fx+</button>
+                            <button id="localRecordBtn" class="btn-small" title="Grabar en local desde frontend (incluye virtuales)">● Rec local</button>
+                            <button id="resetConfigBtn" class="btn-small" title="Eliminar toda la configuración">Reset</button>
+                        </div>
+                        <label class="settings-adv-checkbox">Compactado monitor:
+                            <input type="range" id="compactMonitorSlider" min="0" max="100" step="1" value="0" title="Más a la derecha = monitor más compacto">
+                        </label>
+                        <label class="settings-adv-checkbox" id="monitorGridLinesLabel">
+                            <input type="checkbox" id="monitorGridLinesCheck">
+                            <span id="monitorGridLinesLabelSpan">Mostrar cuadrícula</span>
+                        </label>
+                        <label id="hideLevelsLabel">Niveles:
+                            <select id="hideLevelsInput">
+                                <option value="0">0</option>
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                            </select>
+                        </label>
+                        <div id="alarmPanel" class="monitor-alarm-panel">
+                            <div class="alarm-list-header">Alarmas</div>
+                            <div id="alarmBulkRow" class="alarm-bulk-row" title="Umbrales absolutos (live) para varias variables a la vez">
+                                <span class="alarm-bulk-label">Lo</span>
+                                <input type="text" id="alarmBulkLo" class="alarm-bulk-inp" size="5" inputmode="decimal" autocomplete="off">
+                                <span class="alarm-bulk-label">Hi</span>
+                                <input type="text" id="alarmBulkHi" class="alarm-bulk-inp" size="5" inputmode="decimal" autocomplete="off">
+                                <span class="alarm-bulk-label">Hys</span>
+                                <input type="text" id="alarmBulkHys" class="alarm-bulk-inp" size="6" value="0" placeholder="0" autocomplete="off">
+                                <span class="alarm-bulk-label">ms</span>
+                                <input type="text" id="alarmBulkDelayMs" class="alarm-bulk-inp" size="6" value="0" placeholder="0" autocomplete="off">
+                                <button type="button" id="alarmBulkApplySelectionBtn" class="btn-small">Aplicar a selección</button>
+                                <button type="button" id="alarmBulkApplyFilteredBtn" class="btn-small" title="Variables visibles en la lista (filtro)">Aplicar a filtradas</button>
+                            </div>
+                            <div id="alarmList" class="alarm-list"></div>
+                            <button id="alarmClearAllBtn" class="btn-small btn-danger">Eliminar todas</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="monitorFilterPanel" class="monitor-filter-expand" style="display:none" role="region" aria-label="Filtro y orden de la lista de monitorización">
+                    <div id="monitorToolbar" class="monitor-toolbar monitor-toolbar-inline">
+                        <input type="text" id="monitorFilterInput" class="monitor-filter-input" placeholder="Filtrar variables…" title="Filtrar por nombre">
+                        <button type="button" id="monitorSelectAllBtn" class="btn-small" title="Preseleccionar todas las variables visibles (lote)">Seleccionar todas</button>
+                        <button type="button" id="monitorDeselectAllBtn" class="btn-small" title="Quitar preselección">Deseleccionar todas</button>
+                        <span id="monitorSortSep" class="monitor-toolbar-sep" aria-hidden="true">|</span>
+                        <button type="button" id="monitorSortByNameBtn" class="btn-small" title="Ordenar por nombre">Por nombre</button>
+                        <button type="button" id="monitorSortByGraphBtn" class="btn-small" title="Con gráfico asignado primero, luego sin asignar">Con gráfico primero</button>
+                        <button type="button" id="monitorSortByTsvBtn" class="btn-small" title="Variables en el TSV primero, luego el resto">En TSV primero</button>
+                        <span id="monitorFilterStatus" class="monitor-filter-status" aria-live="polite"></span>
+                    </div>
+                </div>
+            </div>
+            <div id="monitorListScroll" class="monitor-list-scroll">
+                <div id="monitorList" class="monitor-list"></div>
+            </div>
+        </section>
+        <div id="monitorResizeHandle" class="monitor-resize-handle" role="separator" aria-orientation="vertical" title="Redimensionar panel de monitorización"></div>
+
+        <section class="col col-plot">
+            <div class="col-header">
+                <div class="col-header-title">
+                    <button id="monitorPaneToggleBtn" class="btn-small plot-monitor-pane-toggle" title="Ocultar columna monitorizada" type="button" aria-label="Ocultar columna monitorizada">&#9664;</button>
+                    <h2 id="colPlotTitle">Gráficos</h2>
+                </div>
+                <div class="plot-controls">
+                    <div id="flightVizDragWrap" class="plot-flight-viz-drag-wrap" title="Arrastrar al área de gráfico">
+                        <button type="button" id="analysisOpenRefFileBtn" class="btn-small plot-open-ref-btn" style="display:none">Ref</button>
+                        <span id="flightVizDragPfd" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0">PFD</span>
+                        <span id="flightVizDrag3d" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0">3D</span>
+                        <span id="flightVizDragJoystick" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0">Mando</span>
+                        <span id="flightVizDragReplay" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0" style="display:none">Grafic replay</span>
+                        <span id="flightVizDragHist" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0" style="display:none">Hist</span>
+                        <span id="flightVizDragFft" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0" style="display:none">FFT</span>
+                        <span id="flightVizDragScan" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0" style="display:none">SCAN</span>
+                        <span id="flightVizDragEntropy" class="btn-small plot-flight-viz-chip" draggable="true" role="button" tabindex="0" style="display:none">Entropía</span>
+                    </div>
+                    <button id="resetTimeBtn" class="btn-small" title="Reiniciar origen de tiempo y borrar historial de gráficos">&#10227; Reset tiempo</button>
+                    <button id="offlineStepPrevBtn" class="btn-small" title="Retroceder un registro en análisis">&#9664;</button>
+                    <button id="offlineStepNextBtn" class="btn-small" title="Avanzar un registro en análisis">&#9654;</button>
+                    <label id="smoothPlotsLabel" title="Ventana de media móvil para suavizar curvas">Suavizado:
+                        <select id="smoothPlotsSelect">
+                            <option value="1" id="smoothOpt1">No</option>
+                            <option value="3" id="smoothOpt3">Suave (3)</option>
+                            <option value="5" id="smoothOpt5" selected>Medio (5)</option>
+                            <option value="7" id="smoothOpt7">Fuerte (7)</option>
+                            <option value="11" id="smoothOpt11">Muy fuerte (11)</option>
+                        </select>
+                    </label>
+                    <button id="resetPlotsBtn" class="btn-small" title="Quitar asignaciones de variables a gráficos">&#128465; Limpiar</button>
+                    <button id="pauseBtn" class="btn-small" title="Pausar/reanudar gráficos">&#9654; Play</button>
+                    <div id="offlinePlaybackControls" class="offline-playback-controls" style="display:none">
+                        <button id="offlinePlayPauseBtn" class="btn-small" title="Reproducir/pausar análisis offline">&#9654; Play</button>
+                        <input id="offlineScrubber" type="range" min="0" max="1000" step="1" value="0" title="Posición temporal del análisis offline">
+                        <label id="offlineSpeedLabel">Vel:
+                            <select id="offlineSpeedSelect">
+                                <option value="0.25">0.25x</option>
+                                <option value="0.5">0.5x</option>
+                                <option value="1" selected>1x</option>
+                                <option value="2">2x</option>
+                                <option value="4">4x</option>
+                            </select>
+                        </label>
+                        <span id="offlineTimeLabel" class="offline-time-label">t=0.000s</span>
+                        <button type="button" id="offlineRecordingTableBtn" class="btn-small offline-recording-table-btn" title="">Tabla</button>
+                    </div>
+                    <div id="liveReplayPlaybackControls" class="offline-playback-controls live-replay-header-playback" style="display:none" aria-label="Reproducción replay en vivo">
+                        <button type="button" id="liveReplayCiBtn" class="btn-small live-replay-ci-btn" title="Condiciones iniciales (mantener inyección)">CI</button>
+                        <button id="liveReplayPlayPauseBtn" type="button" class="btn-small" title="Reproducir/pausar replay en vivo">&#9654; Play</button>
+                        <input id="liveReplayScrubber" type="range" min="0" max="1000" step="1" value="0" title="Tiempo del replay en vivo">
+                        <label id="liveReplaySpeedLabel">Vel:
+                            <select id="liveReplaySpeedSelect">
+                                <option value="0.25">0.25x</option>
+                                <option value="0.5">0.5x</option>
+                                <option value="1" selected>1x</option>
+                                <option value="2">2x</option>
+                                <option value="4">4x</option>
+                            </select>
+                        </label>
+                        <span id="liveReplayTimeLabel" class="offline-time-label">t=0.000s</span>
+                    </div>
+                    <label id="plotVsRefWrap" class="plot-vs-ref-wrap" style="display:none" title="Graficar variables frente a la referencia">
+                        <input type="checkbox" id="plotVsRefCheckbox" class="plot-vs-ref-checkbox"> Frente a ref
+                    </label>
+                    <button id="screenshotBtn" class="btn-small" title="Capturar gráficos como PNG">&#128247; PNG</button>
+                </div>
+            </div>
+            <div class="plot-workspace">
+            <div id="monitorDetailDock" class="monitor-detail-dock monitor-detail-dock--plot-overlay" style="display:none" role="region" aria-label="Consulta y ajuste de variable"></div>
+            <div id="plotArea" class="plot-area" tabindex="0">
+                <div id="plotEmpty" class="plot-empty">Selecciona variables y asígnalas a un gráfico</div>
+                <button id="toggleAdvancedPlotBtn" class="btn-small btn-advanced-plot-toggle" type="button" title="Mostrar u ocultar opciones avanzadas de análisis">Opciones avanzadas</button>
+            </div>
+            </div>
+            <div id="anomalyPanel" class="anomaly-panel" style="display:none">
+                <div class="anomaly-controls">
+                    <label>Δ salto:
+                        <input id="anomalyJumpInput" type="number" step="any" value="1.0">
+                    </label>
+                    <label>Lo:
+                        <input id="anomalyLoInput" type="number" step="any" value="">
+                    </label>
+                    <label>Hi:
+                        <input id="anomalyHiInput" type="number" step="any" value="">
+                    </label>
+                    <label>Max pts:
+                        <input id="downsampleMaxPointsInput" type="number" min="200" step="100" value="2000">
+                    </label>
+                    <button id="runAnomalyScanBtn" class="btn-small">Analizar anomalías</button>
+                    <button id="clearAnomalyScanBtn" class="btn-small">Limpiar</button>
+                    <button id="prevEventBtn" class="btn-small">◀ Evento</button>
+                    <button id="nextEventBtn" class="btn-small">Evento ▶</button>
+                    <button id="addNoteBtn" class="btn-small" title="Añadir nota en el tiempo actual (se elimina con ✕)">+ Nota</button>
+                    <button id="exportPdfReportBtn" class="btn-small">PDF</button>
+                </div>
+                <div id="anomalyList" class="anomaly-list"></div>
+                <div id="notesList" class="notes-list"></div>
+                <div class="segment-controls">
+                    <button id="segStartBtn" class="btn-small" title="Marcar inicio del segmento en el tiempo actual">Inicio seg</button>
+                    <button id="segEndBtn" class="btn-small" title="Marcar fin del segmento en el tiempo actual">Fin seg</button>
+                    <span id="segStartLabel" class="offline-time-label">S: --</span>
+                    <span id="segEndLabel" class="offline-time-label">E: --</span>
+                    <button id="segSaveBtn" class="btn-small" title="Guardar solo la marca del segmento para reutilizarla">Guardar seg</button>
+                    <button id="segCutBtn" class="btn-small" title="Generar TSV recortado entre Inicio/Fin y mostrar opción de analizar">Cortar + descargar</button>
+                    <button id="segCompareBtn" class="btn-small" title="Comparar extremos del segmento usando marcadores A/B">Comparar extremos</button>
+                    <select id="segmentSelect"></select>
+                    <button id="segmentGoBtn" class="btn-small" title="Ir al tiempo inicial del segmento seleccionado">Ir</button>
+                </div>
+                <div id="arincBusHealthPanel" class="arinc-bus-health-panel"></div>
+            </div>
+        </section>
+        </div>
+    </main>
+
+    <div id="arincImportOverlay" class="help-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="arincImportTitle">
+        <div class="help-modal arinc-import-modal">
+            <div class="help-modal-header">
+                <h2 id="arincImportTitle">Importar reg. aviónica</h2>
+                <button type="button" id="arincImportCloseBtn" class="help-close" aria-label="Cerrar">&times;</button>
+            </div>
+            <div class="arinc-import-body">
+                <p id="arincImportHint" class="arinc-import-hint"></p>
+                <div class="arinc-import-mode-row">
+                    <label><input type="radio" name="arincImportMode" value="labels" checked> <span id="arincImportModeLabels">Una fila por label</span></label>
+                    <label><input type="radio" name="arincImportMode" value="dis_bits"> <span id="arincImportModeDis">Filas DIS (bit índice + nombre)</span></label>
+                </div>
+                <div class="arinc-import-group-row" id="arincImportGroupRow">
+                    <label>
+                        <span id="arincImportTargetGroupLabel">Grupo destino</span>
+                        <input type="text" id="arincImportTargetGroupInput" class="arinc-import-target-group-input" placeholder="General">
+                    </label>
+                </div>
+                <div class="arinc-import-split">
+                    <div class="arinc-import-left-col">
+                        <h3 class="arinc-preview-title" id="arincImportMappingTitle">Mapeo de columnas</h3>
+                        <div class="arinc-import-profile-row" id="arincImportProfileRow">
+                            <label><span id="arincImportProfileLabel">Perfil</span>
+                                <select id="arincImportProfileSelect" class="arinc-import-profile-select"></select>
+                            </label>
+                            <input type="text" id="arincImportProfileNameInput" class="arinc-import-profile-name" maxlength="64" placeholder="" autocomplete="off" title="Nombre para guardar el mapeo actual">
+                            <button type="button" id="arincImportProfileSaveBtn" class="btn-small"></button>
+                            <button type="button" id="arincImportProfileDeleteBtn" class="btn-small btn-danger"></button>
+                        </div>
+                        <div id="arincImportMappingScroll" class="arinc-import-mapping-scroll"></div>
+                    </div>
+                    <div class="arinc-import-right-col">
+                        <div id="arincImportRowPreviewWrap" class="arinc-import-row-preview-wrap" style="display:none">
+                            <h3 class="arinc-preview-title" id="arincImportRowPreviewTitle">Clasificación por filas</h3>
+                            <p id="arincImportRowPreviewNote" class="arinc-import-row-preview-note" aria-live="polite"></p>
+                            <div class="arinc-import-row-preview-scroll">
+                                <table class="arinc-import-row-preview-table">
+                                    <thead>
+                                        <tr id="arincImportRowPreviewHeadRow">
+                                            <th>#</th>
+                                            <th id="arincImportRowPreviewThKind">Tipo de fila</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="arincImportRowPreviewBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arinc-import-third-col">
+                        <div id="arincImportConflictBlock" class="arinc-import-conflict-block" style="display:none" role="status">
+                            <p id="arincImportConflictMsg" class="arinc-import-conflict-msg"></p>
+                            <ul id="arincImportConflictList" class="arinc-import-conflict-list"></ul>
+                            <div class="arinc-import-conflict-opts">
+                                <label class="arinc-import-dup-label"><input type="radio" name="arincImportDupPolicy" value="skip" checked> <span id="arincImportDupSkipLabel"></span></label>
+                                <label class="arinc-import-dup-label"><input type="radio" name="arincImportDupPolicy" value="overwrite"> <span id="arincImportDupOverwriteLabel"></span></label>
+                            </div>
+                        </div>
+                        <div id="arincImportProDiff" class="arinc-import-pro-diff" style="display:none" role="region" aria-label="Diff Pro"></div>
+                        <div id="arincImportValidationBlock" class="arinc-import-validation-block" style="display:none" role="region"></div>
+                    </div>
+                </div>
+                <div class="arinc-json-merge-row" id="arincJsonMergeRow" style="display:none">
+                    <label><input type="radio" name="arincJsonMerge" value="merge" checked> <span id="arincJsonMergeLabel">Fusionar con el registro actual</span></label>
+                    <label><input type="radio" name="arincJsonMerge" value="replace"> <span id="arincJsonReplaceLabel">Reemplazar todo</span></label>
+                </div>
+                <h3 class="arinc-preview-title" id="arincImportPreviewTitle">Vista previa</h3>
+                <pre id="arincImportPreview" class="arinc-import-preview"></pre>
+                <div class="help-actions arinc-import-actions">
+                    <button type="button" id="arincImportConfirmBtn" class="btn-primary">Confirmar importación</button>
+                    <button type="button" id="arincImportCancelBtn" class="btn-small">Cancelar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="m1553ImportOverlay" class="help-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="m1553ImportTitle">
+        <div class="help-modal arinc-import-modal">
+            <div class="help-modal-header">
+                <h2 id="m1553ImportTitle">Importar MIL-STD-1553</h2>
+                <button type="button" id="m1553ImportCloseBtn" class="help-close" aria-label="Cerrar">&times;</button>
+            </div>
+            <div class="arinc-import-body">
+                <p id="m1553ImportHint" class="arinc-import-hint"></p>
+                <div class="arinc-import-split">
+                    <div class="arinc-import-left-col" id="m1553ImportMappingCol">
+                        <h3 class="arinc-preview-title" id="m1553ImportMappingTitle">Mapeo de columnas</h3>
+                        <div class="arinc-import-profile-row" id="m1553ImportProfileRow">
+                            <label><span id="m1553ImportProfileLabel">Perfil</span>
+                                <select id="m1553ImportProfileSelect" class="arinc-import-profile-select"></select>
+                            </label>
+                            <input type="text" id="m1553ImportProfileNameInput" class="arinc-import-profile-name" maxlength="64" placeholder="" autocomplete="off" title="Nombre para guardar el mapeo actual">
+                            <button type="button" id="m1553ImportProfileSaveBtn" class="btn-small"></button>
+                            <button type="button" id="m1553ImportProfileDeleteBtn" class="btn-small btn-danger"></button>
+                        </div>
+                        <div id="m1553ImportMappingScroll" class="arinc-import-mapping-scroll"></div>
+                    </div>
+                    <div class="arinc-import-right-col">
+                        <div id="m1553ImportRowPreviewWrap" class="arinc-import-row-preview-wrap" style="display:none">
+                            <h3 class="arinc-preview-title" id="m1553ImportRowPreviewTitle">Filas importadas</h3>
+                            <p id="m1553ImportRowPreviewNote" class="arinc-import-row-preview-note" aria-live="polite"></p>
+                            <div class="arinc-import-row-preview-scroll">
+                                <table class="arinc-import-row-preview-table m1553-import-preview-table">
+                                    <thead>
+                                        <tr id="m1553ImportRowPreviewHeadRow"></tr>
+                                    </thead>
+                                    <tbody id="m1553ImportRowPreviewBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arinc-import-third-col">
+                        <div id="m1553ImportConflictBlock" class="arinc-import-conflict-block" style="display:none" role="status">
+                            <p id="m1553ImportConflictMsg" class="arinc-import-conflict-msg"></p>
+                            <ul id="m1553ImportConflictList" class="arinc-import-conflict-list"></ul>
+                            <div class="arinc-import-conflict-opts">
+                                <label class="arinc-import-dup-label"><input type="radio" name="m1553ImportDupPolicy" value="skip" checked> <span id="m1553ImportDupSkipLabel"></span></label>
+                                <label class="arinc-import-dup-label"><input type="radio" name="m1553ImportDupPolicy" value="overwrite"> <span id="m1553ImportDupOverwriteLabel"></span></label>
+                            </div>
+                        </div>
+                        <div id="m1553ImportValidationBlock" class="arinc-import-validation-block" style="display:none" role="region"></div>
+                    </div>
+                </div>
+                <div class="help-actions arinc-import-actions">
+                    <button type="button" id="m1553ImportConfirmBtn" class="btn-primary">Confirmar importación</button>
+                    <button type="button" id="m1553ImportCancelBtn" class="btn-small">Cancelar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="replayAliasOverlay" class="help-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="replayAliasTitle">
+        <div class="help-modal replay-alias-modal">
+            <div class="help-modal-header">
+                <h2 id="replayAliasTitle">Alias de columnas (replay)</h2>
+                <button type="button" id="replayAliasCloseBtn" class="help-close" aria-label="Cerrar">&times;</button>
+            </div>
+            <div class="replay-alias-body">
+                <p id="replayAliasHint" class="replay-alias-hint"></p>
+                <p id="replayAliasLinkStatus" class="replay-alias-link-status" style="display:none"></p>
+                <div id="replayAliasMetaMismatch" class="replay-alias-meta-mismatch" style="display:none" role="status"></div>
+                <label class="replay-alias-disabled-row">
+                    <input type="checkbox" id="replayAliasDisabledCheckbox" />
+                    <span id="replayAliasDisabledLabel">Desactivar alias para esta grabación</span>
+                </label>
+                <div class="replay-alias-toolbar">
+                    <button type="button" id="replayAliasUndoBtn" class="btn-small replay-alias-undo-btn" title="Deshacer cambios en el borrador de alias">↶</button>
+                    <button type="button" id="replayAliasRedoBtn" class="btn-small replay-alias-redo-btn" title="Rehacer">↷</button>
+                    <label class="replay-alias-search-label"><span id="replayAliasSearchLabel">Buscar</span>
+                        <input type="search" id="replayAliasSearchInput" class="replay-alias-search-input" autocomplete="off" />
+                    </label>
+                    <label><span id="replayAliasFilterLabel">Mostrar</span>
+                        <select id="replayAliasFilterSelect" class="replay-alias-filter-select">
+                            <option value="all" id="replayAliasFilterAll">Todas</option>
+                            <option value="mapped" id="replayAliasFilterMapped">Solo renombradas</option>
+                            <option value="unmapped" id="replayAliasFilterUnmapped">Solo sin cambiar</option>
+                            <option value="unknown" id="replayAliasFilterUnknown">Destino no en lista</option>
+                        </select>
+                    </label>
+                    <div class="replay-alias-profile-row">
+                        <label><span id="replayAliasProfileLabel">Plantilla</span>
+                            <select id="replayAliasProfileSelect" class="replay-alias-profile-select"></select>
+                        </label>
+                        <input type="text" id="replayAliasProfileNameInput" class="replay-alias-profile-name" maxlength="64" autocomplete="off" />
+                        <button type="button" id="replayAliasProfileSaveBtn" class="btn-small"></button>
+                        <button type="button" id="replayAliasProfileApplyBtn" class="btn-small"></button>
+                        <button type="button" id="replayAliasProfileDeleteBtn" class="btn-small btn-danger"></button>
+                    </div>
+                    <div class="replay-alias-io-row">
+                        <button type="button" id="replayAliasExportBtn" class="btn-small"></button>
+                        <button type="button" id="replayAliasImportBtn" class="btn-small"></button>
+                        <input type="file" id="replayAliasImportInput" accept=".json,application/json" style="display:none" />
+                    </div>
+                </div>
+                <div id="replayAliasCollision" class="replay-alias-collision" style="display:none" role="alert"></div>
+                <div id="replayAliasDiffWrap" class="replay-alias-diff-wrap">
+                    <div class="replay-alias-diff-col">
+                        <h4 id="replayAliasDiffFileTitle" class="replay-alias-diff-title"></h4>
+                        <ul id="replayAliasDiffFileList" class="replay-alias-diff-list"></ul>
+                    </div>
+                    <div class="replay-alias-diff-mid" aria-hidden="true">→</div>
+                    <div class="replay-alias-diff-col">
+                        <h4 id="replayAliasDiffCanonTitle" class="replay-alias-diff-title"></h4>
+                        <ul id="replayAliasDiffCanonList" class="replay-alias-diff-list"></ul>
+                    </div>
+                </div>
+                <div class="replay-alias-batch-bar">
+                    <span id="replayAliasBatchTitle" class="replay-alias-batch-title"></span>
+                    <label class="replay-alias-batch-cb"><input type="checkbox" id="replayAliasSelectAllFiltered" /> <span id="replayAliasSelectAllLabel">Seleccionar visibles</span></label>
+                    <input type="text" id="replayAliasBatchPrefix" class="replay-alias-batch-input" placeholder="" />
+                    <input type="text" id="replayAliasBatchSuffix" class="replay-alias-batch-input" placeholder="" />
+                    <input type="text" id="replayAliasBatchFind" class="replay-alias-batch-input" placeholder="" />
+                    <input type="text" id="replayAliasBatchReplace" class="replay-alias-batch-input" placeholder="" />
+                    <button type="button" id="replayAliasBatchApplyBtn" class="btn-small"></button>
+                </div>
+                <p id="replayAliasBatchHint" class="replay-alias-batch-hint" role="note"></p>
+                <div class="replay-alias-table-wrap">
+                    <table class="replay-alias-table" id="replayAliasTable">
+                        <thead>
+                            <tr>
+                                <th class="replay-alias-th-cb"><input type="checkbox" id="replayAliasHeaderSelectAll" title="" /></th>
+                                <th id="replayAliasThFile">Columna en fichero</th>
+                                <th id="replayAliasThCanon">Nombre canónico</th>
+                            </tr>
+                        </thead>
+                        <tbody id="replayAliasTableBody"></tbody>
+                    </table>
+                </div>
+                <div class="help-actions replay-alias-actions">
+                    <button type="button" id="replayAliasApplyBtn" class="btn-primary">Aplicar alias</button>
+                    <button type="button" id="replayAliasClearBtn" class="btn-small btn-danger">Quitar alias</button>
+                    <button type="button" id="replayAliasCancelBtn" class="btn-small">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!--VARMON_APP_SCRIPT-->
+</body>
+</html>

@@ -1,0 +1,25 @@
+# Monitor web en contenedor (puerto publicado). Ideal para análisis offline / sin C++ en el host.
+# Para modo live contra el C++ del mismo Linux (UDS + SHM), usa docker-compose.host.yml
+# o: ./scripts/varmon/docker-run.sh host
+#
+# Uso: docker compose up --build
+#      http://localhost:8080
+
+services:
+  web-monitor:
+    build:
+      context: .
+      dockerfile: web_monitor/Dockerfile
+      args:
+        REQUIREMENTS_PATH: web_monitor/requirements-docker.txt
+        APP_COPY: web_monitor
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/varmon.conf:/app/varmon.conf:ro
+      - ./web_monitor/recordings:/app/recordings
+    environment:
+      - VARMON_CONFIG=/app/varmon.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
