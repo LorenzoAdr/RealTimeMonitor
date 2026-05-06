@@ -62,6 +62,22 @@ if PLUGINS_RELEASE:
         hiddenimports += h2
     except Exception as e:
         print(f"[varmonitor-web.spec] collect_all(pyarrow): {e}")
+    # NumPy / SciPy: imports dinámicos + extensiones (.so); sin collect_all PyInstaller suele
+    # omitir scipy.optimize (p. ej. differential_evolution) y fallar en runtime.
+    try:
+        dn, bn, hn = collect_all("numpy")
+        datas += dn
+        binaries += bn
+        hiddenimports += hn
+    except Exception as e:
+        print(f"[varmonitor-web.spec] collect_all(numpy): {e}")
+    try:
+        ds, bs, hs = collect_all("scipy")
+        datas += ds
+        binaries += bs
+        hiddenimports += hs
+    except Exception as e:
+        print(f"[varmonitor-web.spec] collect_all(scipy): {e}")
 
 for pkg in ("uvicorn", "starlette", "fastapi"):
     d, b, h = collect_all(pkg)
